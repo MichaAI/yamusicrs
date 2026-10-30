@@ -21,6 +21,10 @@ use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
 
 pub enum Msg {
+    Lottie {
+        uri: String,
+        comp: Option<crate::render::Composition>,
+    },
     /// Обложка для уведомления о новом треке готова.
     Notify {
         token: Token,
@@ -242,8 +246,6 @@ pub struct WaveUi {
     pub active_name: Option<String>,
     /// Пункты дуги на экране — для мыши.
     pub hits: Vec<(ratatui::layout::Rect, usize)>,
-    /// Кнопки ⏮ ▶ ⏭: прямоугольник и действие (0, 1, 2).
-    pub controls: Vec<(ratatui::layout::Rect, u8)>,
 }
 
 /// Сиды «просто Моей волны».
@@ -285,6 +287,11 @@ pub struct App {
     /// Откуда открыт трек (библиотека/сеть) — до момента, когда он реально зазвучит.
     pending_origins: HashMap<Token, Origin>,
     pub images: Images,
+    pub gfx: crate::render::Gfx,
+    /// Lottie агентов: None — грузится или не удалось.
+    pub lotties: HashMap<String, Option<std::sync::Arc<crate::render::Composition>>>,
+    /// Кнопки ⏮ ▶ ⏭ (в боковой панели): прямоугольник и действие 0/1/2.
+    pub controls: Vec<(ratatui::layout::Rect, u8)>,
     pub theme: ThemeAnim,
     pub fx: EffectManager<&'static str>,
     covers_loading: HashSet<String>,
@@ -389,6 +396,7 @@ impl App {
         let _ = mpris.send(mpris::Update::Volume(volume as f64));
 
         let images = Images::new(cfg.kitty_enabled());
+        let gfx = crate::render::Gfx::new(cfg.gpu && cfg.kitty_enabled());
         let kitty_text = cfg.kitty_text_enabled();
         let mut app = Self {
             tx,
@@ -422,7 +430,6 @@ impl App {
                 active_seeds: None,
                 active_name: None,
                 hits: Vec::new(),
-                controls: Vec::new(),
             },
             wave_phase: 0.0,
             now: None,
@@ -434,6 +441,9 @@ impl App {
             start_paused: None,
             pending_origins: HashMap::new(),
             images,
+            gfx,
+            lotties: HashMap::new(),
+            controls: Vec::new(),
             theme: ThemeAnim::new(),
             fx: EffectManager::default(),
             covers_loading: HashSet::new(),
@@ -751,6 +761,25 @@ impl App {
     /// Иконка агента волны (догружается, если её вытеснили из кеша).
     pub fn want_agent(&mut self, uri: &str) {
         self.fetch_image(agent_key(uri), uri, 200, false);
+    }
+
+    /// Lottie агента (грузится один раз и разбирается в фоне).
+    pub fn want_lottie(&mut self, uri: &str) {
+        if self.lotties.contains_key(uri) {
+            return;
+        }
+        self.lotties.insert(uri.to_string(), None);
+        let uri = uri.to_string();
+        self.spawn(move |c, tx| async move {
+            let comp = async {
+                let bytes = crate::fetch::fetch_bytes(&c, &uri).await.ok()?;
+                tokio::task::spawn_blocking(move || crate::render::Composition::from_slice(&bytes).ok())
+                    .await
+                    .ok()?
+            }
+            .await;
+            let _ = tx.send(Msg::Lottie { uri, comp });
+        });
     }
 
     /// Миниатюра обложки для строки списка (под курсором или мышью).
@@ -1458,6 +1487,11 @@ impl App {
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Authed(Ok((c, s, t))) => self.on_authed(c, s, t),
+            Msg::Lottie { uri, comp } => {
+                if let Some(c) = comp {
+                    self.lotties.insert(uri, Some(std::sync::Arc::new(c)));
+                }
+            }
             Msg::Notify {
                 token,
                 title,
@@ -1971,7 +2005,7 @@ impl App {
             m.row == self.areas.header.y && self.areas.tabs.iter().any(|(a, b)| m.column >= *a && m.column < *b);
         let on_lyric = inside(self.areas.lyrics) && self.lyrics_hits.iter().any(|(y, _)| *y == m.row);
         let on_wave = matches!(self.page().view, View::Wave)
-            && (self.wave.hits.iter().any(|(r, _)| inside(*r)) || self.wave.controls.iter().any(|(r, _)| inside(*r)));
+            && (self.wave.hits.iter().any(|(r, _)| inside(*r)) || self.controls.iter().any(|(r, _)| inside(*r)));
         let pointer = self.hover.is_some()
             || on_tab
             || on_lyric
@@ -2049,19 +2083,7 @@ impl App {
         if matches!(self.page().view, View::Wave) && inside(self.areas.main) {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(a) = self.wave.controls.iter().find(|(r, _)| inside(*r)).map(|c| c.1) {
-                        match a {
-                            0 => self.prev(),
-                            1 => {
-                                if matches!(self.queue.kind, QueueKind::Wave { .. }) {
-                                    self.toggle_pause();
-                                } else {
-                                    self.activate();
-                                }
-                            }
-                            _ => self.next(),
-                        }
-                    } else if let Some(i) = self.wave.hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1) {
+                    if let Some(i) = self.wave.hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1) {
                         if self.page().sel == i {
                             self.activate();
                         } else {
@@ -2095,7 +2117,13 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if inside(self.areas.cover) {
+                if let Some(a) = self.controls.iter().find(|(r, _)| inside(*r)).map(|c| c.1) {
+                    match a {
+                        0 => self.prev(),
+                        1 => self.toggle_pause(),
+                        _ => self.next(),
+                    }
+                } else if inside(self.areas.cover) {
                     // Клик по обложке — «Сцена» и обратно.
                     self.toggle_stage();
                 } else if inside(self.areas.lyrics) {
@@ -2332,6 +2360,17 @@ impl App {
             }
             KeyCode::Char('t') => self.lyrics_mode = !self.lyrics_mode,
             KeyCode::Char('v') => self.toggle_stage(),
+            KeyCode::Char('x') if matches!(self.page().view, View::Wave) => {
+                self.state.agent_stage = !self.state.agent_stage;
+                self.toast(
+                    if self.state.agent_stage {
+                        "Агент: на сцене"
+                    } else {
+                        "Агент: в дуге"
+                    }
+                    .into(),
+                );
+            }
             KeyCode::Char('y') => {
                 if let Some(t) = self.target_track() {
                     crate::ui::term::copy_to_clipboard(&mut self.osc_out, &Self::track_url(&t));

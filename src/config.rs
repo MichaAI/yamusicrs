@@ -21,6 +21,8 @@ pub struct Config {
     pub normalize_target_lufs: f32,
     /// Рисовать обложки через kitty graphics protocol (auto определяется по $TERM).
     pub kitty_images: Option<bool>,
+    /// Рисовать блоб и агентов на видеокарте (иначе — CPU).
+    pub gpu: bool,
     /// Частота кадров анимаций.
     pub fps: u32,
     /// Отправлять историю прослушиваний в Яндекс.
@@ -40,6 +42,7 @@ impl Default for Config {
             normalize: false,
             normalize_target_lufs: -14.0,
             kitty_images: None,
+            gpu: true,
             fps: 30,
             report_plays: true,
         }
@@ -124,6 +127,8 @@ pub struct State {
     pub quality: Option<Quality>,
     /// Что играло при выходе — восстанавливается на паузе при следующем запуске.
     pub resume: Option<Resume>,
+    /// Анимированный агент волны: крупно на сцене (true) или в дуге (false).
+    pub agent_stage: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -12,6 +12,8 @@
         pkgs = nixpkgs.legacyPackages.${system};
         nativeBuildInputs = with pkgs; [ pkg-config rustPlatform.bindgenHook ];
         buildInputs = with pkgs; [ pipewire ];
+        # wgpu подгружает Vulkan/GL на лету — прописываем пути прямо в бинарь (rpath).
+        gpuLibs = pkgs.lib.makeLibraryPath (with pkgs; [ vulkan-loader libGL ]);
       in {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "yamusicrs";
@@ -19,10 +21,12 @@
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           inherit nativeBuildInputs buildInputs;
+          RUSTFLAGS = "-C link-arg=-Wl,-rpath,${gpuLibs}";
         };
 
         devShells.default = pkgs.mkShell {
           inherit buildInputs;
+          RUSTFLAGS = "-C link-arg=-Wl,-rpath,${gpuLibs}";
           nativeBuildInputs = nativeBuildInputs ++ (with pkgs; [ cargo rustc rustfmt clippy rust-analyzer ]);
         };
       });

@@ -54,6 +54,9 @@ pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if !blob_visible {
         app.images.hide_blob();
     }
+    if !on_wave || app.show_help {
+        app.images.drop_live("agent");
+    }
     match &app.screen {
         Screen::Connecting => connecting(f, area, ctx),
         Screen::Login(l) => login(f, area, l, ctx),
@@ -355,6 +358,7 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     app.areas.lyrics = Rect::default();
 
     app.areas.cover = Rect::default();
+    app.controls.clear();
     if app.stage_mode && app.now.is_some() {
         draw_stage(f, body, app, ctx);
         draw_player(f, player, app, ctx);
@@ -473,7 +477,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
         spans.push(Span::styled(format!(" {d}  "), ctx.dim()));
     }
     let (n, bytes) = app.library.stats();
-    let lib = format!("в библиотеке {n} · {:.1} ГБ ", bytes as f64 / 1e9);
+    let lib = format!(
+        "{} · в библиотеке {n} · {:.1} ГБ ",
+        app.gfx.backend(),
+        bytes as f64 / 1e9
+    );
     let used: usize = spans.iter().map(|s| s.content.width()).sum();
     if used + lib.width() < area.width as usize {
         spans.push(Span::raw(" ".repeat(area.width as usize - used - lib.width())));
@@ -698,6 +706,16 @@ fn animated_window(app: &mut App, sel: usize, len: usize, h: usize) -> std::ops:
     shown..(shown + h).min(len)
 }
 
+/// Строка под мышью считается из позиции мыши и того, что сейчас на экране:
+/// после прокрутки колесом мышь стоит, а строки под ней — уже другие.
+fn sync_hover(app: &mut App, area: Rect, start: usize, len: usize) {
+    let (mx, my) = app.mouse;
+    let inside = mx >= area.x && mx < area.x + area.width && my >= area.y && my < area.y + area.height;
+    if app.hover.is_some() || inside {
+        app.hover = inside.then(|| start + (my - area.y) as usize).filter(|r| *r < len);
+    }
+}
+
 fn playing_glyph(ctx: &Ctx, paused: bool) -> String {
     if paused {
         return "⏸".into();
@@ -833,6 +851,7 @@ fn track_list(f: &mut Frame, area: Rect, app: &mut App, tracks: &[Track], ctx: &
     let h = area.height as usize;
     let sel = app.page().sel.min(idx.len().saturating_sub(1));
     let range = animated_window(app, sel, idx.len(), h);
+    sync_hover(app, area, range.start, idx.len());
     let lines: Vec<Line> = range
         .clone()
         .map(|i| track_row(app, ctx, &tracks[idx[i]], idx[i] + 1, area.width as usize, i == sel))
@@ -931,6 +950,7 @@ fn mixed_list(f: &mut Frame, area: Rect, app: &mut App, rows: &[RowKind], ctx: &
     let h = area.height as usize;
     let sel = app.page().sel.min(rows.len().saturating_sub(1));
     let range = animated_window(app, sel, rows.len(), h);
+    sync_hover(app, area, range.start, rows.len());
     let w = area.width as usize;
     let mut n = 0;
     let mut lines = Vec::new();
@@ -1088,7 +1108,9 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
             width: icon_w,
             height: icon_h,
         };
-        match item.icon().map(crate::app::agent_key) {
+        let animated = i == sel && !app.state.agent_stage && live_agent(f, app, item, icon_rect, 128);
+        match item.icon().map(crate::app::agent_key).filter(|_| !animated) {
+            None if animated => {}
             Some(k) if app.images.contains(&k) => app.images.render(&k, icon_rect, f.buffer_mut(), ctx.cell_aspect),
             other => {
                 if other.is_some()
@@ -1168,8 +1190,7 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
 fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate::api::WheelItem>, ctx: &Ctx) {
     let wave_on = matches!(app.queue.kind, QueueKind::Wave { .. });
     let playing = wave_on && app.now.is_some() && !app.player.paused();
-    let [stage, controls, hint] =
-        Layout::vertical([Constraint::Min(6), Constraint::Length(3), Constraint::Length(2)]).areas(area);
+    let [stage, hint] = Layout::vertical([Constraint::Min(6), Constraint::Length(2)]).areas(area);
 
     // Цвет блоба — агент выбранного пресета, второй — палитра обложки играющего трека.
     let agent = sel
@@ -1180,9 +1201,22 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     // Блоб «дышит» быстрее, когда играет.
     let speed = if playing { 1.0 } else { 0.3 };
     app.wave_phase += ctx.dt * speed;
-    let blob_rect = super::kitty::fit_square(stage, ctx.cell_aspect);
-    if !app.images.blob(blob_rect, colors, app.wave_phase) {
-        blob_halfblocks(f, blob_rect, colors, app.wave_phase);
+    // Блоб — живой фон всей правой части.
+    let blob_rect = stage;
+    draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 });
+    // Режим «агент на сцене»: крупная Lottie-анимация выбранного пресета по центру.
+    if app.state.agent_stage
+        && let Some(item) = sel
+    {
+        let h = (stage.height / 3).max(4);
+        let w = ((h as f32) * ctx.cell_aspect).round() as u16;
+        let r = Rect {
+            x: stage.x + stage.width.saturating_sub(w) / 2,
+            y: (stage.y + stage.height / 2).saturating_sub(h + 1),
+            width: w,
+            height: h,
+        };
+        live_agent(f, app, item, r, 256);
     }
 
     let title = if wave_on {
@@ -1204,6 +1238,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
             .map(|ch| {
                 let cw = (ch.width().unwrap_or(1) * sc as usize) as f32;
                 let col = blob_contrast(
+                    &app.images,
                     blob_rect,
                     x + cw / 2.0,
                     y0 as f32 + sc as f32 / 2.0,
@@ -1254,6 +1289,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
 
     contrast_over_blob(
         f,
+        &app.images,
         blob_rect,
         Rect {
             y: ty,
@@ -1265,47 +1301,13 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     );
 
     // Кнопки ⏮ ▶ ⏭ — кликабельные.
-    // Иконки Nerd Font (Material Design): 󰒮 󰐊 󰏤 󰒭. После иконки — пробел: kitty
-    // рисует PUA-значки шире клетки, если справа свободно.
-    let play = if wave_on && !app.player.paused() {
-        "󰏤 "
-    } else {
-        "󰐊 "
-    };
-    let (bw, gap) = (5u16, 4u16);
-    let total = bw * 3 + gap * 2;
-    let x0 = controls.x + controls.width.saturating_sub(total) / 2;
-    app.wave.controls.clear();
-    let buttons = [
-        ("󰒮 ", 0u8, ctx.fg()),
-        (play, 1, Style::new().fg(agent.color())),
-        ("󰒭 ", 2, ctx.fg()),
-    ];
-    for (i, (label, action, style)) in buttons.into_iter().enumerate() {
-        let r = Rect {
-            x: x0 + i as u16 * (bw + gap),
-            y: controls.y,
-            width: bw,
-            height: 3,
-        };
-        f.render_widget(
-            Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))).alignment(Alignment::Center),
-            Rect {
-                y: r.y + 1,
-                height: 1,
-                ..r
-            },
-        );
-        app.wave.controls.push((r, action));
-    }
-
     let hint_line = if app.wave.loading {
         Line::from(vec![
             Span::styled(format!("{} ", ctx.spinner()), ctx.accent()),
             Span::styled("запускаю…", ctx.dim()),
         ])
     } else {
-        Line::styled("Enter — включить · n — дальше · d — мимо", ctx.dim())
+        Line::styled("Enter — включить · n — дальше · d — мимо · x — агент", ctx.dim())
     };
     f.render_widget(
         Paragraph::new(hint_line).alignment(Alignment::Center),
@@ -1318,7 +1320,14 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
 }
 
 /// Цвет текста, читаемый на блобе в точке (x, y) в клетках; None — блоба там почти нет.
-fn blob_contrast(blob: Rect, x: f32, y: f32, colors: [[f32; 3]; 2], t: f32) -> Option<Color> {
+fn blob_contrast(
+    images: &super::kitty::Images,
+    blob: Rect,
+    x: f32,
+    y: f32,
+    colors: [[f32; 3]; 2],
+    t: f32,
+) -> Option<Color> {
     // Примерный фон терминала там, где блоб прозрачный.
     const BG: [f32; 3] = [24.0, 22.0, 30.0];
     let u = (x - blob.x as f32) / blob.width.max(1) as f32 * 2.0 - 1.0;
@@ -1326,7 +1335,10 @@ fn blob_contrast(blob: Rect, x: f32, y: f32, colors: [[f32; 3]; 2], t: f32) -> O
     if !(-1.0..=1.0).contains(&u) || !(-1.0..=1.0).contains(&v) {
         return None;
     }
-    let p = super::kitty::blob_pixel(u, v, colors, t);
+    // Реальный кадр блоба в kitty, иначе — формула фолбэка.
+    let p = images
+        .blob_sample((u + 1.0) / 2.0, (v + 1.0) / 2.0)
+        .unwrap_or_else(|| super::kitty::blob_pixel(u, v, colors, t));
     let a = p[3] / 255.0;
     if a < 0.15 {
         return None;
@@ -1341,7 +1353,14 @@ fn blob_contrast(blob: Rect, x: f32, y: f32, colors: [[f32; 3]; 2], t: f32) -> O
 }
 
 /// Текст поверх блоба: каждой букве — тёмный или белый цвет по яркости того, что под ней.
-fn contrast_over_blob(f: &mut Frame, blob: Rect, text: Rect, colors: [[f32; 3]; 2], t: f32) {
+fn contrast_over_blob(
+    f: &mut Frame,
+    images: &super::kitty::Images,
+    blob: Rect,
+    text: Rect,
+    colors: [[f32; 3]; 2],
+    t: f32,
+) {
     let buf = f.buffer_mut();
     for y in text.y..text.y + text.height {
         for x in text.x..text.x + text.width {
@@ -1349,11 +1368,41 @@ fn contrast_over_blob(f: &mut Frame, blob: Rect, text: Rect, colors: [[f32; 3]; 
             if cell.symbol().trim().is_empty() {
                 continue;
             }
-            if let Some(c) = blob_contrast(blob, x as f32 + 0.5, y as f32 + 0.5, colors, t) {
+            if let Some(c) = blob_contrast(images, blob, x as f32 + 0.5, y as f32 + 0.5, colors, t) {
                 cell.set_fg(c);
             }
         }
     }
+}
+
+/// Блоб/фон: вектором (GPU или CPU) в kitty, иначе полублоками.
+fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, colors: [[f32; 3]; 2], energy: f32) {
+    // Пиксели кадра в пропорциях области: ~256 по ширине.
+    let pw = 256u32;
+    let ph =
+        ((pw as f32 * rect.height as f32 * ctx.cell_aspect / rect.width.max(1) as f32).round() as u32).clamp(16, 512);
+    let params = crate::render::Blob {
+        colors,
+        phase: app.wave_phase,
+        energy,
+    };
+    let (images, gfx) = (&mut app.images, &mut app.gfx);
+    if !images.blob(rect, pw, ph, || gfx.blob(pw, ph, &params)) {
+        blob_halfblocks(f, rect, colors, app.wave_phase);
+    }
+}
+
+/// Анимированный агент (Lottie) в `rect`; пока анимация не загрузилась — false (статичная иконка).
+fn live_agent(f: &mut Frame, app: &mut App, item: &crate::api::WheelItem, rect: Rect, px: u32) -> bool {
+    let Some(uri) = item.animation() else { return false };
+    let Some(Some(comp)) = app.lotties.get(uri).cloned() else {
+        app.want_lottie(uri);
+        return false;
+    };
+    let len = (comp.frames.end - comp.frames.start).max(1.0);
+    let frame = comp.frames.start + (app.started.elapsed().as_secs_f64() * comp.frame_rate) % len;
+    let (images, gfx) = (&mut app.images, &mut app.gfx);
+    images.live("agent", rect, f.buffer_mut(), px, || gfx.lottie(&comp, frame, px))
 }
 
 /// Фолбэк без kitty: тот же блоб полублоками.
@@ -1417,9 +1466,7 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     ];
     let speed = if app.player.paused() { 0.15 } else { 0.6 };
     app.wave_phase += ctx.dt * speed;
-    if !app.images.blob(glow, colors, app.wave_phase) {
-        blob_halfblocks(f, glow, colors, app.wave_phase);
-    }
+    draw_aura(f, app, ctx, glow, colors, if app.player.paused() { 0.0 } else { 1.0 });
     match track.cover_uri() {
         Some(k) if app.images.contains(k) => {
             app.images.render(k, cover, f.buffer_mut(), ctx.cell_aspect);
@@ -1572,6 +1619,27 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     }
     app.areas.info = info;
     draw_info(f, info, app, ctx, &track);
+    // Кнопки управления — в пустой строке между альбомом и плашкой качества.
+    if info.height > 4 {
+        let play = if app.player.paused() { "󰐊 " } else { "󰏤 " };
+        let (bw, gap) = (3u16, 3u16);
+        let x0 = info.x + 1;
+        let y = info.y + 3;
+        let buttons = [("󰒮 ", 0u8, ctx.fg()), (play, 1, ctx.accent()), ("󰒭 ", 2, ctx.fg())];
+        for (i, (label, action, style)) in buttons.into_iter().enumerate() {
+            let r = Rect {
+                x: x0 + i as u16 * (bw + gap),
+                y,
+                width: bw,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))),
+                r,
+            );
+            app.controls.push((r, action));
+        }
+    }
     if app.kitty_text {
         let w = info.width.saturating_sub(1);
         let links = [Some(App::track_url(&track)), artist_url(&track), album_url(&track)];
