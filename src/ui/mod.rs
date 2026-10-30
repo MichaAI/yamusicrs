@@ -58,6 +58,7 @@ async fn event_loop(
     let mut refresh_checked = false;
     let mut last_title = String::new();
     let mut osc = term::OscFilter::default();
+    let mut prev_overlays: Vec<term::Overlay> = Vec::new();
 
     loop {
         tokio::select! {
@@ -125,8 +126,17 @@ async fn event_loop(
         // Картинки и команды размещения уходят в терминал отдельно от текстового диффа.
         app.images.flush(terminal.backend_mut())?;
         // Оверлеи (крупный текст, ссылки) и разовые OSC-команды — поверх готового кадра.
-        if !app.overlays.is_empty() || !app.osc_out.is_empty() {
+        if !app.overlays.is_empty() || !app.osc_out.is_empty() || !prev_overlays.is_empty() {
             let mut out = std::mem::take(&mut app.osc_out);
+            // Исчезнувший крупный текст сам не стирается: пробел в верхней строке блока его убирает.
+            for o in prev_overlays.iter().filter(|o| o.scale > 1 && !app.overlays.contains(o)) {
+                let cols: usize = o.runs.iter().map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str())).sum();
+                let _ = std::io::Write::write_fmt(
+                    &mut out,
+                    format_args!("\x1b[{};{}H\x1b[0m{}", o.y + 1, o.x + 1, " ".repeat(cols * o.scale as usize)),
+                );
+            }
+            prev_overlays = app.overlays.clone();
             for o in &app.overlays {
                 o.write(&mut out);
             }
