@@ -62,6 +62,27 @@ pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
     // OSC-текст пишется поверх готового кадра, поэтому сам перекрыл бы справку и всплывашки.
     let occ = std::mem::take(&mut app.occluders);
+    // Крупный символ, не влезший в экран, kitty переносит на следующую строку — и он остаётся мусором.
+    for o in &mut app.overlays {
+        let mut room = area.right().saturating_sub(o.x) as usize;
+        if o.y + o.scale as u16 > area.bottom() {
+            room = 0;
+        }
+        o.runs.retain_mut(|r| {
+            let cut: String = r
+                .text
+                .chars()
+                .scan(0usize, |used, ch| {
+                    *used += ch.width().unwrap_or(0) * o.scale as usize;
+                    (*used <= room).then_some(ch)
+                })
+                .collect();
+            room = room.saturating_sub(cut.width() * o.scale as usize);
+            r.text = cut;
+            !r.text.is_empty()
+        });
+    }
+    app.overlays.retain(|o| !o.runs.is_empty());
     app.overlays.retain(|o| {
         let w: usize = o.runs.iter().map(|r| r.text.width()).sum();
         let r = Rect {

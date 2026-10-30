@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
-    EnableMouseCapture, Event, EventStream, KeyEventKind,
+    EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::SetTitle;
@@ -70,6 +70,16 @@ async fn event_loop(
         tokio::select! {
             ev = events.next() => {
                 match ev {
+                    // Ctrl+L — перерисовать экран с нуля (если терминал что-то оставил).
+                    Some(Ok(Event::Key(k)))
+                        if k.kind != KeyEventKind::Release
+                            && k.modifiers.contains(KeyModifiers::CONTROL)
+                            && matches!(k.code, KeyCode::Char('l' | 'д')) =>
+                    {
+                        terminal.clear()?;
+                        prev_overlays.clear();
+                        app.images.on_resize();
+                    }
                     Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => match osc.feed(&k) {
                         term::Filtered::Pass => app.on_key(k),
                         term::Filtered::Swallowed => {}
@@ -88,6 +98,9 @@ async fn event_loop(
                     Some(Ok(Event::Resize(..))) => {
                         cell_aspect = kitty::cell_aspect();
                         app.images.on_resize();
+                        // Kitty переразбивает строки при ресайзе, и крупный текст разъезжается: стираем всё.
+                        terminal.clear()?;
+                        prev_overlays.clear();
                     }
                     Some(Err(e)) => return Err(e.into()),
                     None => return Ok(()),
