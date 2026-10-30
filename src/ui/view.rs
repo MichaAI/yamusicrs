@@ -1489,26 +1489,28 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         _ => 1.0,
     };
     let mut sp = vec![Span::styled(left, ctx.dim())];
-    const EIGHTHS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
-    let filled = frac * bar_w as f32;
+    // Пройденное — средняя линия с градиентом, впереди — тонкая, позиция — толстая точка.
+    let head = ((frac * bar_w as f32) as usize).min(bar_w.saturating_sub(1));
     let phase = if paused { 0.0 } else { ctx.t };
     for i in 0..bar_w {
-        let x = i as f32;
         let tcol = i as f32 / bar_w.max(1) as f32;
-        if x + 1.0 <= filled {
+        if i == head && dur > 0.0 {
+            let c = ctx
+                .p
+                .accent
+                .lerp(ctx.p.accent2, tcol)
+                .lerp(Rgb(255.0, 255.0, 255.0), 0.25);
+            sp.push(Span::styled(
+                "●",
+                Style::new().fg(c.color()).add_modifier(Modifier::BOLD),
+            ));
+        } else if i < head {
             let c = if paused {
                 ctx.p.accent.lerp(ctx.p.accent2, tcol).scale(0.7)
             } else {
                 shimmer(ctx.p.accent, ctx.p.accent2, tcol, phase)
             };
-            sp.push(Span::styled("█", Style::new().fg(c.color())));
-        } else if x < filled {
-            let part = ((filled - x) * 8.0) as usize;
-            let c = ctx.p.accent.lerp(ctx.p.accent2, tcol);
-            sp.push(Span::styled(
-                EIGHTHS[part.min(7)].to_string(),
-                Style::new().fg(c.color()),
-            ));
+            sp.push(Span::styled("━", Style::new().fg(c.color())));
         } else {
             let col = if tcol <= buffered {
                 ctx.p.dim.scale(0.55)
