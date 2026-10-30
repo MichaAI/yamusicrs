@@ -54,9 +54,6 @@ pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if !blob_visible {
         app.images.hide_blob();
     }
-    if !on_wave || app.show_help {
-        app.images.drop_live("agent");
-    }
     match &app.screen {
         Screen::Connecting => connecting(f, area, ctx),
         Screen::Login(l) => login(f, area, l, ctx),
@@ -1108,9 +1105,7 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
             width: icon_w,
             height: icon_h,
         };
-        let animated = i == sel && !app.state.agent_stage && live_agent(f, app, item, icon_rect, 128);
-        match item.icon().map(crate::app::agent_key).filter(|_| !animated) {
-            None if animated => {}
+        match item.icon().map(crate::app::agent_key) {
             Some(k) if app.images.contains(&k) => app.images.render(&k, icon_rect, f.buffer_mut(), ctx.cell_aspect),
             other => {
                 if other.is_some()
@@ -1204,20 +1199,6 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     // Блоб — живой фон всей правой части.
     let blob_rect = stage;
     draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 });
-    // Режим «агент на сцене»: крупная Lottie-анимация выбранного пресета по центру.
-    if app.state.agent_stage
-        && let Some(item) = sel
-    {
-        let h = (stage.height / 3).max(4);
-        let w = ((h as f32) * ctx.cell_aspect).round() as u16;
-        let r = Rect {
-            x: stage.x + stage.width.saturating_sub(w) / 2,
-            y: (stage.y + stage.height / 2).saturating_sub(h + 1),
-            width: w,
-            height: h,
-        };
-        live_agent(f, app, item, r, 256);
-    }
 
     let title = if wave_on {
         app.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
@@ -1307,7 +1288,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
             Span::styled("запускаю…", ctx.dim()),
         ])
     } else {
-        Line::styled("Enter — включить · n — дальше · d — мимо · x — агент", ctx.dim())
+        Line::styled("Enter — включить · n — дальше · d — мимо", ctx.dim())
     };
     f.render_widget(
         Paragraph::new(hint_line).alignment(Alignment::Center),
@@ -1338,7 +1319,7 @@ fn blob_contrast(
     // Реальный кадр блоба в kitty, иначе — формула фолбэка.
     let p = images
         .blob_sample((u + 1.0) / 2.0, (v + 1.0) / 2.0)
-        .unwrap_or_else(|| super::kitty::blob_pixel(u, v, colors, t));
+        .unwrap_or_else(|| crate::render::blob_pixel(u, v, colors, t));
     let a = p[3] / 255.0;
     if a < 0.15 {
         return None;
@@ -1392,19 +1373,6 @@ fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, colors: [[f32;
     }
 }
 
-/// Анимированный агент (Lottie) в `rect`; пока анимация не загрузилась — false (статичная иконка).
-fn live_agent(f: &mut Frame, app: &mut App, item: &crate::api::WheelItem, rect: Rect, px: u32) -> bool {
-    let Some(uri) = item.animation() else { return false };
-    let Some(Some(comp)) = app.lotties.get(uri).cloned() else {
-        app.want_lottie(uri);
-        return false;
-    };
-    let len = (comp.frames.end - comp.frames.start).max(1.0);
-    let frame = comp.frames.start + (app.started.elapsed().as_secs_f64() * comp.frame_rate) % len;
-    let (images, gfx) = (&mut app.images, &mut app.gfx);
-    images.live("agent", rect, f.buffer_mut(), px, || gfx.lottie(&comp, frame, px))
-}
-
 /// Фолбэк без kitty: тот же блоб полублоками.
 fn blob_halfblocks(f: &mut Frame, r: Rect, colors: [[f32; 3]; 2], t: f32) {
     let buf = f.buffer_mut();
@@ -1413,7 +1381,7 @@ fn blob_halfblocks(f: &mut Frame, r: Rect, colors: [[f32; 3]; 2], t: f32) {
             let u = x as f32 / r.width.max(1) as f32 * 2.0 - 1.0;
             let px = |row: f32| {
                 let v = row / (r.height as f32 * 2.0) * 2.0 - 1.0;
-                super::kitty::blob_pixel(u, v, colors, t)
+                crate::render::blob_pixel(u, v, colors, t)
             };
             let (top, bot) = (px(y as f32 * 2.0), px(y as f32 * 2.0 + 1.0));
             // Прозрачные места не трогаем — там остаётся фон терминала и текст.
@@ -1618,33 +1586,58 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         }
     }
     app.areas.info = info;
-    draw_info(f, info, app, ctx, &track);
-    // Кнопки управления — в пустой строке между альбомом и плашкой качества.
-    if info.height > 4 {
+    // Кнопки управления — справа от названия и артиста, в рамке на три строки.
+    let box_w = 17u16;
+    let with_box = info.width >= box_w + 16 && info.height >= 3;
+    let text = if with_box {
+        Rect {
+            width: info.width - box_w - 1,
+            ..info
+        }
+    } else {
+        info
+    };
+    draw_info(f, text, app, ctx, &track);
+    if with_box {
+        let r = Rect {
+            x: info.x + info.width - box_w,
+            y: info.y,
+            width: box_w,
+            height: 3,
+        };
+        let b = Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(ctx.p.dim.lerp(ctx.p.accent, 0.3).scale(0.8).color()));
+        let inner = b.inner(r);
+        f.render_widget(b, r);
         let play = if app.player.paused() { "󰐊 " } else { "󰏤 " };
-        let (bw, gap) = (3u16, 3u16);
-        let x0 = info.x + 1;
-        let y = info.y + 3;
         let buttons = [("󰒮 ", 0u8, ctx.fg()), (play, 1, ctx.accent()), ("󰒭 ", 2, ctx.fg())];
+        // Три зоны по ширине рамки — кликабельны целиком.
+        let cell = inner.width / 3;
         for (i, (label, action, style)) in buttons.into_iter().enumerate() {
-            let r = Rect {
-                x: x0 + i as u16 * (bw + gap),
-                y,
-                width: bw,
-                height: 1,
+            let zone = Rect {
+                x: inner.x + i as u16 * cell,
+                y: r.y,
+                width: cell,
+                height: 3,
             };
             f.render_widget(
-                Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))),
-                r,
+                Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))).alignment(Alignment::Center),
+                Rect {
+                    y: inner.y,
+                    height: 1,
+                    ..zone
+                },
             );
-            app.controls.push((r, action));
+            app.controls.push((zone, action));
         }
     }
     if app.kitty_text {
-        let w = info.width.saturating_sub(1);
+        let w = text.width.saturating_sub(1);
         let links = [Some(App::track_url(&track)), artist_url(&track), album_url(&track)];
         for (row, url) in links.into_iter().enumerate() {
-            if let Some(o) = url.and_then(|u| link_cells(f, info.x + 1, info.y + row as u16, w, u)) {
+            if let Some(o) = url.and_then(|u| link_cells(f, text.x + 1, text.y + row as u16, w, u)) {
                 app.overlays.push(o);
             }
         }

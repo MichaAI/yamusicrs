@@ -127,8 +127,6 @@ pub struct State {
     pub quality: Option<Quality>,
     /// Что играло при выходе — восстанавливается на паузе при следующем запуске.
     pub resume: Option<Resume>,
-    /// Анимированный агент волны: крупно на сцене (true) или в дуге (false).
-    pub agent_stage: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

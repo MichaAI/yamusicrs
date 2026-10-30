@@ -428,9 +428,6 @@ pub struct WheelWave {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WheelAgent {
     pub cover: Option<AgentCover>,
-    /// Lottie-анимация агента.
-    #[serde(rename = "animationUri")]
-    pub animation_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -465,10 +462,6 @@ impl WheelItem {
             .trim_start_matches('#');
         let v = u32::from_str_radix(c, 16).ok()?;
         Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
-    }
-
-    pub fn animation(&self) -> Option<&str> {
-        self.data.agent.as_ref()?.animation_uri.as_deref()
     }
 
     pub fn accent(&self) -> bool {

@@ -1,20 +1,9 @@
-//! Рендер векторной графики в RGBA для kitty: блоб/фон и анимированные агенты (Lottie).
-//!
-//! Сцена строится один раз через трейт `velato::RenderSink`, а рисует её либо GPU
-//! (`vello` + `wgpu`, кадр читается обратно из текстуры), либо CPU (`vello_cpu`), если
-//! видеокарты нет или она не поднялась.
-
-mod cpu;
+//! Блоб Моей волны и ореол «Сцены»: шейдер WGSL на видеокарте (wgpu) с откатом на CPU
+//! (та же формула в [`blob_pixel`]). Кадр — непредумноженный RGBA для kitty.
 
 use std::time::Instant;
 
-use velato::RenderSink;
-use velato::vello::kurbo::{Affine, Circle, Point};
-use velato::vello::peniko::{self, Color, Gradient};
-
-pub use velato::Composition;
-
-/// Параметры блоба: два цвета, фаза анимации и «энергия» (0 — спокойно, 1 — играет).
+/// Параметры блоба: цвета (0..255), фаза анимации и «энергия» (0 — спокойно, 1 — играет).
 #[derive(Clone, Copy)]
 pub struct Blob {
     pub colors: [[f32; 3]; 2],
@@ -22,32 +11,35 @@ pub struct Blob {
     pub energy: f32,
 }
 
+impl Blob {
+    /// Три цвета: два заданных и промежуточный между ними.
+    fn palette(&self) -> [[f32; 3]; 3] {
+        let [a, b] = self.colors.map(|c| c.map(|v| v / 255.0));
+        let mid = [0, 1, 2].map(|i| (a[i] + b[i]) * 0.5 * 1.08);
+        [a, b, mid.map(|v| v.min(1.0))]
+    }
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    renderer: velato::vello::Renderer,
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
 }
 
 pub struct Gfx {
     gpu: Option<Gpu>,
-    cpu: cpu::Cpu,
-    lottie: velato::Renderer,
 }
 
 impl Gfx {
-    /// Пытается поднять GPU; если не вышло — тихо работает на CPU.
     pub fn new(want_gpu: bool) -> Self {
         let t = Instant::now();
         let gpu = if want_gpu { pollster::block_on(init_gpu()) } else { None };
         match &gpu {
-            Some(_) => tracing::info!("рендер: GPU ({} мс)", t.elapsed().as_millis()),
-            None => tracing::info!("рендер: CPU (vello_cpu)"),
+            Some(_) => tracing::info!("рендер блоба: GPU ({} мс)", t.elapsed().as_millis()),
+            None => tracing::info!("рендер блоба: CPU"),
         }
-        Self {
-            gpu,
-            cpu: cpu::Cpu::default(),
-            lottie: velato::Renderer::new(),
-        }
+        Self { gpu }
     }
 
     pub fn backend(&self) -> &'static str {
@@ -55,89 +47,94 @@ impl Gfx {
     }
 
     pub fn blob(&mut self, w: u32, h: u32, b: &Blob) -> Vec<u8> {
-        match &mut self.gpu {
-            Some(g) => {
-                let mut scene = velato::vello::Scene::new();
-                draw_blob(&mut scene, w, h, b);
-                g.render(&scene, w, h).unwrap_or_else(|| vec![0; (w * h * 4) as usize])
-            }
-            None => self.cpu.render(w, h, |s| draw_blob(s, w, h, b)),
+        if let Some(g) = &self.gpu
+            && let Some(px) = g.render(w, h, b)
+        {
+            return px;
         }
-    }
-
-    /// Кадр Lottie-анимации, вписанный в квадрат `size`.
-    pub fn lottie(&mut self, comp: &Composition, frame: f64, size: u32) -> Vec<u8> {
-        let k = size as f64 / comp.width.max(comp.height).max(1) as f64;
-        let tf = Affine::scale(k);
-        match &mut self.gpu {
-            Some(g) => {
-                let mut scene = velato::vello::Scene::new();
-                self.lottie.append(comp, frame, tf, 1.0, &mut scene);
-                g.render(&scene, size, size)
-                    .unwrap_or_else(|| vec![0; (size * size * 4) as usize])
-            }
-            None => {
-                let lr = &mut self.lottie;
-                self.cpu.render(size, size, |s| lr.append(comp, frame, tf, 1.0, s))
-            }
-        }
+        cpu_blob(w, h, b)
     }
 }
 
-/// Мягкая «аура»: несколько больших радиальных градиентов гуляют по кругу и перетекают
-/// цветами, сверху — бледный блик. Никаких пикселей: всё векторное и сглаженное.
-fn draw_blob(s: &mut impl RenderSink, w: u32, h: u32, b: &Blob) {
-    let (w, h) = (w as f64, h as f64);
-    let r = w.min(h) * 0.5;
-    let c = Point::new(w / 2.0, h / 2.0);
-    let t = b.phase as f64;
-    let e = 0.6 + 0.4 * b.energy as f64;
-    let col = |i: usize, a: f32| {
-        let k = b.colors[i];
-        Color::from_rgba8(k[0] as u8, k[1] as u8, k[2] as u8, (a * 255.0) as u8)
-    };
-    // (скорость x, скорость y, фаза, радиус, цвет)
-    const BALLS: [(f64, f64, f64, f64, usize); 5] = [
-        (0.31, 0.53, 0.0, 0.62, 0),
-        (0.47, 0.29, 2.1, 0.55, 1),
-        (0.23, 0.41, 4.2, 0.50, 0),
-        (0.39, 0.61, 1.3, 0.45, 1),
-        (0.17, 0.37, 5.1, 0.40, 0),
-    ];
-    for (fx, fy, ph, rr, ci) in BALLS {
-        let p = Point::new(
-            c.x + r * 0.38 * e * (t * fx + ph).sin(),
-            c.y + r * 0.38 * e * (t * fy + ph * 1.7).cos(),
-        );
-        let rad = r * rr * (0.9 + 0.1 * (t * 0.7 + ph).sin());
-        let g = Gradient::new_radial(p, rad as f32).with_stops([
-            (0.0, col(ci, 0.85)),
-            (0.45, col(ci, 0.55)),
-            (1.0, col(ci, 0.0)),
-        ]);
-        s.draw(
-            None,
-            Affine::IDENTITY,
-            &peniko::Brush::Gradient(g),
-            &Circle::new(p, rad),
-        );
+fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
+    let aspect = w as f32 / h.max(1) as f32;
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let u = (x as f32 + 0.5) / w as f32;
+            let v = (y as f32 + 0.5) / h as f32;
+            out.extend(blob_pixel_aspect(u, v, aspect, b).map(|c| c as u8));
+        }
     }
-    // Блик: смещается против движения, даёт ощущение объёма.
-    let hp = Point::new(
-        c.x - r * 0.25 * (t * 0.21).cos(),
-        c.y - r * 0.3 + r * 0.1 * (t * 0.33).sin(),
-    );
-    let hr = r * 0.35;
-    let hl = Gradient::new_radial(hp, hr as f32).with_stops([
-        (0.0, Color::from_rgba8(255, 255, 255, 70)),
-        (1.0, Color::from_rgba8(255, 255, 255, 0)),
-    ]);
-    s.draw(
-        None,
-        Affine::IDENTITY,
-        &peniko::Brush::Gradient(hl),
-        &Circle::new(hp, hr),
-    );
+    out
+}
+
+const BALLS: [[f32; 4]; 5] = [
+    [0.31, 0.53, 0.0, 0.50],
+    [0.47, 0.29, 2.1, 0.43],
+    [0.23, 0.41, 4.2, 0.38],
+    [0.39, 0.61, 1.3, 0.33],
+    [0.17, 0.37, 5.1, 0.30],
+];
+
+fn field(q: [f32; 2], t: f32, e: f32, pal: &[[f32; 3]; 3]) -> (f32, [f32; 3]) {
+    let (mut f, mut acc) = (0.0, [0.0f32; 3]);
+    for (k, b) in BALLS.iter().enumerate() {
+        let amp = 0.30 + 0.12 * e;
+        let c = [amp * (t * b[0] + b[2]).sin(), amp * (t * b[1] + b[2] * 1.7).cos()];
+        let r = b[3] * (0.92 + 0.08 * (t * 0.7 + b[2]).sin());
+        let d2 = (q[0] - c[0]).powi(2) + (q[1] - c[1]).powi(2);
+        let v = (-d2 / (r * r)).exp();
+        f += v;
+        let col = pal[[0, 1, 2][k % 3]];
+        for i in 0..3 {
+            acc[i] += v * col[i];
+        }
+    }
+    (f, acc.map(|a| a / f.max(1e-4)))
+}
+
+/// Пиксель блоба в точке (u, v) ∈ [0,1]² для холста с пропорциями `aspect` (w/h): RGBA 0..255.
+pub fn blob_pixel_aspect(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
+    let pal = b.palette();
+    let (t, e) = (b.phase, b.energy);
+    let mut q = [u * 2.0 - 1.0, v * 2.0 - 1.0];
+    if aspect > 1.0 {
+        q[0] *= aspect;
+    } else {
+        q[1] /= aspect;
+    }
+    let (f, col) = field(q, t, e, &pal);
+    let eps = 0.01;
+    let gx = field([q[0] + eps, q[1]], t, e, &pal).0 - f;
+    let gy = field([q[0], q[1] + eps], t, e, &pal).0 - f;
+    let n = [-gx / eps, -gy / eps, 1.2];
+    let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    let l = [-0.5f32, -0.6, 0.6];
+    let ll = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
+    let light = ((n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / (nl * ll)).clamp(0.0, 1.0);
+    let spec = light.powf(18.0) * 0.18;
+    let ss = |a: f32, b: f32, x: f32| {
+        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let a = (ss(0.30, 1.05, f).max(ss(0.05, 0.6, f) * 0.25) * 0.9).clamp(0.0, 1.0);
+    let rgb = col.map(|c| ((c * (0.78 + 0.32 * light) + spec).clamp(0.0, 1.0)) * 255.0);
+    [rgb[0], rgb[1], rgb[2], a * 255.0]
+}
+
+/// Совместимость со старыми вызовами (квадратный холст, (u, v) ∈ [-1,1]²).
+pub fn blob_pixel(u: f32, v: f32, colors: [[f32; 3]; 2], t: f32) -> [f32; 4] {
+    blob_pixel_aspect(
+        (u + 1.0) / 2.0,
+        (v + 1.0) / 2.0,
+        1.0,
+        &Blob {
+            colors,
+            phase: t,
+            energy: 0.5,
+        },
+    )
 }
 
 async fn init_gpu() -> Option<Gpu> {
@@ -150,26 +147,88 @@ async fn init_gpu() -> Option<Gpu> {
         .await
         .ok()?;
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await.ok()?;
-    let renderer = velato::vello::Renderer::new(
-        &device,
-        velato::vello::RendererOptions {
-            use_cpu: false,
-            antialiasing_support: velato::vello::AaSupport::area_only(),
-            num_init_threads: std::num::NonZeroUsize::new(1),
-            pipeline_cache: None,
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("blob"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("blob.wgsl").into()),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("blob"),
+        layout: Some(&pl),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
         },
-    )
-    .ok()?;
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
     Some(Gpu {
         device,
         queue,
-        renderer,
+        pipeline,
+        layout,
     })
 }
 
 impl Gpu {
-    /// Рендер в текстуру и чтение обратно (vello отдаёт уже непредумноженную альфу).
-    fn render(&mut self, scene: &velato::vello::Scene, w: u32, h: u32) -> Option<Vec<u8>> {
+    fn render(&self, w: u32, h: u32, b: &Blob) -> Option<Vec<u8>> {
+        let pal = b.palette();
+        let mut u = Vec::with_capacity(64);
+        for c in pal {
+            for v in [c[0], c[1], c[2], 1.0] {
+                u.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        for v in [b.phase, b.energy, w as f32 / h.max(1) as f32, 0.0] {
+            u.extend_from_slice(&v.to_le_bytes());
+        }
+        let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&ubuf, 0, &u);
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubuf.as_entire_binding(),
+            }],
+        });
         let size = wgpu::Extent3d {
             width: w,
             height: h,
@@ -182,24 +241,10 @@ impl Gpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        self.renderer
-            .render_to_texture(
-                &self.device,
-                &self.queue,
-                scene,
-                &view,
-                &velato::vello::RenderParams {
-                    base_color: Color::TRANSPARENT,
-                    width: w,
-                    height: h,
-                    antialiasing_method: velato::vello::AaConfig::Area,
-                },
-            )
-            .ok()?;
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -210,6 +255,27 @@ impl Gpu {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
         enc.copy_texture_to_buffer(
             tex.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -229,8 +295,8 @@ impl Gpu {
         let data = slice.get_mapped_range();
         let mut out = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h as usize {
-            let start = y * row as usize;
-            out.extend_from_slice(&data[start..start + (w * 4) as usize]);
+            let s = y * row as usize;
+            out.extend_from_slice(&data[s..s + (w * 4) as usize]);
         }
         drop(data);
         buf.unmap();

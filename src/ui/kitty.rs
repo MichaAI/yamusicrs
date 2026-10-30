@@ -49,7 +49,6 @@ pub struct Images {
     /// Escape-последовательности, которые надо вывести до следующего кадра.
     out: Vec<u8>,
     blob: Option<BlobState>,
-    lives: HashMap<String, Live>,
     /// Последний кадр блоба (w, h, RGBA) — чтобы подбирать цвет текста поверх него.
     blob_frame: Option<(u32, u32, Vec<u8>)>,
     /// Передавать кадры через POSIX shared memory (без base64 в потоке терминала).
@@ -65,17 +64,6 @@ struct BlobState {
     size: (u32, u32),
 }
 
-/// Живая картинка в потоке текста (агент): размер в клетках и в пикселях кадра.
-struct Live {
-    id: u32,
-    cells: (u16, u16),
-    px: u32,
-    last: std::time::Instant,
-}
-
-/// Lottie агентов — ~30 кадров в секунду достаточно.
-const LIVE_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
-
 /// Не чаще ~15 кадров в секунду — блобу больше не нужно.
 const BLOB_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
 
@@ -90,7 +78,6 @@ impl Images {
             by_key: HashMap::new(),
             out: Vec::new(),
             blob: None,
-            lives: HashMap::new(),
             blob_frame: None,
             shm: std::path::Path::new("/dev/shm").is_dir(),
             shm_seq: 0,
@@ -321,41 +308,6 @@ impl Images {
             .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32])
     }
 
-    /// Живая картинка в потоке текста (агент волны): плейсхолдеры + кадры правятся на месте.
-    pub fn live(&mut self, key: &str, rect: Rect, buf: &mut Buffer, px: u32, frame: impl FnOnce() -> Vec<u8>) -> bool {
-        if !self.kitty || rect.width == 0 || rect.height == 0 {
-            return false;
-        }
-        let size = (rect.width, rect.height);
-        let needs_new = self.lives.get(key).is_none_or(|l| l.cells != size || l.px != px);
-        if needs_new {
-            if let Some(old) = self.lives.remove(key) {
-                delete(&mut self.out, old.id);
-            }
-            let id = self.alloc_id();
-            self.send_frame(&format!("a=t,f=32,s={px},v={px},i={id}"), &frame());
-            let _ = write!(self.out, "\x1b_Ga=p,U=1,i={id},c={},r={},C=1,q=2\x1b\\", size.0, size.1);
-            self.lives.insert(
-                key.to_string(),
-                Live {
-                    id,
-                    cells: size,
-                    px,
-                    last: std::time::Instant::now(),
-                },
-            );
-        } else if let Some(l) = self.lives.get_mut(key)
-            && l.last.elapsed() >= LIVE_FRAME
-        {
-            l.last = std::time::Instant::now();
-            let id = l.id;
-            self.send_frame(&format!("a=f,r=1,X=1,f=32,s={px},v={px},i={id}"), &frame());
-        }
-        let id = self.lives[key].id;
-        placeholders(buf, rect, id);
-        true
-    }
-
     /// Кадр RGBA → kitty: через /dev/shm (терминал сам прочитает и удалит объект),
     /// а если не вышло — сжатый zlib прямо в escape-коде.
     fn send_frame(&mut self, head: &str, px: &[u8]) {
@@ -370,13 +322,6 @@ impl Images {
             self.shm = false;
         }
         send_rgba(&mut self.out, &format!("{head},o=z"), &zlib(px));
-    }
-
-    /// Убрать живую картинку, когда она больше не показывается.
-    pub fn drop_live(&mut self, key: &str) {
-        if let Some(l) = self.lives.remove(key) {
-            delete(&mut self.out, l.id);
-        }
     }
 
     /// После ресайза ratatui чистит экран, а вместе с ним kitty удаляет обычное
@@ -403,7 +348,6 @@ impl Images {
                 .values()
                 .flat_map(|i| i.variants.values())
                 .chain(self.blob.as_ref().map(|b| &b.id))
-                .chain(self.lives.values().map(|l| &l.id))
             {
                 write!(w, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")?;
             }
@@ -458,23 +402,6 @@ fn zlib(px: &[u8]) -> Vec<u8> {
     e.finish().unwrap_or_default()
 }
 
-/// Ячейки-плейсхолдеры kitty: символ U+10EEEE + диакритики строки/столбца, цвет = id.
-fn placeholders(buf: &mut Buffer, rect: Rect, id: u32) {
-    let fg = Color::Rgb((id >> 16) as u8, (id >> 8) as u8, id as u8);
-    for row in 0..rect.height.min(DIACRITICS.len() as u16) {
-        for col in 0..rect.width.min(DIACRITICS.len() as u16) {
-            let mut s = String::with_capacity(12);
-            s.push(PLACEHOLDER);
-            s.push(DIACRITICS[row as usize]);
-            s.push(DIACRITICS[col as usize]);
-            if let Some(cell) = buf.cell_mut((rect.x + col, rect.y + row)) {
-                cell.set_symbol(&s).set_fg(fg).set_bg(Color::Reset);
-                cell.modifier = ratatui::style::Modifier::empty();
-            }
-        }
-    }
-}
-
 /// Сырые RGBA-данные кусками по 4096 символов base64.
 fn send_rgba(out: &mut Vec<u8>, head: &str, px: &[u8]) {
     let b64 = base64::engine::general_purpose::STANDARD.encode(px);
@@ -489,32 +416,6 @@ fn send_rgba(out: &mut Vec<u8>, head: &str, px: &[u8]) {
         out.extend_from_slice(chunk);
         out.extend_from_slice(b"\x1b\\");
     }
-}
-
-/// Пиксель блоба в точке (u, v) ∈ [-1, 1]²: RGBA, альфа мягко уходит в ноль к краям.
-/// Четыре «метабола» гуляют по кругу; цвет — смесь двух акцентов по тому, какой шар ближе.
-pub fn blob_pixel(u: f32, v: f32, colors: [[f32; 3]; 2], t: f32) -> [f32; 4] {
-    const BALLS: [(f32, f32, f32, f32, f32); 4] = [
-        (0.31, 0.53, 0.0, 0.48, 0.0),
-        (0.47, 0.29, 2.1, 0.40, 1.0),
-        (0.23, 0.41, 4.2, 0.36, 0.0),
-        (0.39, 0.61, 1.3, 0.30, 1.0),
-    ];
-    let (mut field, mut w2) = (0.0f32, 0.0f32);
-    for (fx, fy, ph, r, which) in BALLS {
-        let cx = 0.38 * (t * fx + ph).sin();
-        let cy = 0.38 * (t * fy + ph * 1.7).cos();
-        let d2 = (u - cx).powi(2) + (v - cy).powi(2);
-        let f = (-d2 / (r * r)).exp();
-        field += f;
-        w2 += f * which;
-    }
-    let mix = (w2 / field.max(1e-4)).clamp(0.0, 1.0);
-    let c = [0, 1, 2].map(|i| colors[0][i] + (colors[1][i] - colors[0][i]) * mix);
-    // Цвет агента как есть (без пересвета в белый), края мягко уходят в прозрачность.
-    let a = ((field - 0.25) / 0.9).clamp(0.0, 1.0);
-    let a = a * a * (3.0 - 2.0 * a) * 0.88;
-    [c[0], c[1], c[2], a * 255.0]
 }
 
 /// Отношение высоты ячейки к ширине по данным терминала.
