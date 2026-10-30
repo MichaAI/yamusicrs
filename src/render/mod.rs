@@ -9,7 +9,7 @@ pub struct Blob {
     pub colors: [[f32; 3]; 4],
     pub phase: f32,
     pub energy: f32,
-    /// Уровней на канал для дизеринга Байера; 0 — без дизеринга.
+    /// Сила дизеринга в ступенях 8 бит; 0 — без дизеринга.
     pub dither: f32,
 }
 
@@ -77,18 +77,16 @@ fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
     out
 }
 
-const BAYER: [f32; 16] = [
-    0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0,
-];
-
-/// Упорядоченный дизеринг (Байер 4×4): цвет и альфа квантуются до `levels` уровней.
-fn dither(p: [f32; 4], x: u32, y: u32, levels: f32) -> [f32; 4] {
-    if levels < 2.0 {
+/// Дизеринг против «колец» на градиентах: шум в `amp` ступеней 8 бит
+/// (interleaved gradient noise — тот же, что в шейдере).
+fn dither(p: [f32; 4], x: u32, y: u32, amp: f32) -> [f32; 4] {
+    if amp <= 0.0 {
         return p;
     }
-    let th = (BAYER[((y % 4) * 4 + x % 4) as usize] + 0.5) / 16.0;
-    let l = levels - 1.0;
-    p.map(|c| ((c / 255.0 * l + th).floor() / l).clamp(0.0, 1.0) * 255.0)
+    let ign = (52.9829189 * (0.06711056 * (x as f32 + 0.5) + 0.00583715 * (y as f32 + 0.5)).fract()).fract();
+    let ign2 = (ign + 0.5).fract();
+    let n = [ign, ign, ign, ign2];
+    [0, 1, 2, 3].map(|i| (p[i] + (n[i] - 0.5) * amp).clamp(0.0, 255.0))
 }
 
 fn smooth(a: f32, b: f32, x: f32) -> f32 {

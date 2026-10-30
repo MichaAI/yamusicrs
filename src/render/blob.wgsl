@@ -4,7 +4,7 @@
 
 struct Params {
     c: array<vec4<f32>, 4>,   // палитра (0..1), уже пастельная
-    p: vec4<f32>,             // phase, energy, aspect (w/h), уровни дизеринга (0 — нет)
+    p: vec4<f32>,             // phase, energy, aspect (w/h), сила дизеринга в ступенях 1/255 (0 — нет)
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -37,7 +37,6 @@ fn ball(k: i32, t: f32, e: f32) -> vec3<f32> {
     return vec3<f32>(amp * cos(a), amp * 0.8 * sin(a * 1.3), 0.09);
 }
 
-const BAYER = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
@@ -71,16 +70,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let edge = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
     let a = body * 0.94 * smoothstep(0.0, 0.12, edge);
     var out = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), a);
-    // Упорядоченный дизеринг Байера 4×4: цвет и альфа квантуются узором.
-    let levels = P.p.w;
-    if (levels >= 2.0) {
-        let ix = u32(in.pos.x) % 4u;
-        let iy = u32(in.pos.y) % 4u;
-        // Копия в var: индексировать const-массив переменной WGSL не даёт.
-        var bayer = BAYER;
-        let th = (bayer[iy * 4u + ix] + 0.5) / 16.0;
-        let l = levels - 1.0;
-        out = clamp(floor(out * l + th) / l, vec4<f32>(0.0), vec4<f32>(1.0));
+    // Дизеринг против «колец» на градиентах: шум в одну ступень 8 бит (interleaved
+    // gradient noise — равномерный, без комков; после растяжения в kitty незаметен).
+    let amp = P.p.w / 255.0;
+    if (amp > 0.0) {
+        let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
+        let ign2 = fract(ign + 0.5);
+        out = clamp(out + vec4<f32>(vec3<f32>(ign - 0.5), ign2 - 0.5) * amp, vec4<f32>(0.0), vec4<f32>(1.0));
     }
     return out;
 }

@@ -23,7 +23,7 @@ pub struct Config {
     pub kitty_images: Option<bool>,
     /// Рисовать блоб на видеокарте (иначе — CPU).
     pub gpu: bool,
-    /// Дизеринг блоба (Байер 4×4): уровней на канал, 0 — выключен.
+    /// Дизеринг блоба против «колец» на градиентах: сила в ступенях 8 бит, 0 — выключен.
     pub blob_dither: u32,
     /// Частота кадров анимаций.
     pub fps: u32,
@@ -45,7 +45,7 @@ impl Default for Config {
             normalize_target_lufs: -14.0,
             kitty_images: None,
             gpu: true,
-            blob_dither: 6,
+            blob_dither: 1,
             fps: 30,
             report_plays: true,
         }
