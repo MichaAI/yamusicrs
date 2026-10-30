@@ -57,7 +57,9 @@ pub fn spawn(commands: UnboundedSender<Command>) -> UnboundedSender<Update> {
 }
 
 async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -> mpris_server::zbus::Result<()> {
-    let player = Player::builder("yamusicrs")
+    // `org.mpris.MediaPlayer2.<имя>`; переопределяется для второго экземпляра или тестов.
+    let name = std::env::var("YAMUSICRS_MPRIS_NAME").unwrap_or_else(|_| "yamusicrs".into());
+    let player = Player::builder(&name)
         .identity("Яндекс Музыка (yamusicrs)")
         .desktop_entry("yamusicrs")
         .can_play(true)

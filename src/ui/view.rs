@@ -340,12 +340,13 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     app.areas.header = header;
     app.areas.main = main;
     app.areas.list = Rect::default();
+    app.areas.lyrics = Rect::default();
 
     if app.lyrics_mode {
         let b = card(ctx, Line::styled(" Текст ", ctx.accent()));
         let inner = b.inner(main);
         f.render_widget(b, main);
-        draw_lyrics(f, inner, app, ctx, true);
+        lyrics_panel(f, inner, app, ctx, true);
     } else {
         draw_page(f, main, app, ctx);
     }
@@ -1195,7 +1196,7 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             height: lyr.height - 1,
             ..lyr
         };
-        draw_lyrics(f, rest, app, ctx, false);
+        lyrics_panel(f, rest, app, ctx, false);
     }
 }
 
@@ -1275,7 +1276,15 @@ fn khz(rate: u32) -> String {
     }
 }
 
-fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool) {
+/// Текст + геометрия для мыши (колесо прокручивает, клик по строке перематывает).
+fn lyrics_panel(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx, big: bool) {
+    let mut hits = Vec::new();
+    draw_lyrics(f, area, app, ctx, big, &mut hits);
+    app.lyrics_hits = hits;
+    app.areas.lyrics = area;
+}
+
+fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool, hits: &mut Vec<(u16, usize)>) {
     if area.height == 0 {
         return;
     }
@@ -1356,6 +1365,7 @@ fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool) {
                         done += n;
                         continue;
                     }
+                    hits.push((yi as u16, i));
                     let tw = row.width();
                     let mut x = area.x as usize + w.saturating_sub(tw) / 2;
                     for (ci, ch) in row.chars().enumerate() {

@@ -285,6 +285,11 @@ pub struct App {
     palettes: HashMap<String, Palette>,
     pub lyrics: Option<(String, Lyrics)>,
     pub lyrics_scroll: f32,
+    /// Ручной сдвиг текста колесом (в репликах) и когда его трогали.
+    lyrics_user_offset: f32,
+    lyrics_user_at: Option<Instant>,
+    /// Строки текста на экране: (y, номер реплики) — для клика.
+    pub lyrics_hits: Vec<(u16, usize)>,
     pub lyrics_mode: bool,
     pub toasts: Vec<Toast>,
     pub show_help: bool,
@@ -311,6 +316,7 @@ pub struct App {
 #[derive(Default, Clone, Copy)]
 pub struct Areas {
     pub info: ratatui::layout::Rect,
+    pub lyrics: ratatui::layout::Rect,
     /// Видимая область текущего списка (для мыши).
     pub list: ratatui::layout::Rect,
     pub progress: ratatui::layout::Rect,
@@ -320,6 +326,9 @@ pub struct Areas {
     pub main: ratatui::layout::Rect,
     pub header: ratatui::layout::Rect,
 }
+
+/// Через сколько ручная прокрутка текста возвращается к текущей строке.
+const LYRICS_RETURN: Duration = Duration::from_secs(4);
 
 fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -395,6 +404,9 @@ impl App {
             palettes: HashMap::new(),
             lyrics: None,
             lyrics_scroll: 0.0,
+            lyrics_user_offset: 0.0,
+            lyrics_user_at: None,
+            lyrics_hits: Vec::new(),
             lyrics_mode: false,
             toasts: Vec::new(),
             show_help: false,
@@ -723,6 +735,8 @@ impl App {
     fn fetch_lyrics(&mut self, t: &Track) {
         self.lyrics = None;
         self.lyrics_scroll = 0.0;
+        self.lyrics_user_offset = 0.0;
+        self.lyrics_user_at = None;
         let (sync, text) = (t.has_sync_lyrics(), t.has_text_lyrics());
         if !sync && !text {
             return;
@@ -1730,7 +1744,14 @@ impl App {
         }
         // Плавная прокрутка текста к текущей строке.
         if let (Some((_, Lyrics::Synced(lines))), Some(n)) = (&self.lyrics, &self.now) {
-            let target = crate::lyrics::current(lines, n.pos + 0.25).map_or(-1.0, |i| i as f32);
+            let cur = crate::lyrics::current(lines, n.pos + 0.25).map_or(-1.0, |i| i as f32);
+            // Ручная прокрутка держится, пока её трогают, потом текст сам возвращается.
+            if self.lyrics_user_at.is_some_and(|t| t.elapsed() > LYRICS_RETURN) {
+                self.lyrics_user_at = None;
+                self.lyrics_user_offset = 0.0;
+            }
+            let max = lines.len() as f32 - 1.0;
+            let target = (cur + self.lyrics_user_offset).clamp(-1.0, max.max(-1.0));
             self.lyrics_scroll += (target - self.lyrics_scroll) * 0.18;
             if (target - self.lyrics_scroll).abs() < 0.01 {
                 self.lyrics_scroll = target;
@@ -1819,14 +1840,29 @@ impl App {
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;
-                if inside(self.areas.player) {
+                if inside(self.areas.lyrics) {
+                    self.lyrics_user_offset += if up { -1.0 } else { 1.0 };
+                    self.lyrics_user_at = Some(Instant::now());
+                } else if inside(self.areas.player) {
                     self.set_volume(self.player.volume() + if up { 0.05 } else { -0.05 });
                 } else if inside(self.areas.main) {
                     self.move_sel(if up { -3 } else { 3 });
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if m.row == self.areas.header.y {
+                if inside(self.areas.lyrics) {
+                    // Клик по строке текста — перемотка на неё.
+                    let line = self.lyrics_hits.iter().find(|(y, _)| *y == m.row).map(|(_, i)| *i);
+                    let at = match (&self.lyrics, line) {
+                        (Some((_, Lyrics::Synced(lines))), Some(i)) => lines.get(i).map(|l| l.at),
+                        _ => None,
+                    };
+                    if let Some(at) = at {
+                        self.lyrics_user_offset = 0.0;
+                        self.lyrics_user_at = None;
+                        self.seek_to(at);
+                    }
+                } else if m.row == self.areas.header.y {
                     if let Some(i) = self
                         .areas
                         .tabs
