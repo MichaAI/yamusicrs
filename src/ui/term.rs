@@ -60,6 +60,25 @@ fn sgr(out: &mut Vec<u8>, style: Style, curly: Option<Color>) {
 }
 
 impl Overlay {
+    /// Ширина в клетках экрана.
+    pub fn cols(&self) -> usize {
+        self.runs.iter().map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str())).sum::<usize>()
+            * self.scale as usize
+    }
+
+    /// Стирает все строки блока через ECH: kitty удаляет любой крупный символ, задетый
+    /// стёртой областью. Пробелы так не работают: запись в нижнюю строку крупного символа
+    /// kitty не стирает, а перескакивает его и пишет правее.
+    pub fn erase(&self, out: &mut Vec<u8>, screen_w: u16) {
+        let n = self.cols().min(screen_w.saturating_sub(self.x) as usize);
+        if n == 0 {
+            return;
+        }
+        for k in 0..self.scale as u16 {
+            let _ = write!(out, "\x1b[0m\x1b[{};{}H\x1b[{n}X", self.y + k + 1, self.x + 1);
+        }
+    }
+
     pub fn write(&self, out: &mut Vec<u8>) {
         let _ = write!(out, "\x1b[{};{}H", self.y + 1, self.x + 1);
         if let Some(url) = &self.link {

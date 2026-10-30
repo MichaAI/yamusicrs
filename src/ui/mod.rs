@@ -150,24 +150,11 @@ async fn event_loop(
         let mut out = b"\x1b[?2026h".to_vec();
         terminal.draw(|f| {
             view::draw(f, app, &ctx);
-            // Исчезнувший крупный текст стираем ДО текста кадра: если писать в нижнюю строку
+            // Прошлый крупный текст стираем ДО текста кадра: если писать в нижнюю строку
             // крупного символа, kitty не стирает его, а сдвигает текст вправо за него.
-            // Пробел в верхней строке блока убирает символ целиком.
             let width = f.area().width;
-            for o in prev_overlays
-                .iter()
-                .filter(|o| o.scale > 1 && !app.overlays.contains(o))
-            {
-                let cols: usize = o
-                    .runs
-                    .iter()
-                    .map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str()))
-                    .sum();
-                let n = (cols * o.scale as usize).min(width.saturating_sub(o.x) as usize);
-                let _ = std::io::Write::write_fmt(
-                    &mut out,
-                    format_args!("\x1b[{};{}H\x1b[0m{}", o.y + 1, o.x + 1, " ".repeat(n)),
-                );
+            for o in prev_overlays.iter().filter(|o| o.scale > 1) {
+                o.erase(&mut out, width);
             }
             // Через тот же stdout, что и бэкенд ratatui: уходит в терминал раньше диффа кадра.
             let _ = std::io::Write::write_all(&mut std::io::stdout(), &std::mem::take(&mut out));
@@ -176,12 +163,12 @@ async fn event_loop(
         app.images.flush(terminal.backend_mut())?;
         // Оверлеи (крупный текст, ссылки) и разовые OSC-команды — поверх готового кадра.
         let mut out = std::mem::take(&mut app.osc_out);
-        let prev = std::mem::replace(&mut prev_overlays, app.overlays.clone());
+        prev_overlays = app.overlays.clone();
+        let width = terminal.size()?.width;
         for o in &app.overlays {
-            // Крупный символ поверх такого же kitty не заменяет, а сдвигает новый вправо:
-            // неизменный крупный текст не переписываем, изменённый уже стёрт выше.
-            if o.scale > 1 && prev.contains(o) {
-                continue;
+            // Место под крупный текст чистим заново: там мог остаться чужой крупный символ.
+            if o.scale > 1 {
+                o.erase(&mut out, width);
             }
             o.write(&mut out);
         }
