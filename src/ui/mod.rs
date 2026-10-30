@@ -2,6 +2,7 @@
 
 pub mod diacritics;
 pub mod kitty;
+pub mod term;
 pub mod theme;
 mod view;
 
@@ -56,12 +57,17 @@ async fn event_loop(
     let mut dirty = true;
     let mut refresh_checked = false;
     let mut last_title = String::new();
+    let mut osc = term::OscFilter::default();
 
     loop {
         tokio::select! {
             ev = events.next() => {
                 match ev {
-                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => app.on_key(k),
+                    Some(Ok(Event::Key(k))) if k.kind != KeyEventKind::Release => match osc.feed(&k) {
+                        term::Filtered::Pass => app.on_key(k),
+                        term::Filtered::Swallowed => {}
+                        term::Filtered::Notify(r) => app.on_notify_reply(r),
+                    },
                     Some(Ok(Event::Paste(s))) => app.on_paste(s),
                     Some(Ok(Event::Mouse(m))) => app.on_mouse(m),
                     Some(Ok(Event::Resize(..))) => {
@@ -109,6 +115,7 @@ async fn event_loop(
             t: app.started.elapsed().as_secs_f32(),
             dt: elapsed.as_secs_f32().min(0.1),
             cell_aspect,
+            big_text: app.kitty_text,
         };
         terminal.draw(|f| {
             view::draw(f, app, &ctx);
@@ -117,6 +124,16 @@ async fn event_loop(
         })?;
         // Картинки и команды размещения уходят в терминал отдельно от текстового диффа.
         app.images.flush(terminal.backend_mut())?;
+        // Оверлеи (крупный текст, ссылки) и разовые OSC-команды — поверх готового кадра.
+        if !app.overlays.is_empty() || !app.osc_out.is_empty() {
+            let mut out = std::mem::take(&mut app.osc_out);
+            for o in &app.overlays {
+                o.write(&mut out);
+            }
+            let w = terminal.backend_mut();
+            std::io::Write::write_all(w, &out)?;
+            std::io::Write::flush(w)?;
+        }
         let title = app.window_title();
         if title != last_title {
             execute!(terminal.backend_mut(), SetTitle(&title))?;

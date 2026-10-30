@@ -21,6 +21,13 @@ use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
 
 pub enum Msg {
+    /// Обложка для уведомления о новом треке готова.
+    Notify {
+        token: Token,
+        title: String,
+        body: String,
+        icon: Option<Vec<u8>>,
+    },
     Wheel(Result<Vec<api::WheelItem>, String>),
     Resumed {
         resume: crate::config::Resume,
@@ -142,6 +149,9 @@ pub struct Page {
     pub filter: String,
     pub filter_editing: bool,
     pub filtered: Option<Vec<usize>>,
+    /// Плавная позиция прокрутки и то, что сейчас реально на экране.
+    pub anim: f32,
+    pub view_offset: usize,
 }
 
 impl Page {
@@ -153,6 +163,8 @@ impl Page {
             filter: String::new(),
             filter_editing: false,
             filtered: None,
+            anim: 0.0,
+            view_offset: 0,
         }
     }
 }
@@ -283,6 +295,8 @@ pub struct App {
     /// Ручной сдвиг текста колесом (в репликах) и когда его трогали.
     lyrics_user_offset: f32,
     lyrics_user_at: Option<Instant>,
+    /// Текст ещё едет к цели — нужны кадры даже на паузе.
+    lyrics_moving: bool,
     /// Строки текста на экране: (y, номер реплики) — для клика.
     pub lyrics_hits: Vec<(u16, usize)>,
     pub lyrics_mode: bool,
@@ -308,6 +322,13 @@ pub struct App {
     last_click: Option<(Instant, usize)>,
     /// Строка списка под мышью.
     pub hover: Option<usize>,
+    /// Оверлеи кадра (крупный текст, ссылки) — пересобираются при каждой отрисовке.
+    pub overlays: Vec<crate::ui::term::Overlay>,
+    /// Разовые OSC-команды терминалу (курсор, буфер обмена, уведомления).
+    pub osc_out: Vec<u8>,
+    pointer: bool,
+    /// Протоколы kitty доступны.
+    pub kitty_text: bool,
     sel_moved_at: Instant,
     stored_token: Option<StoredToken>,
 }
@@ -364,6 +385,7 @@ impl App {
         let _ = mpris.send(mpris::Update::Volume(volume as f64));
 
         let images = Images::new(cfg.kitty_enabled());
+        let kitty_text = cfg.kitty_text_enabled();
         let mut app = Self {
             tx,
             paths,
@@ -416,6 +438,7 @@ impl App {
             lyrics_scroll: 0.0,
             lyrics_user_offset: 0.0,
             lyrics_user_at: None,
+            lyrics_moving: false,
             lyrics_hits: Vec::new(),
             lyrics_mode: false,
             stage_mode: false,
@@ -435,6 +458,10 @@ impl App {
             last_stall: None,
             last_click: None,
             hover: None,
+            overlays: Vec::new(),
+            osc_out: Vec::new(),
+            pointer: false,
+            kitty_text,
             sel_moved_at: Instant::now(),
             stored_token: None,
             cfg,
@@ -1420,6 +1447,23 @@ impl App {
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Authed(Ok((c, s, t))) => self.on_authed(c, s, t),
+            Msg::Notify {
+                token,
+                title,
+                body,
+                icon,
+            } => {
+                if self.now.as_ref().is_some_and(|n| n.token == token) {
+                    crate::ui::term::notify(
+                        &mut self.osc_out,
+                        &format!("yam-{token}"),
+                        &title,
+                        &body,
+                        icon.as_deref(),
+                        &["⏭ Дальше", "♥ Нравится"],
+                    );
+                }
+            }
             Msg::Wheel(r) => match r {
                 Ok(items) => {
                     // Курсор — на «Назад к привычному» (обычная Моя волна), как на вебе.
@@ -1818,6 +1862,7 @@ impl App {
             }
             let max = lines.len() as f32 - 1.0;
             let target = (cur + self.lyrics_user_offset).clamp(-1.0, max.max(-1.0));
+            self.lyrics_moving = (target - self.lyrics_scroll).abs() >= 0.01 || self.lyrics_user_at.is_some();
             self.lyrics_scroll += (target - self.lyrics_scroll) * 0.18;
             if (target - self.lyrics_scroll).abs() < 0.01 {
                 self.lyrics_scroll = target;
@@ -1864,6 +1909,7 @@ impl App {
         self.apply_theme_for(&track);
         self.fetch_lyrics(&track);
         self.wave_feedback("trackStarted", &track, None);
+        self.notify_track(pos.token, &track);
         self.persist_session();
         let _ = self.mpris.send(mpris::Update::Track {
             id: track.full_id(),
@@ -1900,6 +1946,85 @@ impl App {
                 .with_area(screen_rect())
                 .with_filter(not_image()),
         );
+    }
+
+    /// Курсор-рука над всем, что кликается.
+    fn update_pointer(&mut self, m: MouseEvent) {
+        if !self.kitty_text {
+            return;
+        }
+        let inside = |r: ratatui::layout::Rect| {
+            m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height
+        };
+        let on_tab =
+            m.row == self.areas.header.y && self.areas.tabs.iter().any(|(a, b)| m.column >= *a && m.column < *b);
+        let on_lyric = inside(self.areas.lyrics) && self.lyrics_hits.iter().any(|(y, _)| *y == m.row);
+        let on_wave = matches!(self.page().view, View::Wave)
+            && (self.wave.hits.iter().any(|(r, _)| inside(*r)) || self.wave.controls.iter().any(|(r, _)| inside(*r)));
+        let pointer = self.hover.is_some()
+            || on_tab
+            || on_lyric
+            || on_wave
+            || inside(self.areas.progress)
+            || inside(self.areas.cover);
+        if pointer != self.pointer {
+            self.pointer = pointer;
+            crate::ui::term::pointer_shape(&mut self.osc_out, pointer);
+        }
+    }
+
+    /// Уведомление о новом треке (kitty покажет его, только если окно не в фокусе).
+    fn notify_track(&self, token: Token, t: &Track) {
+        if !self.kitty_text || self.player.paused() {
+            return;
+        }
+        let title = t.full_title();
+        let body = match t.album() {
+            Some(a) => format!("{} · {}", t.artist_names(), a.full_title()),
+            None => t.artist_names(),
+        };
+        let cover = t.cover_uri().map(|u| api::cover_url(u, 200));
+        self.spawn(move |c, tx| async move {
+            let icon = match cover {
+                Some(u) => crate::fetch::fetch_bytes(&c, &u).await.ok(),
+                None => None,
+            };
+            let _ = tx.send(Msg::Notify {
+                token,
+                title,
+                body,
+                icon,
+            });
+        });
+    }
+
+    /// Ссылка на трек в Яндекс Музыке.
+    pub fn track_url(t: &Track) -> String {
+        match t.album() {
+            Some(a) if !a.id.is_empty() => format!("https://music.yandex.ru/album/{}/track/{}", a.id, t.id),
+            _ => format!("https://music.yandex.ru/track/{}", t.id),
+        }
+    }
+
+    /// Ответ на кнопку уведомления: 1 — следующий, 2 — лайк.
+    pub fn on_notify_reply(&mut self, r: crate::ui::term::NotifyReply) {
+        let Some(token) = r.id.strip_prefix("yam-").and_then(|t| t.parse::<Token>().ok()) else {
+            return;
+        };
+        if self.now.as_ref().is_none_or(|n| n.token != token) {
+            return;
+        }
+        match r.button {
+            Some(1) => self.next(),
+            Some(2) => {
+                if let Some(t) = self.now.as_ref().map(|n| n.track.clone())
+                    && !self.is_liked(&t)
+                {
+                    self.toggle_like(t);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
@@ -1939,12 +2064,13 @@ impl App {
                 _ => {}
             }
         }
+        if m.kind == MouseEventKind::Moved {
+            self.hover = inside(self.areas.list)
+                .then(|| self.page().view_offset + (m.row - self.areas.list.y) as usize)
+                .filter(|r| *r < self.page_len());
+        }
+        self.update_pointer(m);
         match m.kind {
-            MouseEventKind::Moved => {
-                self.hover = inside(self.areas.list)
-                    .then(|| self.page().offset + (m.row - self.areas.list.y) as usize)
-                    .filter(|r| *r < self.page_len());
-            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 if inside(self.areas.lyrics) {
@@ -1987,7 +2113,7 @@ impl App {
                         self.seek_to(frac * dur);
                     }
                 } else if inside(self.areas.list) {
-                    let row = self.page().offset + (m.row - self.areas.list.y) as usize;
+                    let row = self.page().view_offset + (m.row - self.areas.list.y) as usize;
                     if row >= self.page_len() {
                         return;
                     }
@@ -2194,6 +2320,12 @@ impl App {
             }
             KeyCode::Char('t') => self.lyrics_mode = !self.lyrics_mode,
             KeyCode::Char('v') => self.toggle_stage(),
+            KeyCode::Char('y') => {
+                if let Some(t) = self.target_track() {
+                    crate::ui::term::copy_to_clipboard(&mut self.osc_out, &Self::track_url(&t));
+                    self.toast(format!("Ссылка скопирована: {}", t.full_title()));
+                }
+            }
             KeyCode::Char('r') => {
                 self.repeat_one = !self.repeat_one;
                 let _ = self.mpris.send(mpris::Update::Repeat(self.repeat_one));
@@ -2267,6 +2399,8 @@ impl App {
             || matches!(self.screen, Screen::Connecting | Screen::Login(_))
             || (self.now.is_some() && !self.player.paused())
             || matches!(self.page().view, View::Wave)
+            || self.lyrics_moving
+            || (self.page().anim - self.page().offset as f32).abs() > 0.01
     }
 
     pub fn shutdown(&mut self) {

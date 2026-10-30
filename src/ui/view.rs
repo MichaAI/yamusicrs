@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::term::{Overlay, Run};
 use super::theme::{Palette, Rgb, shimmer};
 use crate::api::Track;
 use crate::app::{
@@ -24,6 +25,8 @@ pub struct Ctx {
     /// Время с прошлого кадра, сек.
     pub dt: f32,
     pub cell_aspect: f32,
+    /// Доступен крупный текст kitty (OSC 66).
+    pub big_text: bool,
 }
 
 impl Ctx {
@@ -43,6 +46,7 @@ impl Ctx {
 
 pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let area = f.area();
+    app.overlays.clear();
     // Блоб живёт только на экране волны; под справкой и полноэкранным текстом его не видно.
     let on_wave = matches!(app.page().view, View::Wave) && !app.lyrics_mode && app.wave.items.ready().is_some();
     let blob_visible =
@@ -677,6 +681,23 @@ fn scroll_window(sel: usize, offset: &mut usize, len: usize, h: usize) -> std::o
     *offset..(*offset + h).min(len)
 }
 
+/// Окно прокрутки с анимацией: целевой сдвиг считается как обычно, а на экран
+/// попадает плавно догоняющий его (за пару кадров на строку, с замедлением).
+fn animated_window(app: &mut App, sel: usize, len: usize, h: usize) -> std::ops::Range<usize> {
+    let p = app.page_mut();
+    let mut target = p.offset;
+    scroll_window(sel, &mut target, len, h);
+    p.offset = target;
+    let t = target as f32;
+    p.anim += (t - p.anim) * 0.35;
+    if (t - p.anim).abs() < 0.5 {
+        p.anim = t;
+    }
+    let shown = (p.anim.round().max(0.0) as usize).min(len.saturating_sub(h.min(len)));
+    p.view_offset = shown;
+    shown..(shown + h).min(len)
+}
+
 fn playing_glyph(ctx: &Ctx, paused: bool) -> String {
     if paused {
         return "⏸".into();
@@ -811,9 +832,7 @@ fn track_list(f: &mut Frame, area: Rect, app: &mut App, tracks: &[Track], ctx: &
     };
     let h = area.height as usize;
     let sel = app.page().sel.min(idx.len().saturating_sub(1));
-    let mut offset = app.page().offset;
-    let range = scroll_window(sel, &mut offset, idx.len(), h);
-    app.page_mut().offset = offset;
+    let range = animated_window(app, sel, idx.len(), h);
     let lines: Vec<Line> = range
         .clone()
         .map(|i| track_row(app, ctx, &tracks[idx[i]], idx[i] + 1, area.width as usize, i == sel))
@@ -904,9 +923,7 @@ fn mixed_list(f: &mut Frame, area: Rect, app: &mut App, rows: &[RowKind], ctx: &
     app.areas.list = area;
     let h = area.height as usize;
     let sel = app.page().sel.min(rows.len().saturating_sub(1));
-    let mut offset = app.page().offset;
-    let range = scroll_window(sel, &mut offset, rows.len(), h);
-    app.page_mut().offset = offset;
+    let range = animated_window(app, sel, rows.len(), h);
     let w = area.width as usize;
     let mut n = 0;
     let mut lines = Vec::new();
@@ -1161,20 +1178,53 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     } else {
         "Моя волна".into()
     };
-    let spaced: String = title.to_uppercase().chars().flat_map(|c| [c, ' ']).collect();
     let ty = stage.y + stage.height / 2;
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            spaced.trim_end().to_string(),
-            Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Center),
-        Rect {
-            y: ty,
-            height: 1,
-            ..stage
-        },
-    );
+    // Крупно через OSC 66, если влезает; буквам — цвет по блобу под ними.
+    let cols = title.width();
+    let sc = fit_scale(ctx, cols, stage.width.saturating_sub(4), 3, 3);
+    let big = sc > 1;
+    if big {
+        let x0 = stage.x + (stage.width - (cols * sc as usize) as u16) / 2;
+        let y0 = ty.saturating_sub(sc as u16 / 2);
+        let mut x = x0 as f32;
+        let runs = title
+            .chars()
+            .map(|ch| {
+                let cw = (ch.width().unwrap_or(1) * sc as usize) as f32;
+                let col = blob_contrast(
+                    blob_rect,
+                    x + cw / 2.0,
+                    y0 as f32 + sc as f32 / 2.0,
+                    colors,
+                    app.wave_phase,
+                )
+                .unwrap_or(Color::White);
+                x += cw;
+                Run {
+                    text: ch.to_string(),
+                    style: Style::new().fg(col).add_modifier(Modifier::BOLD),
+                    curly: None,
+                }
+            })
+            .collect();
+        put_big(f, app, x0, y0, sc, runs, None);
+    }
+    let spaced: String = title.to_uppercase().chars().flat_map(|c| [c, ' ']).collect();
+    let ty = if big { ty + 1 } else { ty };
+    if !big {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                spaced.trim_end().to_string(),
+                Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Center),
+            Rect {
+                y: ty,
+                height: 1,
+                ..stage
+            },
+        );
+    }
     if let Some(n) = app.now.as_ref().filter(|_| wave_on) {
         f.render_widget(
             Paragraph::new(Line::styled(
@@ -1255,10 +1305,31 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     );
 }
 
-/// Текст поверх блоба: каждой букве — тёмный или белый цвет по яркости того, что под ней.
-fn contrast_over_blob(f: &mut Frame, blob: Rect, text: Rect, colors: [[f32; 3]; 2], t: f32) {
+/// Цвет текста, читаемый на блобе в точке (x, y) в клетках; None — блоба там почти нет.
+fn blob_contrast(blob: Rect, x: f32, y: f32, colors: [[f32; 3]; 2], t: f32) -> Option<Color> {
     // Примерный фон терминала там, где блоб прозрачный.
     const BG: [f32; 3] = [24.0, 22.0, 30.0];
+    let u = (x - blob.x as f32) / blob.width.max(1) as f32 * 2.0 - 1.0;
+    let v = (y - blob.y as f32) / blob.height.max(1) as f32 * 2.0 - 1.0;
+    if !(-1.0..=1.0).contains(&u) || !(-1.0..=1.0).contains(&v) {
+        return None;
+    }
+    let p = super::kitty::blob_pixel(u, v, colors, t);
+    let a = p[3] / 255.0;
+    if a < 0.15 {
+        return None;
+    }
+    let px = [0, 1, 2].map(|i| p[i] * a + BG[i] * (1.0 - a));
+    let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+    Some(if lum > 135.0 {
+        Color::Rgb(18, 16, 22)
+    } else {
+        Color::Rgb(250, 250, 250)
+    })
+}
+
+/// Текст поверх блоба: каждой букве — тёмный или белый цвет по яркости того, что под ней.
+fn contrast_over_blob(f: &mut Frame, blob: Rect, text: Rect, colors: [[f32; 3]; 2], t: f32) {
     let buf = f.buffer_mut();
     for y in text.y..text.y + text.height {
         for x in text.x..text.x + text.width {
@@ -1266,24 +1337,9 @@ fn contrast_over_blob(f: &mut Frame, blob: Rect, text: Rect, colors: [[f32; 3]; 
             if cell.symbol().trim().is_empty() {
                 continue;
             }
-            let u = ((x.saturating_sub(blob.x)) as f32 + 0.5) / blob.width.max(1) as f32 * 2.0 - 1.0;
-            let v = ((y.saturating_sub(blob.y)) as f32 + 0.5) / blob.height.max(1) as f32 * 2.0 - 1.0;
-            if !(-1.0..=1.0).contains(&u) || !(-1.0..=1.0).contains(&v) {
-                continue;
+            if let Some(c) = blob_contrast(blob, x as f32 + 0.5, y as f32 + 0.5, colors, t) {
+                cell.set_fg(c);
             }
-            let p = super::kitty::blob_pixel(u, v, colors, t);
-            let a = p[3] / 255.0;
-            // Где блоба почти нет — оставляем родной цвет текста.
-            if a < 0.15 {
-                continue;
-            }
-            let px = [0, 1, 2].map(|i| p[i] * a + BG[i] * (1.0 - a));
-            let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
-            cell.set_fg(if lum > 135.0 {
-                Color::Rgb(18, 16, 22)
-            } else {
-                Color::Rgb(250, 250, 250)
-            });
         }
     }
 }
@@ -1360,43 +1416,92 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         _ => cover_placeholder(f, cover, ctx, true),
     }
 
-    // Подпись под обложкой.
-    let iw = info.width as usize;
-    let mut t = vec![];
-    t.extend(gradient_line(
-        marquee(&track.full_title(), iw.saturating_sub(4), ctx.t).trim_end(),
-        ctx.p.fg,
-        ctx.p.accent,
-        ctx.t * 0.25,
-        true,
-    ));
+    // Подпись под обложкой: название до ×3, артист до ×2 (OSC 66), если влезают; со ссылками.
+    let iw = info.width.saturating_sub(4);
+    let title = track.full_title();
+    let artist = track.artist_names();
     let album = track.album().map(|a| match a.year {
         Some(y) => format!("{} · {y}", a.full_title()),
         None => a.full_title(),
     });
-    let lines = vec![
-        Line::raw(""),
-        Line::from(t),
-        Line::styled(
-            marquee(&track.artist_names(), iw.saturating_sub(4), ctx.t + 1.3)
-                .trim_end()
-                .to_string(),
-            ctx.accent(),
-        ),
-        Line::styled(album.unwrap_or_default(), ctx.dim()),
-    ];
-    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), info);
-    contrast_over_blob(
-        f,
-        glow,
-        Rect {
-            y: info.y + 1,
-            height: 3,
-            ..info
-        },
-        colors,
-        app.wave_phase,
-    );
+    let mut y = info.y;
+    let bottom = info.y + info.height;
+    let s1 = fit_scale(ctx, title.width(), iw, bottom.saturating_sub(y).saturating_sub(2), 3);
+    if s1 > 1 {
+        let n = title.chars().count().max(1);
+        let runs = title
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                let c = shimmer(ctx.p.fg, ctx.p.accent, i as f32 / n as f32, ctx.t * 0.25);
+                Run {
+                    text: ch.to_string(),
+                    style: Style::new().fg(c.color()).add_modifier(Modifier::BOLD),
+                    curly: None,
+                }
+            })
+            .collect();
+        let x = info.x + (info.width - (title.width() * s1 as usize) as u16) / 2;
+        put_big(f, app, x, y, s1, runs, Some(App::track_url(&track)));
+        y += s1 as u16;
+    } else {
+        y += 1;
+        let mut t = vec![];
+        t.extend(gradient_line(
+            marquee(&title, iw as usize, ctx.t).trim_end(),
+            ctx.p.fg,
+            ctx.p.accent,
+            ctx.t * 0.25,
+            true,
+        ));
+        f.render_widget(
+            Paragraph::new(Line::from(t)).alignment(Alignment::Center),
+            Rect { y, height: 1, ..info },
+        );
+        if app.kitty_text
+            && let Some(o) = link_cells(f, info.x, y, info.width, App::track_url(&track))
+        {
+            app.overlays.push(o);
+        }
+        y += 1;
+    }
+    let s2 = fit_scale(ctx, artist.width(), iw, bottom.saturating_sub(y).saturating_sub(1), 2);
+    if s2 > 1 {
+        let runs = vec![Run {
+            text: artist.clone(),
+            style: ctx.accent().add_modifier(Modifier::BOLD),
+            curly: None,
+        }];
+        let x = info.x + (info.width - (artist.width() * s2 as usize) as u16) / 2;
+        put_big(f, app, x, y, s2, runs, artist_url(&track));
+        y += s2 as u16;
+    } else if y < bottom {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                marquee(&artist, iw as usize, ctx.t + 1.3).trim_end().to_string(),
+                ctx.accent(),
+            ))
+            .alignment(Alignment::Center),
+            Rect { y, height: 1, ..info },
+        );
+        if app.kitty_text
+            && let Some(o) = artist_url(&track).and_then(|u| link_cells(f, info.x, y, info.width, u))
+        {
+            app.overlays.push(o);
+        }
+        y += 1;
+    }
+    if y < bottom {
+        f.render_widget(
+            Paragraph::new(Line::styled(album.unwrap_or_default(), ctx.dim())).alignment(Alignment::Center),
+            Rect { y, height: 1, ..info },
+        );
+        if app.kitty_text
+            && let Some(o) = album_url(&track).and_then(|u| link_cells(f, info.x, y, info.width, u))
+        {
+            app.overlays.push(o);
+        }
+    }
 
     let lyr = Rect {
         x: right.x + 1,
@@ -1455,6 +1560,15 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     }
     app.areas.info = info;
     draw_info(f, info, app, ctx, &track);
+    if app.kitty_text {
+        let w = info.width.saturating_sub(1);
+        let links = [Some(App::track_url(&track)), artist_url(&track), album_url(&track)];
+        for (row, url) in links.into_iter().enumerate() {
+            if let Some(o) = url.and_then(|u| link_cells(f, info.x + 1, info.y + row as u16, w, u)) {
+                app.overlays.push(o);
+            }
+        }
+    }
     if lyr.height > 2 && !app.lyrics_mode {
         let sep = Rect { height: 1, ..lyr };
         f.render_widget(
@@ -1549,15 +1663,122 @@ fn khz(rate: u32) -> String {
     }
 }
 
+/// Наибольший масштаб крупного текста ≤ `max`, при котором `cols` колонок влезают в `width`
+/// и блок помещается в `rows` строк. 1 — крупный текст недоступен или не влезает.
+fn fit_scale(ctx: &Ctx, cols: usize, width: u16, rows: u16, max: u8) -> u8 {
+    if !ctx.big_text {
+        return 1;
+    }
+    (2..=max)
+        .rev()
+        .find(|s| cols * *s as usize <= width as usize && *s as u16 <= rows)
+        .unwrap_or(1)
+}
+
+/// Крупный текст: клетки блока очищаются, сам текст рисует терминал (OSC 66) оверлеем.
+fn put_big(f: &mut Frame, app: &mut App, x: u16, y: u16, scale: u8, runs: Vec<Run>, link: Option<String>) {
+    let cols: usize = runs.iter().map(|r| r.text.width()).sum();
+    let buf = f.buffer_mut();
+    for yy in y..y + scale as u16 {
+        for xx in x..x + (cols * scale as usize) as u16 {
+            if let Some(c) = buf.cell_mut((xx, yy)) {
+                c.set_symbol(" ");
+            }
+        }
+    }
+    app.overlays.push(Overlay {
+        x,
+        y,
+        scale,
+        runs,
+        link,
+    });
+}
+
+/// Ссылка (OSC 8) поверх уже нарисованного текста: клетки перечитываются из кадра,
+/// поэтому цвета и стиль остаются ровно такими же. Хвостовые пробелы не входят.
+fn link_cells(f: &mut Frame, x: u16, y: u16, width: u16, url: String) -> Option<Overlay> {
+    let buf = f.buffer_mut();
+    let mut cells: Vec<(String, Style)> = (x..x + width)
+        .filter_map(|xx| buf.cell((xx, y)).map(|c| (c.symbol().to_string(), c.style())))
+        .collect();
+    while cells.last().is_some_and(|c| c.0.trim().is_empty()) {
+        cells.pop();
+    }
+    let lead = cells.iter().take_while(|c| c.0.trim().is_empty()).count();
+    if lead == cells.len() {
+        return None;
+    }
+    let runs = cells[lead..]
+        .iter()
+        .map(|(t, st)| Run {
+            text: t.clone(),
+            style: *st,
+            curly: None,
+        })
+        .collect();
+    Some(Overlay {
+        x: x + lead as u16,
+        y,
+        scale: 1,
+        runs,
+        link: Some(url),
+    })
+}
+
+fn artist_url(t: &Track) -> Option<String> {
+    t.artists
+        .first()
+        .filter(|a| !a.id.is_empty())
+        .map(|a| format!("https://music.yandex.ru/artist/{}", a.id))
+}
+
+fn album_url(t: &Track) -> Option<String> {
+    t.album()
+        .filter(|a| !a.id.is_empty())
+        .map(|a| format!("https://music.yandex.ru/album/{}", a.id))
+}
+
+/// Слово вокруг позиции `at` в строке: [начало, конец) в индексах символов.
+fn current_word(chars: &[char], at: usize) -> Option<(usize, usize)> {
+    let at = at.min(chars.len().checked_sub(1)?);
+    let mut a = at;
+    // Если попали в пробел — берём предыдущее слово.
+    while a > 0 && chars[a].is_whitespace() {
+        a -= 1;
+    }
+    if chars[a].is_whitespace() {
+        return None;
+    }
+    let mut start = a;
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let mut end = a + 1;
+    while end < chars.len() && !chars[end].is_whitespace() {
+        end += 1;
+    }
+    Some((start, end))
+}
+
 /// Текст + геометрия для мыши (колесо прокручивает, клик по строке перематывает).
 fn lyrics_panel(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx, big: bool) {
-    let mut hits = Vec::new();
-    draw_lyrics(f, area, app, ctx, big, &mut hits);
+    let (mut hits, mut ov) = (Vec::new(), Vec::new());
+    draw_lyrics(f, area, app, ctx, big, &mut hits, &mut ov);
     app.lyrics_hits = hits;
+    app.overlays.extend(ov);
     app.areas.lyrics = area;
 }
 
-fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool, hits: &mut Vec<(u16, usize)>) {
+fn draw_lyrics(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    ctx: &Ctx,
+    big: bool,
+    hits: &mut Vec<(u16, usize)>,
+    overlays: &mut Vec<Overlay>,
+) {
     if area.height == 0 {
         return;
     }
@@ -1580,25 +1801,35 @@ fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool, hits:
     match lyrics {
         Lyrics::Synced(lines) => {
             // Каждая реплика переносится по словам и занимает свои строки; между репликами — пустая строка.
+            // В крупном режиме текущая реплика — двойного размера (OSC 66), её строки вдвое выше.
             let gap = 1usize;
             let wrap_w = w.saturating_sub(4).max(8);
+            let cur = lyrics::current(lines, pos + 0.25);
+            let scale: usize = if big && ctx.big_text { 2 } else { 1 };
             let wrapped: Vec<Vec<String>> = lines
                 .iter()
-                .map(|l| {
+                .enumerate()
+                .map(|(i, l)| {
                     let t = if l.text.trim().is_empty() {
                         "♪"
                     } else {
                         l.text.as_str()
                     };
-                    textwrap::wrap(t, wrap_w).into_iter().map(|c| c.into_owned()).collect()
+                    let ww = if Some(i) == cur {
+                        (wrap_w / scale).max(4)
+                    } else {
+                        wrap_w
+                    };
+                    textwrap::wrap(t, ww).into_iter().map(|c| c.into_owned()).collect()
                 })
                 .collect();
+            let height = |i: usize| wrapped[i].len() * if Some(i) == cur { scale } else { 1 };
             // Верх каждой реплики в строках от начала текста.
             let mut tops = Vec::with_capacity(wrapped.len() + 1);
             let mut acc = 0usize;
-            for wl in &wrapped {
+            for i in 0..wrapped.len() {
                 tops.push(acc as f32);
-                acc += wl.len() + gap;
+                acc += height(i) + gap;
             }
             tops.push(acc as f32);
             // Дробный индекс прокрутки → дробная строка: плавно между верхами соседних реплик.
@@ -1611,8 +1842,7 @@ fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool, hits:
                 tops[i] + (tops[i + 1] - tops[i]) * frac
             };
             let center = area.y as f32 + area.height as f32 * if big { 0.42 } else { 0.35 };
-            let cur = lyrics::current(lines, pos + 0.25);
-            let buf = f.buffer_mut();
+            let bottom = (area.y + area.height) as i32;
             for (i, (l, rows)) in lines.iter().zip(&wrapped).enumerate() {
                 let is_cur = Some(i) == cur;
                 let d = (i as f32 - app.lyrics_scroll).abs();
@@ -1629,36 +1859,87 @@ fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool, hits:
                     let k = (d / if big { 6.0 } else { 4.0 }).min(1.0);
                     ctx.p.fg.lerp(ctx.p.dim.scale(0.6), 0.3 + 0.7 * k)
                 };
-                let total: usize = rows.iter().map(|r| r.chars().count()).sum::<usize>().max(1);
+                let all: Vec<char> = rows.iter().flat_map(|r| r.chars()).collect();
+                let total = all.len().max(1);
+                // Текущее слово (по времени внутри строки) — для подчёркивания.
+                let word = if is_cur && frac > 0.0 {
+                    current_word(&all, (frac * total as f32) as usize)
+                } else {
+                    None
+                };
+                let s = if is_cur { scale } else { 1 };
                 let mut done = 0usize;
                 for (ri, row) in rows.iter().enumerate() {
-                    let yi = (center + tops[i] + ri as f32 - scroll_row).round() as i32;
+                    let yi = (center + tops[i] + (ri * s) as f32 - scroll_row).round() as i32;
                     let n = row.chars().count();
-                    if yi < area.y as i32 || yi >= (area.y + area.height) as i32 {
+                    if yi < area.y as i32 || yi + s as i32 > bottom {
                         done += n;
                         continue;
                     }
-                    hits.push((yi as u16, i));
-                    let tw = row.width();
-                    let mut x = area.x as usize + w.saturating_sub(tw) / 2;
-                    for (ci, ch) in row.chars().enumerate() {
-                        let cw = ch.width().unwrap_or(1);
-                        if x + cw > (area.x + area.width) as usize {
-                            break;
-                        }
-                        let p = (done + ci) as f32 / total as f32;
-                        let col = if is_cur && p < frac {
+                    for k in 0..s {
+                        hits.push((yi as u16 + k as u16, i));
+                    }
+                    let tw = row.width() * s;
+                    let x0 = area.x as usize + w.saturating_sub(tw) / 2;
+                    let color_at = |gi: usize| {
+                        let p = gi as f32 / total as f32;
+                        if is_cur && p < frac {
                             shimmer(ctx.p.accent, ctx.p.accent2, p, ctx.t * 0.3)
                         } else {
                             base
-                        };
-                        if let Some(c) = buf.cell_mut((x as u16, yi as u16)) {
-                            c.set_char(ch).set_fg(col.color());
-                            if is_cur {
-                                c.modifier.insert(Modifier::BOLD);
+                        }
+                    };
+                    let in_word = |gi: usize| word.is_some_and(|(a, b)| gi >= a && gi < b);
+                    if s > 1 {
+                        // Крупная строка: клетки блока чистим, текст — оверлеем OSC 66 с волнистым подчёркиванием.
+                        let buf = f.buffer_mut();
+                        for yy in yi as u16..yi as u16 + s as u16 {
+                            for xx in x0 as u16..(x0 + tw).min((area.x + area.width) as usize) as u16 {
+                                if let Some(c) = buf.cell_mut((xx, yy)) {
+                                    c.set_symbol(" ");
+                                }
                             }
                         }
-                        x += cw;
+                        let runs = row
+                            .chars()
+                            .enumerate()
+                            .map(|(ci, ch)| {
+                                let gi = done + ci;
+                                Run {
+                                    text: ch.to_string(),
+                                    style: Style::new().fg(color_at(gi).color()).add_modifier(Modifier::BOLD),
+                                    curly: in_word(gi).then(|| ctx.p.accent2.color()),
+                                }
+                            })
+                            .collect();
+                        overlays.push(Overlay {
+                            x: x0 as u16,
+                            y: yi as u16,
+                            scale: s as u8,
+                            runs,
+                            link: None,
+                        });
+                    } else {
+                        let buf = f.buffer_mut();
+                        let mut x = x0;
+                        for (ci, ch) in row.chars().enumerate() {
+                            let cw = ch.width().unwrap_or(1);
+                            if x + cw > (area.x + area.width) as usize {
+                                break;
+                            }
+                            let gi = done + ci;
+                            if let Some(c) = buf.cell_mut((x as u16, yi as u16)) {
+                                c.set_char(ch).set_fg(color_at(gi).color());
+                                if is_cur {
+                                    c.modifier.insert(Modifier::BOLD);
+                                }
+                                if in_word(gi) {
+                                    c.modifier.insert(Modifier::UNDERLINED);
+                                    c.underline_color = ctx.p.accent2.color();
+                                }
+                            }
+                            x += cw;
+                        }
                     }
                     done += n;
                 }
@@ -1752,6 +2033,12 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     spans.push(Span::raw(" "));
     spans.extend(right);
     f.render_widget(Paragraph::new(Line::from(spans)), l1);
+    if app.kitty_text
+        && let Some(n) = &app.now
+        && let Some(o) = link_cells(f, l1.x + 3, l1.y, tw.saturating_sub(2) as u16, App::track_url(&n.track))
+    {
+        app.overlays.push(o);
+    }
 
     // Строка 2: прогресс с субсимвольной точностью и бегущим бликом.
     let left = format!(" {} ", fmt_time(pos));
