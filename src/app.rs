@@ -242,6 +242,8 @@ pub struct WaveUi {
     /// Строка настроек под курсором: 0 настроение, 1 характер, 2 язык.
     pub row: usize,
     pub loading: bool,
+    /// Сиды, с которыми запущена текущая волна.
+    pub active_seeds: Option<Vec<String>>,
 }
 
 pub struct App {
@@ -388,7 +390,11 @@ impl App {
                 title: String::new(),
                 generation: 0,
             },
-            wave: WaveUi { row: 0, loading: false },
+            wave: WaveUi {
+                row: 0,
+                loading: false,
+                active_seeds: None,
+            },
             now: None,
             requested: None,
             loading_track: None,
@@ -934,7 +940,14 @@ impl App {
         let sel = self.page().sel;
         let orig = self.sel_index();
         match &self.page().view {
-            View::Wave => self.start_wave(),
+            View::Wave => {
+                // Та же волна уже играет — Enter ставит на паузу, а не перезапускает.
+                if matches!(self.queue.kind, QueueKind::Wave { .. }) && !self.wave_settings_changed() {
+                    self.toggle_pause();
+                } else {
+                    self.start_wave();
+                }
+            }
             View::Likes => {
                 if let Some(ts) = self.likes.ready() {
                     let ts = ts.clone();
@@ -1256,12 +1269,18 @@ impl App {
         s
     }
 
+    /// Настройки на экране отличаются от тех, с которыми запущена играющая волна.
+    pub fn wave_settings_changed(&self) -> bool {
+        self.wave.active_seeds.as_ref().is_some_and(|s| *s != self.wave_seeds())
+    }
+
     fn start_wave(&mut self) {
         if self.wave.loading {
             return;
         }
         self.wave.loading = true;
         let seeds = self.wave_seeds();
+        self.wave.active_seeds = Some(seeds.clone());
         self.spawn(move |c, tx| async move {
             let r = c.rotor_new(&seeds).await.map_err(err_str);
             if let Ok(s) = &r {
@@ -2160,8 +2179,10 @@ impl App {
 
 /// Символ с той же физической клавиши в раскладке QWERTY: управление работает и на ЙЦУКЕН.
 fn qwerty(c: char) -> char {
-    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюёЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮЁ.,\"№;:?";
-    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~/?@#$^&";
+    // Только кириллица и `.`/`,` с клавиши `/`: латинские знаки (`?`, `+`, `-`…) остаются как есть,
+    // иначе `?` на латинской раскладке превращался бы в `&`.
+    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюёЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮЁ.,";
+    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~/?";
     RU.chars()
         .position(|r| r == c)
         .and_then(|i| EN.chars().nth(i))
@@ -2266,5 +2287,7 @@ mod tests {
         assert_eq!(super::qwerty(','), '?');
         assert_eq!(super::qwerty('ё'), '`');
         assert_eq!(super::qwerty('n'), 'n');
+        assert_eq!(super::qwerty('?'), '?');
+        assert_eq!(super::qwerty('+'), '+');
     }
 }

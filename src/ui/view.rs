@@ -420,6 +420,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
         &[("Enter", "искать"), ("Esc", "выйти из поля"), ("^U", "очистить")]
     } else {
         match app.page().view {
+            View::Wave if matches!(app.queue.kind, crate::app::QueueKind::Wave { .. }) => &[
+                ("n", "дальше"),
+                ("d", "не нравится"),
+                ("l", "♥"),
+                ("Space", "пауза"),
+                ("←→", "настройка"),
+                ("?", "все клавиши"),
+            ],
             View::Wave => &[
                 ("↑↓", "настройка"),
                 ("←→", "значение"),
@@ -1091,17 +1099,26 @@ fn draw_wave(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
             Span::styled("запускаю…", ctx.dim()),
         ])
     } else {
-        Line::from(vec![
-            Span::styled("Enter", ctx.accent().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                if wave_on {
-                    " — перезапустить волну"
-                } else {
-                    " — запустить"
-                },
-                ctx.dim(),
-            ),
-        ])
+        let key = |k: &'static str| Span::styled(k, ctx.accent().add_modifier(Modifier::BOLD));
+        if !wave_on {
+            Line::from(vec![key("Enter"), Span::styled(" — запустить", ctx.dim())])
+        } else if app.wave_settings_changed() {
+            Line::from(vec![
+                key("Enter"),
+                Span::styled(" — перезапустить с новыми настройками", ctx.dim()),
+            ])
+        } else {
+            Line::from(vec![
+                key("Enter"),
+                Span::styled(" / ", ctx.dim()),
+                key("Space"),
+                Span::styled(" — пауза   ", ctx.dim()),
+                key("n"),
+                Span::styled(" — дальше   ", ctx.dim()),
+                key("d"),
+                Span::styled(" — не нравится", ctx.dim()),
+            ])
+        }
     };
     lines.push(start);
     let sw = 70.min(settings.width);
