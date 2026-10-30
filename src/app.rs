@@ -286,6 +286,8 @@ pub struct App {
     /// Строки текста на экране: (y, номер реплики) — для клика.
     pub lyrics_hits: Vec<(u16, usize)>,
     pub lyrics_mode: bool,
+    /// «Сцена»: полноэкранный «сейчас играет».
+    pub stage_mode: bool,
     pub toasts: Vec<Toast>,
     pub show_help: bool,
     pub repeat_one: bool,
@@ -301,6 +303,7 @@ pub struct App {
     pub areas: Areas,
     last_mpris_pos: Instant,
     last_session_save: Instant,
+    last_stall: Option<Instant>,
     /// Последний клик по строке списка — для двойного клика.
     last_click: Option<(Instant, usize)>,
     /// Строка списка под мышью.
@@ -312,6 +315,8 @@ pub struct App {
 #[derive(Default, Clone, Copy)]
 pub struct Areas {
     pub info: ratatui::layout::Rect,
+    /// Обложка «сейчас играет» (боковая панель или сцена).
+    pub cover: ratatui::layout::Rect,
     pub lyrics: ratatui::layout::Rect,
     /// Видимая область текущего списка (для мыши).
     pub list: ratatui::layout::Rect,
@@ -413,6 +418,7 @@ impl App {
             lyrics_user_at: None,
             lyrics_hits: Vec::new(),
             lyrics_mode: false,
+            stage_mode: false,
             toasts: Vec::new(),
             show_help: false,
             repeat_one: false,
@@ -426,6 +432,7 @@ impl App {
             areas: Areas::default(),
             last_mpris_pos: Instant::now(),
             last_session_save: Instant::now(),
+            last_stall: None,
             last_click: None,
             hover: None,
             sel_moved_at: Instant::now(),
@@ -1783,6 +1790,15 @@ impl App {
             }
             _ => self.on_track_started(pos),
         }
+        // Сторож вывода: звук есть, а PipeWire его не берёт — сообщаем и пробуем переподключиться.
+        if self.player.stalled(Duration::from_secs(2))
+            && self.last_stall.is_none_or(|t| t.elapsed() > Duration::from_secs(30))
+        {
+            self.last_stall = Some(Instant::now());
+            tracing::warn!("PipeWire не забирает звук: пересоздаю поток");
+            self.toast_err("Устройство вывода не отвечает — переподключаюсь".into());
+            self.player.reconnect_output();
+        }
         if self.last_session_save.elapsed() > Duration::from_secs(15) && self.now.is_some() {
             self.persist_session();
         }
@@ -1875,6 +1891,17 @@ impl App {
 
     // ── клавиатура ───────────────────────────────────────────────────────────
 
+    fn toggle_stage(&mut self) {
+        self.stage_mode = !self.stage_mode;
+        let bg = self.theme.current().surface.color();
+        self.fx.add_unique_effect(
+            "stage",
+            fx::fade_from_fg(bg, (350, Interpolation::QuadOut))
+                .with_area(screen_rect())
+                .with_filter(not_image()),
+        );
+    }
+
     pub fn on_mouse(&mut self, m: MouseEvent) {
         if !matches!(self.screen, Screen::Main) || self.show_help {
             return;
@@ -1930,7 +1957,10 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if inside(self.areas.lyrics) {
+                if inside(self.areas.cover) {
+                    // Клик по обложке — «Сцена» и обратно.
+                    self.toggle_stage();
+                } else if inside(self.areas.lyrics) {
                     // Клик по строке текста — перемотка на неё.
                     let line = self.lyrics_hits.iter().find(|(y, _)| *y == m.row).map(|(_, i)| *i);
                     let at = match (&self.lyrics, line) {
@@ -2096,7 +2126,9 @@ impl App {
                 }
             }
             KeyCode::Esc | KeyCode::Backspace => {
-                if self.lyrics_mode {
+                if self.stage_mode {
+                    self.toggle_stage();
+                } else if self.lyrics_mode {
                     self.lyrics_mode = false;
                 } else if !self.page().filter.is_empty() {
                     self.page_mut().filter.clear();
@@ -2161,6 +2193,7 @@ impl App {
                 self.start_wave(vec![MY_WAVE.into()], "Моя волна".into());
             }
             KeyCode::Char('t') => self.lyrics_mode = !self.lyrics_mode,
+            KeyCode::Char('v') => self.toggle_stage(),
             KeyCode::Char('r') => {
                 self.repeat_one = !self.repeat_one;
                 let _ = self.mpris.send(mpris::Update::Repeat(self.repeat_one));

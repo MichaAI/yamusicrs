@@ -57,9 +57,17 @@ pub(crate) struct Shared {
     /// Читающая сторона кольца. Под мьютексом, чтобы декодер мог сделать flush,
     /// даже когда поток PipeWire на паузе и `process` не вызывается.
     cons: Mutex<rtrb::Consumer<f32>>,
+    /// Когда PipeWire последний раз звал `process` (мс от `epoch`) — для сторожа.
+    last_process: AtomicU64,
+    epoch: std::time::Instant,
 }
 
 impl Shared {
+    pub(crate) fn mark_process(&self) {
+        self.last_process
+            .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
     fn volume(&self) -> f32 {
         f32::from_bits(self.volume.load(Ordering::Relaxed))
     }
@@ -132,6 +140,8 @@ impl Player {
             paused: AtomicBool::new(false),
             segments: Mutex::new(VecDeque::new()),
             cons: Mutex::new(cons),
+            last_process: AtomicU64::new(0),
+            epoch: std::time::Instant::now(),
         });
         let out = output::spawn(shared.clone())?;
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -157,6 +167,7 @@ impl Player {
     }
 
     pub fn load(&self, token: Token, source: Source, gain: f32, start_secs: f64) {
+        self.shared.mark_process();
         self.cancel_all();
         self.track(&source);
         let _ = self.cmd.send(Cmd::Load {
@@ -191,6 +202,8 @@ impl Player {
     }
 
     pub fn set_paused(&self, paused: bool) {
+        // Отсчёт сторожа — с момента, когда снова ждём звук из PipeWire.
+        self.shared.mark_process();
         self.shared.paused.store(paused, Ordering::Relaxed);
         self.out.set_active(!paused);
     }
@@ -201,6 +214,22 @@ impl Player {
 
     pub fn volume(&self) -> f32 {
         self.shared.volume()
+    }
+
+    /// Играем, в кольце есть звук, а PipeWire его не забирает дольше `limit`:
+    /// устройство вывода зависло или поток потерял связь с графом.
+    pub fn stalled(&self, limit: std::time::Duration) -> bool {
+        if self.paused() || self.shared.segments.lock().is_empty() || self.shared.cons.lock().slots() == 0 {
+            return false;
+        }
+        let last = self.shared.last_process.load(Ordering::Relaxed);
+        self.shared.epoch.elapsed().as_millis() as u64 > last + limit.as_millis() as u64
+    }
+
+    /// Пересоздать поток PipeWire с текущим форматом.
+    pub fn reconnect_output(&self) {
+        self.shared.mark_process();
+        self.out.reconnect();
     }
 
     pub fn set_volume(&self, v: f32) {

@@ -38,6 +38,13 @@ impl Handle {
         }
     }
 
+    /// Пересоздать поток с тем же форматом (сторож при зависшем выводе).
+    pub fn reconnect(&self) {
+        if let Some(f) = *self.configured.lock() {
+            let _ = self.tx.send(Msg::Configure(f));
+        }
+    }
+
     pub fn current(&self) -> Option<Format> {
         *self.configured.lock()
     }
@@ -220,6 +227,7 @@ fn bytemuck_f32(bytes: &mut [u8]) -> &mut [f32] {
 
 fn fill(st: &mut ProcessState, out: &mut [f32]) {
     let shared = &st.shared;
+    shared.mark_process();
     let mut cons = shared.cons.lock();
 
     let avail = cons.slots();

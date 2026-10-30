@@ -44,11 +44,9 @@ impl Ctx {
 pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let area = f.area();
     // Блоб живёт только на экране волны; под справкой и полноэкранным текстом его не видно.
-    let blob_visible = matches!(app.screen, Screen::Main)
-        && matches!(app.page().view, View::Wave)
-        && !app.show_help
-        && !app.lyrics_mode
-        && app.wave.items.ready().is_some();
+    let on_wave = matches!(app.page().view, View::Wave) && !app.lyrics_mode && app.wave.items.ready().is_some();
+    let blob_visible =
+        matches!(app.screen, Screen::Main) && !app.show_help && (app.stage_mode && app.now.is_some() || on_wave);
     if !blob_visible {
         app.images.hide_blob();
     }
@@ -352,6 +350,14 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     app.areas.list = Rect::default();
     app.areas.lyrics = Rect::default();
 
+    app.areas.cover = Rect::default();
+    if app.stage_mode && app.now.is_some() {
+        draw_stage(f, body, app, ctx);
+        draw_player(f, player, app, ctx);
+        draw_footer(f, footer, app, ctx);
+        draw_toasts(f, area, app, ctx);
+        return;
+    }
     if app.lyrics_mode {
         let b = card(ctx, Line::styled(" Текст ", ctx.accent()));
         let inner = b.inner(main);
@@ -452,6 +458,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
                 ("a", "в очередь"),
                 ("o/i", "альбом/артист"),
                 ("t", "текст"),
+                ("v", "сцена"),
                 ("?", "все клавиши"),
             ],
         }
@@ -1261,8 +1268,15 @@ fn contrast_over_blob(f: &mut Frame, blob: Rect, text: Rect, colors: [[f32; 3]; 
             }
             let u = ((x.saturating_sub(blob.x)) as f32 + 0.5) / blob.width.max(1) as f32 * 2.0 - 1.0;
             let v = ((y.saturating_sub(blob.y)) as f32 + 0.5) / blob.height.max(1) as f32 * 2.0 - 1.0;
+            if !(-1.0..=1.0).contains(&u) || !(-1.0..=1.0).contains(&v) {
+                continue;
+            }
             let p = super::kitty::blob_pixel(u, v, colors, t);
             let a = p[3] / 255.0;
+            // Где блоба почти нет — оставляем родной цвет текста.
+            if a < 0.15 {
+                continue;
+            }
             let px = [0, 1, 2].map(|i| p[i] * a + BG[i] * (1.0 - a));
             let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
             cell.set_fg(if lum > 135.0 {
@@ -1282,17 +1296,114 @@ fn blob_halfblocks(f: &mut Frame, r: Rect, colors: [[f32; 3]; 2], t: f32) {
             let u = x as f32 / r.width.max(1) as f32 * 2.0 - 1.0;
             let px = |row: f32| {
                 let v = row / (r.height as f32 * 2.0) * 2.0 - 1.0;
-                let p = super::kitty::blob_pixel(u, v, colors, t);
+                super::kitty::blob_pixel(u, v, colors, t)
+            };
+            let (top, bot) = (px(y as f32 * 2.0), px(y as f32 * 2.0 + 1.0));
+            // Прозрачные места не трогаем — там остаётся фон терминала и текст.
+            if top[3] < 12.0 && bot[3] < 12.0 {
+                continue;
+            }
+            let col = |p: [f32; 4]| {
                 let a = p[3] / 255.0;
                 Color::Rgb((p[0] * a) as u8, (p[1] * a) as u8, (p[2] * a) as u8)
             };
             if let Some(c) = buf.cell_mut((r.x + x, r.y + y)) {
-                c.set_symbol("▀")
-                    .set_fg(px(y as f32 * 2.0))
-                    .set_bg(px(y as f32 * 2.0 + 1.0));
+                c.set_symbol("▀").set_fg(col(top)).set_bg(col(bot));
             }
         }
     }
+}
+
+// ── сцена ────────────────────────────────────────────────────────────────────
+
+/// Полноэкранный «сейчас играет»: крупная обложка со свечением в её цветах, текст справа.
+fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
+    let Some(track) = app.now.as_ref().map(|n| n.track.clone()) else {
+        return;
+    };
+    let [left, right] = Layout::horizontal([Constraint::Percentage(52), Constraint::Min(30)]).areas(area);
+    let [cover_zone, info] = Layout::vertical([Constraint::Min(8), Constraint::Length(6)]).areas(left);
+
+    // Обложка ~70% зоны, ореол-блоб в 1.6 раза больше и под ней.
+    let max_h = (cover_zone.height as f32 * 0.72) as u16;
+    let max_w = (cover_zone.width as f32 * 0.72) as u16;
+    let h = max_h.min((max_w as f32 / ctx.cell_aspect) as u16).max(4);
+    let w = ((h as f32) * ctx.cell_aspect).round() as u16;
+    let cover = Rect {
+        x: cover_zone.x + (cover_zone.width.saturating_sub(w)) / 2,
+        y: cover_zone.y + (cover_zone.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    let gh = ((h as f32) * 1.6) as u16;
+    let gw = ((gh as f32) * ctx.cell_aspect).round() as u16;
+    let glow = Rect {
+        x: cover.x.saturating_sub((gw.saturating_sub(w)) / 2).max(area.x),
+        y: cover.y.saturating_sub((gh.saturating_sub(h)) / 2).max(area.y),
+        width: gw.min(area.width),
+        height: gh.min(area.height),
+    };
+    let colors = [
+        [ctx.p.accent.0, ctx.p.accent.1, ctx.p.accent.2],
+        [ctx.p.accent2.0, ctx.p.accent2.1, ctx.p.accent2.2],
+    ];
+    let speed = if app.player.paused() { 0.15 } else { 0.6 };
+    app.wave_phase += ctx.dt * speed;
+    if !app.images.blob(glow, colors, app.wave_phase) {
+        blob_halfblocks(f, glow, colors, app.wave_phase);
+    }
+    match track.cover_uri() {
+        Some(k) if app.images.contains(k) => {
+            app.images.render(k, cover, f.buffer_mut(), ctx.cell_aspect);
+            app.areas.cover = cover;
+        }
+        _ => cover_placeholder(f, cover, ctx, true),
+    }
+
+    // Подпись под обложкой.
+    let iw = info.width as usize;
+    let mut t = vec![];
+    t.extend(gradient_line(
+        marquee(&track.full_title(), iw.saturating_sub(4), ctx.t).trim_end(),
+        ctx.p.fg,
+        ctx.p.accent,
+        ctx.t * 0.25,
+        true,
+    ));
+    let album = track.album().map(|a| match a.year {
+        Some(y) => format!("{} · {y}", a.full_title()),
+        None => a.full_title(),
+    });
+    let lines = vec![
+        Line::raw(""),
+        Line::from(t),
+        Line::styled(
+            marquee(&track.artist_names(), iw.saturating_sub(4), ctx.t + 1.3)
+                .trim_end()
+                .to_string(),
+            ctx.accent(),
+        ),
+        Line::styled(album.unwrap_or_default(), ctx.dim()),
+    ];
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), info);
+    contrast_over_blob(
+        f,
+        glow,
+        Rect {
+            y: info.y + 1,
+            height: 3,
+            ..info
+        },
+        colors,
+        app.wave_phase,
+    );
+
+    let lyr = Rect {
+        x: right.x + 1,
+        width: right.width.saturating_sub(2),
+        ..right
+    };
+    lyrics_panel(f, lyr, app, ctx, true);
 }
 
 // ── боковая панель ───────────────────────────────────────────────────────────
@@ -1330,7 +1441,10 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     .areas(inner);
     let _ = gap;
     match track.cover_uri() {
-        Some(k) if app.images.contains(k) => app.images.render(k, cover, f.buffer_mut(), ctx.cell_aspect),
+        Some(k) if app.images.contains(k) => {
+            app.images.render(k, cover, f.buffer_mut(), ctx.cell_aspect);
+            app.areas.cover = super::kitty::fit_square(cover, ctx.cell_aspect);
+        }
         _ => {
             let r = super::kitty::fit_square(cover, ctx.cell_aspect);
             f.render_widget(
@@ -1759,6 +1873,7 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("w", "запустить Мою волну"),
         ("/", "поиск"),
         ("t", "текст на весь экран"),
+        ("v / клик по обложке", "сцена: обложка крупно + текст"),
         ("r / s", "повтор трека / перемешивание"),
         ("Q", "качество: Lossless → Высокое → Экономия"),
         ("R", "обновить библиотеку"),
