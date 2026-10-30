@@ -1229,10 +1229,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
             Span::styled("запускаю…", ctx.dim()),
         ])
     } else {
-        Line::styled(
-            "↑↓ — выбрать · Enter — включить · n — дальше · d — не нравится",
-            ctx.dim(),
-        )
+        Line::styled("Enter — включить · n — дальше · d — мимо", ctx.dim())
     };
     f.render_widget(
         Paragraph::new(hint_line).alignment(Alignment::Center),

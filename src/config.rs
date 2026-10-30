@@ -97,6 +97,10 @@ impl Config {
 
     pub fn kitty_enabled(&self) -> bool {
         self.kitty_images.unwrap_or_else(|| {
+            // tmux графику kitty не пропускает (а KITTY_WINDOW_ID внутри него наследуется).
+            if std::env::var_os("TMUX").is_some() {
+                return false;
+            }
             std::env::var("TERM").is_ok_and(|t| t.contains("kitty"))
                 || std::env::var_os("KITTY_WINDOW_ID").is_some()
                 || std::env::var("TERM_PROGRAM").is_ok_and(|t| t == "ghostty" || t == "WezTerm")

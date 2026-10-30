@@ -12,6 +12,9 @@ use crossterm::event::{
     KeyEventKind,
 };
 use crossterm::execute;
+use crossterm::terminal::SetTitle;
+
+pub const TITLE: &str = "YaMusicRS";
 use futures_util::StreamExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -19,11 +22,21 @@ use crate::app::{App, Msg};
 
 pub async fn run(mut app: App, mut rx: UnboundedReceiver<Msg>) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
-    execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+    // \e[22;0t — запомнить заголовок окна, чтобы вернуть его при выходе.
+    print!("\x1b[22;0t");
+    execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        SetTitle(TITLE)
+    )?;
     let res = event_loop(&mut terminal, &mut app, &mut rx).await;
     app.shutdown();
     let _ = app.images.clear_all(terminal.backend_mut());
     let _ = execute!(std::io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+    // \e[23;0t — вернуть заголовок, который был до запуска.
+    print!("\x1b[23;0t");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
     ratatui::restore();
     res
 }
@@ -42,6 +55,7 @@ async fn event_loop(
     let mut cell_aspect = kitty::cell_aspect();
     let mut dirty = true;
     let mut refresh_checked = false;
+    let mut last_title = String::new();
 
     loop {
         tokio::select! {
@@ -103,5 +117,10 @@ async fn event_loop(
         })?;
         // Картинки и команды размещения уходят в терминал отдельно от текстового диффа.
         app.images.flush(terminal.backend_mut())?;
+        let title = app.window_title();
+        if title != last_title {
+            execute!(terminal.backend_mut(), SetTitle(&title))?;
+            last_title = title;
+        }
     }
 }

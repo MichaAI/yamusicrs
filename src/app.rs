@@ -2198,6 +2198,29 @@ impl App {
         }
     }
 
+    /// Заголовок окна терминала: что играет, или просто имя приложения.
+    pub fn window_title(&self) -> String {
+        let t = self.now.as_ref().map(|n| &n.track).or(self.loading_track.as_ref());
+        match t {
+            Some(t) => {
+                let state = if self.loading_track.is_some() {
+                    "…"
+                } else if self.player.paused() {
+                    "⏸"
+                } else {
+                    "▶"
+                };
+                format!(
+                    "{state} {} — {} · {}",
+                    t.full_title(),
+                    t.artist_names(),
+                    crate::ui::TITLE
+                )
+            }
+            None => crate::ui::TITLE.into(),
+        }
+    }
+
     pub fn quality(&self) -> Quality {
         self.fetcher.as_ref().map(|f| f.quality()).unwrap_or(self.cfg.quality)
     }
