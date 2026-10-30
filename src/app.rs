@@ -271,6 +271,9 @@ pub struct App {
     pub wave_phase: f32,
     /// Текущие (плавно догоняющие цель) цвета блоба.
     pub blob_colors: [[f32; 3]; 4],
+    /// Плавные энергия и скорость блоба.
+    pub blob_energy: f32,
+    pub blob_speed: f32,
     pub now: Option<Now>,
     /// Токен последней явной загрузки (чтобы игнорировать устаревшие ответы).
     requested: Option<Token>,
@@ -435,6 +438,8 @@ impl App {
                 hits: Vec::new(),
             },
             wave_phase: 0.0,
+            blob_energy: 0.0,
+            blob_speed: 0.3,
             blob_colors: [
                 [255.0, 204.0, 0.0],
                 [255.0, 107.0, 61.0],

@@ -1210,7 +1210,9 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     let colors = to_cols([agent, agent.rotate_hue(0.12), c3, c4]);
     // Блоб «дышит» быстрее, когда играет.
     let speed = if playing { 1.0 } else { 0.3 };
-    app.wave_phase += ctx.dt * speed;
+    // Скорость меняется плавно — без рывка при паузе/запуске.
+    app.blob_speed += (speed - app.blob_speed) * (ctx.dt * 2.0).min(1.0);
+    app.wave_phase += ctx.dt * app.blob_speed;
     // Блоб — живой фон всей правой части.
     let blob_rect = stage;
     let colors = draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 });
@@ -1333,6 +1335,7 @@ fn blob_contrast(images: &super::kitty::Images, blob: Rect, x: f32, y: f32, colo
                 colors,
                 phase: t,
                 energy: 0.5,
+                dither: 0.0,
             },
         )
     });
@@ -1375,6 +1378,9 @@ fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, target: Cols, 
         }
     }
     let colors = app.blob_colors;
+    // «Энергия» (размах движения шаров) тоже догоняет цель плавно.
+    app.blob_energy += (energy - app.blob_energy) * (ctx.dt * 2.0).min(1.0);
+    let energy = app.blob_energy;
     // Пиксели кадра в пропорциях области: ~256 по ширине.
     let pw = 256u32;
     let ph =
@@ -1383,6 +1389,7 @@ fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, target: Cols, 
         colors,
         phase: app.wave_phase,
         energy,
+        dither: app.cfg.blob_dither as f32,
     };
     let (images, gfx) = (&mut app.images, &mut app.gfx);
     if !images.blob(rect, pw, ph, || gfx.blob(pw, ph, &params)) {
@@ -1413,6 +1420,7 @@ fn blob_halfblocks(f: &mut Frame, r: Rect, colors: Cols, t: f32) {
                         colors,
                         phase: t,
                         energy: 0.5,
+                        dither: 0.0,
                     },
                 )
             };
@@ -1468,7 +1476,9 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         ctx.p.accent2.rotate_hue(0.1),
     ]);
     let speed = if app.player.paused() { 0.15 } else { 0.6 };
-    app.wave_phase += ctx.dt * speed;
+    // Скорость меняется плавно — без рывка при паузе/запуске.
+    app.blob_speed += (speed - app.blob_speed) * (ctx.dt * 2.0).min(1.0);
+    app.wave_phase += ctx.dt * app.blob_speed;
     draw_aura(f, app, ctx, glow, colors, if app.player.paused() { 0.0 } else { 1.0 });
     match track.cover_uri() {
         Some(k) if app.images.contains(k) => {
@@ -1598,7 +1608,8 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     };
 
     let cover_h = ((inner.width as f32 - 2.0) / ctx.cell_aspect).floor() as u16;
-    let cover_h = cover_h.min(inner.height.saturating_sub(7) * 2 / 3).max(4);
+    // +1 строка к обложке: по ширине место есть (запас в 2 колонки под пропорции ячейки).
+    let cover_h = cover_h.min(inner.height.saturating_sub(7) * 2 / 3).max(4) + 1;
     let [cover, gap, info, lyr] = Layout::vertical([
         Constraint::Length(cover_h),
         Constraint::Length(1),
@@ -1666,8 +1677,13 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(ctx.p.dim.lerp(ctx.p.accent, 0.3).scale(0.8).color()));
         f.render_widget(b, r);
-        let play = if app.player.paused() { "" } else { "" };
-        let buttons = [("", 0u8, ctx.fg()), (play, 1, ctx.accent()), ("", 2, ctx.fg())];
+        // Nerd Font (Font Awesome, BMP): назад, play/pause, вперёд — escape-кодами, чтобы не терялись.
+        let play = if app.player.paused() { "\u{f04b}" } else { "\u{f04c}" };
+        let buttons = [
+            ("\u{f048}", 0u8, ctx.fg()),
+            (play, 1, ctx.accent()),
+            ("\u{f051}", 2, ctx.fg()),
+        ];
         for (i, (label, action, style)) in buttons.into_iter().enumerate() {
             let x = r.x + 1 + pad + i as u16 * (icon + gap);
             f.render_widget(

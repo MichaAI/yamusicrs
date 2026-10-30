@@ -21,8 +21,10 @@ pub struct Config {
     pub normalize_target_lufs: f32,
     /// Рисовать обложки через kitty graphics protocol (auto определяется по $TERM).
     pub kitty_images: Option<bool>,
-    /// Рисовать блоб и агентов на видеокарте (иначе — CPU).
+    /// Рисовать блоб на видеокарте (иначе — CPU).
     pub gpu: bool,
+    /// Дизеринг блоба (Байер 4×4): уровней на канал, 0 — выключен.
+    pub blob_dither: u32,
     /// Частота кадров анимаций.
     pub fps: u32,
     /// Отправлять историю прослушиваний в Яндекс.
@@ -43,6 +45,7 @@ impl Default for Config {
             normalize_target_lufs: -14.0,
             kitty_images: None,
             gpu: true,
+            blob_dither: 6,
             fps: 30,
             report_plays: true,
         }

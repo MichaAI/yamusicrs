@@ -9,6 +9,8 @@ pub struct Blob {
     pub colors: [[f32; 3]; 4],
     pub phase: f32,
     pub energy: f32,
+    /// Уровней на канал для дизеринга Байера; 0 — без дизеринга.
+    pub dither: f32,
 }
 
 impl Blob {
@@ -68,10 +70,25 @@ fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
         for x in 0..w {
             let u = (x as f32 + 0.5) / w as f32;
             let v = (y as f32 + 0.5) / h as f32;
-            out.extend(blob_px(u, v, aspect, b).map(|c| c as u8));
+            let p = dither(blob_px(u, v, aspect, b), x, y, b.dither);
+            out.extend(p.map(|c| c as u8));
         }
     }
     out
+}
+
+const BAYER: [f32; 16] = [
+    0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0,
+];
+
+/// Упорядоченный дизеринг (Байер 4×4): цвет и альфа квантуются до `levels` уровней.
+fn dither(p: [f32; 4], x: u32, y: u32, levels: f32) -> [f32; 4] {
+    if levels < 2.0 {
+        return p;
+    }
+    let th = (BAYER[((y % 4) * 4 + x % 4) as usize] + 0.5) / 16.0;
+    let l = levels - 1.0;
+    p.map(|c| ((c / 255.0 * l + th).floor() / l).clamp(0.0, 1.0) * 255.0)
 }
 
 fn smooth(a: f32, b: f32, x: f32) -> f32 {
@@ -120,10 +137,9 @@ pub fn blob_px(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
         }
     }
     let col = acc.map(|x| x / wsum.max(1e-6));
-    let body = smooth(0.88, 1.06, f);
-    let halo = smooth(0.45, 0.95, f) * 0.28;
+    let body = smooth(0.30, 1.35, f);
     let edge = u.min(1.0 - u).min(v.min(1.0 - v));
-    let a = (body * 0.94).max(halo) * smooth(0.0, 0.12, edge);
+    let a = body * 0.94 * smooth(0.0, 0.12, edge);
     let rgb = col.map(|x| x.clamp(0.0, 1.0) * 255.0);
     [rgb[0], rgb[1], rgb[2], a * 255.0]
 }
@@ -206,7 +222,7 @@ impl Gpu {
                 u.extend_from_slice(&v.to_le_bytes());
             }
         }
-        for v in [b.phase, b.energy, w as f32 / h.max(1) as f32, 0.0] {
+        for v in [b.phase, b.energy, w as f32 / h.max(1) as f32, b.dither] {
             u.extend_from_slice(&v.to_le_bytes());
         }
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
