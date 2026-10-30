@@ -270,6 +270,8 @@ pub struct App {
     pub wave: WaveUi,
     /// Фаза анимации блоба (быстрее, когда играет).
     pub wave_phase: f32,
+    /// Текущие (плавно догоняющие цель) цвета блоба.
+    pub blob_colors: [[f32; 3]; 4],
     pub now: Option<Now>,
     /// Токен последней явной загрузки (чтобы игнорировать устаревшие ответы).
     requested: Option<Token>,
@@ -426,6 +428,12 @@ impl App {
                 hits: Vec::new(),
             },
             wave_phase: 0.0,
+            blob_colors: [
+                [255.0, 204.0, 0.0],
+                [255.0, 107.0, 61.0],
+                [240.0, 42.0, 79.0],
+                [120.0, 90.0, 220.0],
+            ],
             now: None,
             requested: None,
             loading_track: None,

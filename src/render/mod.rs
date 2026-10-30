@@ -3,21 +3,12 @@
 
 use std::time::Instant;
 
-/// Параметры блоба: цвета (0..255), фаза анимации и «энергия» (0 — спокойно, 1 — играет).
+/// Параметры блоба: четыре цвета палитры (0..255), фаза анимации и «энергия» (0..1).
 #[derive(Clone, Copy)]
 pub struct Blob {
-    pub colors: [[f32; 3]; 2],
+    pub colors: [[f32; 3]; 4],
     pub phase: f32,
     pub energy: f32,
-}
-
-impl Blob {
-    /// Три цвета: два заданных и промежуточный между ними.
-    fn palette(&self) -> [[f32; 3]; 3] {
-        let [a, b] = self.colors.map(|c| c.map(|v| v / 255.0));
-        let mid = [0, 1, 2].map(|i| (a[i] + b[i]) * 0.5 * 1.08);
-        [a, b, mid.map(|v| v.min(1.0))]
-    }
 }
 
 struct Gpu {
@@ -63,78 +54,86 @@ fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
         for x in 0..w {
             let u = (x as f32 + 0.5) / w as f32;
             let v = (y as f32 + 0.5) / h as f32;
-            out.extend(blob_pixel_aspect(u, v, aspect, b).map(|c| c as u8));
+            out.extend(blob_px(u, v, aspect, b).map(|c| c as u8));
         }
     }
     out
 }
 
-const BALLS: [[f32; 4]; 5] = [
-    [0.31, 0.53, 0.0, 0.50],
-    [0.47, 0.29, 2.1, 0.43],
-    [0.23, 0.41, 4.2, 0.38],
-    [0.39, 0.61, 1.3, 0.33],
-    [0.17, 0.37, 5.1, 0.30],
-];
-
-fn field(q: [f32; 2], t: f32, e: f32, pal: &[[f32; 3]; 3]) -> (f32, [f32; 3]) {
-    let (mut f, mut acc) = (0.0, [0.0f32; 3]);
-    for (k, b) in BALLS.iter().enumerate() {
-        let amp = 0.30 + 0.12 * e;
-        let c = [amp * (t * b[0] + b[2]).sin(), amp * (t * b[1] + b[2] * 1.7).cos()];
-        let r = b[3] * (0.92 + 0.08 * (t * 0.7 + b[2]).sin());
-        let d2 = (q[0] - c[0]).powi(2) + (q[1] - c[1]).powi(2);
-        let v = (-d2 / (r * r)).exp();
-        f += v;
-        let col = pal[[0, 1, 2][k % 3]];
-        for i in 0..3 {
-            acc[i] += v * col[i];
-        }
-    }
-    (f, acc.map(|a| a / f.max(1e-4)))
+fn hash(x: f32, y: f32) -> f32 {
+    ((x * 127.1 + y * 311.7).sin() * 43758.545).rem_euclid(1.0)
 }
 
-/// Пиксель блоба в точке (u, v) ∈ [0,1]² для холста с пропорциями `aspect` (w/h): RGBA 0..255.
-pub fn blob_pixel_aspect(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
-    let pal = b.palette();
-    let (t, e) = (b.phase, b.energy);
-    let mut q = [u * 2.0 - 1.0, v * 2.0 - 1.0];
-    if aspect > 1.0 {
-        q[0] *= aspect;
-    } else {
-        q[1] /= aspect;
-    }
-    let (f, col) = field(q, t, e, &pal);
-    let eps = 0.01;
-    let gx = field([q[0] + eps, q[1]], t, e, &pal).0 - f;
-    let gy = field([q[0], q[1] + eps], t, e, &pal).0 - f;
-    let n = [-gx / eps, -gy / eps, 1.2];
-    let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    let l = [-0.5f32, -0.6, 0.6];
-    let ll = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
-    let light = ((n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / (nl * ll)).clamp(0.0, 1.0);
-    let spec = light.powf(18.0) * 0.18;
-    let ss = |a: f32, b: f32, x: f32| {
-        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    let a = (ss(0.30, 1.05, f).max(ss(0.05, 0.6, f) * 0.25) * 0.9).clamp(0.0, 1.0);
-    let rgb = col.map(|c| ((c * (0.78 + 0.32 * light) + spec).clamp(0.0, 1.0)) * 255.0);
-    [rgb[0], rgb[1], rgb[2], a * 255.0]
-}
-
-/// Совместимость со старыми вызовами (квадратный холст, (u, v) ∈ [-1,1]²).
-pub fn blob_pixel(u: f32, v: f32, colors: [[f32; 3]; 2], t: f32) -> [f32; 4] {
-    blob_pixel_aspect(
-        (u + 1.0) / 2.0,
-        (v + 1.0) / 2.0,
-        1.0,
-        &Blob {
-            colors,
-            phase: t,
-            energy: 0.5,
-        },
+fn noise(x: f32, y: f32) -> f32 {
+    let (ix, iy) = (x.floor(), y.floor());
+    let (fx, fy) = (x - ix, y - iy);
+    let (ux, uy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    mix(
+        mix(hash(ix, iy), hash(ix + 1.0, iy), ux),
+        mix(hash(ix, iy + 1.0), hash(ix + 1.0, iy + 1.0), ux),
+        uy,
     )
+}
+
+fn fbm(x: f32, y: f32) -> f32 {
+    0.55 * noise(x, y) + 0.30 * noise(x * 2.03 + 7.1, y * 2.03 + 7.1) + 0.15 * noise(x * 4.01 + 3.7, y * 4.01 + 3.7)
+}
+
+fn smooth(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn palette(c: &[[f32; 3]; 4], x: f32) -> [f32; 3] {
+    let s = x.rem_euclid(1.0) * 4.0;
+    let i = s.floor() as usize;
+    let f = smooth(0.0, 1.0, s.fract());
+    let (a, b) = (c[i % 4], c[(i + 1) % 4]);
+    [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f)
+}
+
+/// Пиксель блоба в точке (u, v) ∈ [0,1]² холста с пропорциями `aspect`: RGBA 0..255.
+/// Повторяет шейдер blob.wgsl.
+pub fn blob_px(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
+    let c = b.colors.map(|k| k.map(|x| x / 255.0));
+    let (t, e) = (b.phase, b.energy);
+    let (mut qx, mut qy) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
+    if aspect > 1.0 {
+        qx *= aspect;
+    } else {
+        qy /= aspect;
+    }
+    let mut f = 0.0;
+    for k in 0..5 {
+        let fk = k as f32;
+        let amp = 0.28 + 0.10 * e;
+        let cx = amp * (t * (0.21 + 0.07 * fk) + fk * 1.9).sin();
+        let cy = amp * (t * (0.17 + 0.05 * fk) + fk * 2.7).cos();
+        let r = 0.36 + 0.10 * (t * 0.33 + fk * 1.3).sin();
+        f += (-((qx - cx).powi(2) + (qy - cy).powi(2)) / (r * r)).exp();
+    }
+    f += (fbm(qx * 2.2 + t * 0.15, qy * 2.2 + t * 0.15) - 0.5) * 0.35;
+    let a = smooth(0.42, 0.62, f);
+    let w1 = (
+        fbm(qx * 1.6 + t * 0.11, qy * 1.6 - t * 0.07),
+        fbm(qx * 1.6 + 5.2 - t * 0.09, qy * 1.6 + 1.3 + t * 0.05),
+    );
+    let w2 = (
+        fbm(qx * 1.8 + w1.0 * 2.4 + 1.7, qy * 1.8 + w1.1 * 2.4 + 1.7),
+        fbm(qx * 1.8 + w1.0 * 2.4 + 9.2, qy * 1.8 + w1.1 * 2.4 + 9.2),
+    );
+    let val = fbm(qx * 1.3 + w2.0 * 2.2 + t * 0.04, qy * 1.3 + w2.1 * 2.2 + t * 0.04);
+    let bands = 0.5 + 0.5 * (val * 9.0 + t * 0.6 + w1.0 * 4.0).sin();
+    let p1 = palette(&c, val * 1.6 + t * 0.03);
+    let p2 = palette(&c, val * 1.6 + 0.5 + t * 0.03);
+    let col = [0, 1, 2].map(|k| (p1[k] + (p2[k] - p1[k]) * bands * 0.45).clamp(0.0, 1.0) * 255.0);
+    [col[0], col[1], col[2], a * 0.95 * 255.0]
+}
+
+/// Квадратный холст, (u, v) ∈ [-1,1]² — для фолбэка полублоками и подбора контраста.
+pub fn blob_pixel(u: f32, v: f32, b: &Blob) -> [f32; 4] {
+    blob_px((u + 1.0) / 2.0, (v + 1.0) / 2.0, 1.0, b)
 }
 
 async fn init_gpu() -> Option<Gpu> {
@@ -204,10 +203,9 @@ async fn init_gpu() -> Option<Gpu> {
 
 impl Gpu {
     fn render(&self, w: u32, h: u32, b: &Blob) -> Option<Vec<u8>> {
-        let pal = b.palette();
-        let mut u = Vec::with_capacity(64);
-        for c in pal {
-            for v in [c[0], c[1], c[2], 1.0] {
+        let mut u = Vec::with_capacity(80);
+        for c in b.colors {
+            for v in [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, 1.0] {
                 u.extend_from_slice(&v.to_le_bytes());
             }
         }

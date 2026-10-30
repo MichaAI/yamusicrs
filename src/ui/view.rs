@@ -1187,18 +1187,31 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     let playing = wave_on && app.now.is_some() && !app.player.paused();
     let [stage, hint] = Layout::vertical([Constraint::Min(6), Constraint::Length(2)]).areas(area);
 
-    // Цвет блоба — агент выбранного пресета, второй — палитра обложки играющего трека.
-    let agent = sel
+    // Палитра блоба: пресет под мышью (или выбранный) + цвета обложки играющего трека.
+    let (mx, my) = app.mouse;
+    let hovered = app
+        .wave
+        .hits
+        .iter()
+        .find(|(r, _)| mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height)
+        .and_then(|(_, i)| app.wave.items.ready().and_then(|v| v.get(*i)).cloned());
+    let agent = hovered
+        .as_ref()
+        .or(sel)
         .and_then(|i| i.color())
         .map_or(ctx.p.accent, |(r, g, b)| Rgb(r as f32, g as f32, b as f32));
-    let second = if wave_on { ctx.p.accent } else { agent.rotate_hue(0.12) };
-    let colors = [[agent.0, agent.1, agent.2], [second.0, second.1, second.2]];
+    let (c3, c4) = if app.now.is_some() {
+        (ctx.p.accent, ctx.p.accent2)
+    } else {
+        (agent.rotate_hue(0.33), agent.rotate_hue(-0.2))
+    };
+    let colors = to_cols([agent, agent.rotate_hue(0.12), c3, c4]);
     // Блоб «дышит» быстрее, когда играет.
     let speed = if playing { 1.0 } else { 0.3 };
     app.wave_phase += ctx.dt * speed;
     // Блоб — живой фон всей правой части.
     let blob_rect = stage;
-    draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 });
+    let colors = draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 });
 
     let title = if wave_on {
         app.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
@@ -1301,14 +1314,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
 }
 
 /// Цвет текста, читаемый на блобе в точке (x, y) в клетках; None — блоба там почти нет.
-fn blob_contrast(
-    images: &super::kitty::Images,
-    blob: Rect,
-    x: f32,
-    y: f32,
-    colors: [[f32; 3]; 2],
-    t: f32,
-) -> Option<Color> {
+fn blob_contrast(images: &super::kitty::Images, blob: Rect, x: f32, y: f32, colors: Cols, t: f32) -> Option<Color> {
     // Примерный фон терминала там, где блоб прозрачный.
     const BG: [f32; 3] = [24.0, 22.0, 30.0];
     let u = (x - blob.x as f32) / blob.width.max(1) as f32 * 2.0 - 1.0;
@@ -1317,9 +1323,17 @@ fn blob_contrast(
         return None;
     }
     // Реальный кадр блоба в kitty, иначе — формула фолбэка.
-    let p = images
-        .blob_sample((u + 1.0) / 2.0, (v + 1.0) / 2.0)
-        .unwrap_or_else(|| crate::render::blob_pixel(u, v, colors, t));
+    let p = images.blob_sample((u + 1.0) / 2.0, (v + 1.0) / 2.0).unwrap_or_else(|| {
+        crate::render::blob_pixel(
+            u,
+            v,
+            &crate::render::Blob {
+                colors,
+                phase: t,
+                energy: 0.5,
+            },
+        )
+    });
     let a = p[3] / 255.0;
     if a < 0.15 {
         return None;
@@ -1334,14 +1348,7 @@ fn blob_contrast(
 }
 
 /// Текст поверх блоба: каждой букве — тёмный или белый цвет по яркости того, что под ней.
-fn contrast_over_blob(
-    f: &mut Frame,
-    images: &super::kitty::Images,
-    blob: Rect,
-    text: Rect,
-    colors: [[f32; 3]; 2],
-    t: f32,
-) {
+fn contrast_over_blob(f: &mut Frame, images: &super::kitty::Images, blob: Rect, text: Rect, colors: Cols, t: f32) {
     let buf = f.buffer_mut();
     for y in text.y..text.y + text.height {
         for x in text.x..text.x + text.width {
@@ -1357,7 +1364,15 @@ fn contrast_over_blob(
 }
 
 /// Блоб/фон: вектором (GPU или CPU) в kitty, иначе полублоками.
-fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, colors: [[f32; 3]; 2], energy: f32) {
+fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, target: Cols, energy: f32) -> Cols {
+    // Цвета перетекают к новым плавно (смена пресета, наведение, новый трек).
+    let k = (ctx.dt * 2.5).min(1.0);
+    for (c, t) in app.blob_colors.iter_mut().zip(target) {
+        for i in 0..3 {
+            c[i] += (t[i] - c[i]) * k;
+        }
+    }
+    let colors = app.blob_colors;
     // Пиксели кадра в пропорциях области: ~256 по ширине.
     let pw = 256u32;
     let ph =
@@ -1371,17 +1386,33 @@ fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, colors: [[f32;
     if !images.blob(rect, pw, ph, || gfx.blob(pw, ph, &params)) {
         blob_halfblocks(f, rect, colors, app.wave_phase);
     }
+    colors
+}
+
+/// Четыре цвета палитры блоба (0..255).
+type Cols = [[f32; 3]; 4];
+
+fn to_cols(c: [Rgb; 4]) -> Cols {
+    c.map(|k| [k.0, k.1, k.2])
 }
 
 /// Фолбэк без kitty: тот же блоб полублоками.
-fn blob_halfblocks(f: &mut Frame, r: Rect, colors: [[f32; 3]; 2], t: f32) {
+fn blob_halfblocks(f: &mut Frame, r: Rect, colors: Cols, t: f32) {
     let buf = f.buffer_mut();
     for y in 0..r.height {
         for x in 0..r.width {
             let u = x as f32 / r.width.max(1) as f32 * 2.0 - 1.0;
             let px = |row: f32| {
                 let v = row / (r.height as f32 * 2.0) * 2.0 - 1.0;
-                crate::render::blob_pixel(u, v, colors, t)
+                crate::render::blob_pixel(
+                    u,
+                    v,
+                    &crate::render::Blob {
+                        colors,
+                        phase: t,
+                        energy: 0.5,
+                    },
+                )
             };
             let (top, bot) = (px(y as f32 * 2.0), px(y as f32 * 2.0 + 1.0));
             // Прозрачные места не трогаем — там остаётся фон терминала и текст.
@@ -1428,10 +1459,12 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         width: gw.min(area.width),
         height: gh.min(area.height),
     };
-    let colors = [
-        [ctx.p.accent.0, ctx.p.accent.1, ctx.p.accent.2],
-        [ctx.p.accent2.0, ctx.p.accent2.1, ctx.p.accent2.2],
-    ];
+    let colors = to_cols([
+        ctx.p.accent,
+        ctx.p.accent.rotate_hue(-0.08),
+        ctx.p.accent2,
+        ctx.p.accent2.rotate_hue(0.1),
+    ]);
     let speed = if app.player.paused() { 0.15 } else { 0.6 };
     app.wave_phase += ctx.dt * speed;
     draw_aura(f, app, ctx, glow, colors, if app.player.paused() { 0.0 } else { 1.0 });
@@ -1587,7 +1620,9 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     }
     app.areas.info = info;
     // Кнопки управления — справа от названия и артиста, в рамке на три строки.
-    let box_w = 17u16;
+    // Рамка ровно по содержимому: «␣␣󰒮␣␣␣󰐊␣␣␣󰒭␣␣» — значки по 2 клетки, равные отступы.
+    let (pad, gap, icon) = (2u16, 3u16, 2u16);
+    let box_w = 2 + pad * 2 + icon * 3 + gap * 2;
     let with_box = info.width >= box_w + 16 && info.height >= 3;
     let text = if with_box {
         Rect {
@@ -1609,28 +1644,31 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(ctx.p.dim.lerp(ctx.p.accent, 0.3).scale(0.8).color()));
-        let inner = b.inner(r);
         f.render_widget(b, r);
-        let play = if app.player.paused() { "󰐊 " } else { "󰏤 " };
-        let buttons = [("󰒮 ", 0u8, ctx.fg()), (play, 1, ctx.accent()), ("󰒭 ", 2, ctx.fg())];
-        // Три зоны по ширине рамки — кликабельны целиком.
-        let cell = inner.width / 3;
+        let play = if app.player.paused() { "󰐊" } else { "󰏤" };
+        let buttons = [("󰒮", 0u8, ctx.fg()), (play, 1, ctx.accent()), ("󰒭", 2, ctx.fg())];
         for (i, (label, action, style)) in buttons.into_iter().enumerate() {
-            let zone = Rect {
-                x: inner.x + i as u16 * cell,
-                y: r.y,
-                width: cell,
-                height: 3,
-            };
+            let x = r.x + 1 + pad + i as u16 * (icon + gap);
             f.render_widget(
-                Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))).alignment(Alignment::Center),
+                Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))),
                 Rect {
-                    y: inner.y,
+                    x,
+                    y: r.y + 1,
+                    width: icon,
                     height: 1,
-                    ..zone
                 },
             );
-            app.controls.push((zone, action));
+            // Кликабельна вся колонка кнопки вместе с половинами промежутков.
+            let zx = x.saturating_sub(gap / 2 + 1).max(r.x);
+            app.controls.push((
+                Rect {
+                    x: zx,
+                    y: r.y,
+                    width: icon + gap,
+                    height: 3,
+                },
+                action,
+            ));
         }
     }
     if app.kitty_text {
