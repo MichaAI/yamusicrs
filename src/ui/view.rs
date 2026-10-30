@@ -1183,6 +1183,18 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
         );
     }
 
+    contrast_over_blob(
+        f,
+        blob_rect,
+        Rect {
+            y: ty,
+            height: 3,
+            ..stage
+        },
+        colors,
+        app.wave_phase,
+    );
+
     // Кнопки ⏮ ▶ ⏭ — кликабельные.
     let play = if wave_on && !app.player.paused() { "⏸" } else { "▶" };
     let labels = [("⏮", 0u8), (play, 1), ("⏭", 2)];
@@ -1239,6 +1251,32 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
             ..hint
         },
     );
+}
+
+/// Текст поверх блоба: каждой букве — тёмный или белый цвет по яркости того, что под ней.
+fn contrast_over_blob(f: &mut Frame, blob: Rect, text: Rect, colors: [[f32; 3]; 2], t: f32) {
+    // Примерный фон терминала там, где блоб прозрачный.
+    const BG: [f32; 3] = [24.0, 22.0, 30.0];
+    let buf = f.buffer_mut();
+    for y in text.y..text.y + text.height {
+        for x in text.x..text.x + text.width {
+            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            let u = ((x.saturating_sub(blob.x)) as f32 + 0.5) / blob.width.max(1) as f32 * 2.0 - 1.0;
+            let v = ((y.saturating_sub(blob.y)) as f32 + 0.5) / blob.height.max(1) as f32 * 2.0 - 1.0;
+            let p = super::kitty::blob_pixel(u, v, colors, t);
+            let a = p[3] / 255.0;
+            let px = [0, 1, 2].map(|i| p[i] * a + BG[i] * (1.0 - a));
+            let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+            cell.set_fg(if lum > 135.0 {
+                Color::Rgb(18, 16, 22)
+            } else {
+                Color::Rgb(250, 250, 250)
+            });
+        }
+    }
 }
 
 /// Фолбэк без kitty: тот же блоб полублоками.

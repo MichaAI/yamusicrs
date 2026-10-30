@@ -381,16 +381,10 @@ pub fn blob_pixel(u: f32, v: f32, colors: [[f32; 3]; 2], t: f32) -> [f32; 4] {
     }
     let mix = (w2 / field.max(1e-4)).clamp(0.0, 1.0);
     let c = [0, 1, 2].map(|i| colors[0][i] + (colors[1][i] - colors[0][i]) * mix);
-    // Ядро яркое, края — мягкое свечение.
+    // Цвет агента как есть (без пересвета в белый), края мягко уходят в прозрачность.
     let a = ((field - 0.25) / 0.9).clamp(0.0, 1.0);
-    let a = a * a * (3.0 - 2.0 * a);
-    let glow = 1.0 + 0.25 * (field - 1.0).max(0.0);
-    [
-        (c[0] * glow).min(255.0),
-        (c[1] * glow).min(255.0),
-        (c[2] * glow).min(255.0),
-        a * 255.0,
-    ]
+    let a = a * a * (3.0 - 2.0 * a) * 0.88;
+    [c[0], c[1], c[2], a * 255.0]
 }
 
 fn blob_frame(n: u32, colors: [[f32; 3]; 2], t: f32) -> Vec<u8> {
