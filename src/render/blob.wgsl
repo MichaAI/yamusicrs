@@ -58,17 +58,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         wsum += w;
         acc += w * P.c[k % 4].rgb;
     }
-    var col = acc / max(wsum, 1e-6);
+    let col = acc / max(wsum, 1e-6);
 
-    // Тонкие изолинии внутри — чуть светлее, медленно плывут.
-    let iso = abs(fract(log2(f + 1.0) * 2.2 - t * 0.05) - 0.5);
-    let line = (1.0 - smoothstep(0.0, 0.06, iso)) * smoothstep(1.05, 1.6, f);
-    col = mix(col, vec3<f32>(1.0), 0.18 * line);
 
     // Тело: край по изоповерхности f=1, сглаженный; снаружи — мягкий ореол.
     let body = smoothstep(0.88, 1.06, f);
-    let halo = smoothstep(0.25, 0.95, f) * 0.35;
-    let a = max(body * 0.94, halo);
-    let n = fract(sin(dot(in.pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.547) - 0.5;
-    return vec4<f32>(clamp(col + n / 255.0, vec3<f32>(0.0), vec3<f32>(1.0)), a);
+    let halo = smoothstep(0.45, 0.95, f) * 0.28;
+    // Затухание к краям холста: ореол не упирается в границу картинки.
+    let edge = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
+    let a = max(body * 0.94, halo) * smoothstep(0.0, 0.12, edge);
+    return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), a);
 }

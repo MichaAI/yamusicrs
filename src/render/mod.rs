@@ -19,7 +19,7 @@ impl Blob {
             let grey = (c[0] + c[1] + c[2]) / 3.0;
             c.map(|v| {
                 let desat = v + (grey - v) * 0.25;
-                desat + (1.0 - desat) * 0.45
+                desat + (1.0 - desat) * 0.3
             })
         })
     }
@@ -119,13 +119,11 @@ pub fn blob_px(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
             acc[i] += w * c[k % 4][i];
         }
     }
-    let mut col = acc.map(|x| x / wsum.max(1e-6));
-    let iso = ((f + 1.0).log2() * 2.2 - t * 0.05).rem_euclid(1.0) - 0.5;
-    let line = (1.0 - smooth(0.0, 0.06, iso.abs())) * smooth(1.05, 1.6, f);
-    col = col.map(|x| x + (1.0 - x) * 0.18 * line);
+    let col = acc.map(|x| x / wsum.max(1e-6));
     let body = smooth(0.88, 1.06, f);
-    let halo = smooth(0.25, 0.95, f) * 0.35;
-    let a = (body * 0.94).max(halo);
+    let halo = smooth(0.45, 0.95, f) * 0.28;
+    let edge = u.min(1.0 - u).min(v.min(1.0 - v));
+    let a = (body * 0.94).max(halo) * smooth(0.0, 0.12, edge);
     let rgb = col.map(|x| x.clamp(0.0, 1.0) * 255.0);
     [rgb[0], rgb[1], rgb[2], a * 255.0]
 }
