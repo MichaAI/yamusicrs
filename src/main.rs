@@ -27,6 +27,22 @@ struct Cli {
 }
 
 fn main() -> color_eyre::Result<()> {
+    // Потоков ещё нет, менять окружение и настройки malloc безопасно.
+    // SAFETY: вызывается до запуска любых потоков.
+    unsafe {
+        // Vulkan-загрузчик открывает драйверы всех вендоров (radeon и lavapipe тянут LLVM),
+        // это ~20 МБ памяти ради блоба. Оставляем только драйвер своей видеокарты.
+        if std::env::var_os("VK_LOADER_DRIVERS_SELECT").is_none()
+            && std::env::var_os("VK_LOADER_DRIVERS_DISABLE").is_none()
+        {
+            match vulkan_drivers() {
+                Some(sel) => std::env::set_var("VK_LOADER_DRIVERS_SELECT", sel),
+                None => std::env::set_var("VK_LOADER_DRIVERS_DISABLE", "*lvp*"),
+            }
+        }
+        // По арене malloc на поток — это десятки мегабайт фрагментов; плееру хватит двух.
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+    }
     // Плееру хватает двух рабочих потоков; блокирующих (декод картинок) — не больше четырёх.
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -35,6 +51,29 @@ fn main() -> color_eyre::Result<()> {
         .enable_all()
         .build()?
         .block_on(run())
+}
+
+/// Маски манифестов Vulkan-драйверов под видеокарты из `/sys/class/drm`;
+/// `None`, если встретился незнакомый вендор (тогда пусть загрузчик решает сам).
+fn vulkan_drivers() -> Option<String> {
+    let mut sel: Vec<&str> = Vec::new();
+    for e in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
+        let Ok(v) = std::fs::read_to_string(e.path().join("device/vendor")) else {
+            continue;
+        };
+        let masks: &[&str] = match v.trim() {
+            "0x8086" => &["*intel*"],
+            "0x1002" => &["*radeon*", "*amd*"],
+            "0x10de" => &["*nvidia*", "*nouveau*"],
+            _ => return None,
+        };
+        for m in masks {
+            if !sel.contains(m) {
+                sel.push(m);
+            }
+        }
+    }
+    (!sel.is_empty()).then(|| sel.join(","))
 }
 
 async fn run() -> color_eyre::Result<()> {

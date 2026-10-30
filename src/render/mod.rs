@@ -148,7 +148,10 @@ pub fn blob_pixel(u: f32, v: f32, b: &Blob) -> [f32; 4] {
 }
 
 async fn init_gpu() -> Option<Gpu> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    // Только Vulkan: GL-бэкенд тянет EGL и gallium с LLVM (~40 МБ памяти) ради того же шейдера.
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::VULKAN;
+    let instance = wgpu::Instance::new(desc.with_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -156,6 +159,10 @@ async fn init_gpu() -> Option<Gpu> {
         })
         .await
         .ok()?;
+    // Программный рендер (lavapipe) ничем не лучше своего CPU-пути.
+    if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+        return None;
+    }
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await.ok()?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("blob"),

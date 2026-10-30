@@ -2,36 +2,57 @@
 //!
 //! Чтение блокируется, пока нужные байты не докачаны, — так трек начинает играть
 //! через долю секунды после старта загрузки, а не после её окончания.
+//!
+//! Байты лежат не в памяти процесса, а в удалённом с диска файле в кеше: lossless-трек
+//! весит 30–60 МБ, а держим сразу два (текущий и следующий). Читается он из page cache.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 use symphonia::core::io::MediaSource;
 
-#[derive(Default)]
 struct Inner {
-    data: Vec<u8>,
+    /// Сколько байтов уже записано в файл.
+    len: u64,
     total: Option<u64>,
     done: bool,
     error: Option<String>,
 }
 
 /// Общий буфер загрузки: пишет загрузчик, читает декодер.
-#[derive(Default)]
 pub struct StreamBuffer {
+    file: File,
     inner: Mutex<Inner>,
     cv: Condvar,
+}
+
+/// Файл без имени: создаём в кеше и сразу удаляем, место освободится с последней ручкой.
+fn spill_file() -> io::Result<File> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = directories::ProjectDirs::from("", "", "yamusicrs")
+        .map(|d| d.cache_dir().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!(
+        "stream-{}-{}.part",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = File::options().read(true).write(true).create_new(true).open(&path)?;
+    std::fs::remove_file(&path)?;
+    Ok(file)
 }
 
 impl std::fmt::Debug for StreamBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let g = self.inner.lock();
         f.debug_struct("StreamBuffer")
-            .field("len", &g.data.len())
+            .field("len", &g.len)
             .field("total", &g.total)
             .field("done", &g.done)
             .finish()
@@ -39,24 +60,32 @@ impl std::fmt::Debug for StreamBuffer {
 }
 
 impl StreamBuffer {
-    pub fn new(total: Option<u64>) -> Arc<Self> {
-        let sb = Self::default();
-        sb.inner.lock().total = total;
-        if let Some(t) = total {
-            sb.inner.lock().data.reserve_exact(t as usize);
-        }
-        Arc::new(sb)
+    pub fn new(total: Option<u64>) -> io::Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            file: spill_file()?,
+            inner: Mutex::new(Inner {
+                len: 0,
+                total,
+                done: false,
+                error: None,
+            }),
+            cv: Condvar::new(),
+        }))
     }
 
-    pub fn push(&self, bytes: &[u8]) {
-        self.inner.lock().data.extend_from_slice(bytes);
+    pub fn push(&self, bytes: &[u8]) -> io::Result<()> {
+        // Пишет только загрузчик, поэтому смещение можно взять без удержания замка на запись.
+        let at = self.inner.lock().len;
+        self.file.write_all_at(bytes, at)?;
+        self.inner.lock().len = at + bytes.len() as u64;
         self.cv.notify_all();
+        Ok(())
     }
 
     pub fn finish(&self) {
         let mut g = self.inner.lock();
         g.done = true;
-        g.total = Some(g.data.len() as u64);
+        g.total = Some(g.len);
         drop(g);
         self.cv.notify_all();
     }
@@ -78,14 +107,17 @@ impl StreamBuffer {
         let g = self.inner.lock();
         match (g.done, g.total) {
             (true, _) => 1.0,
-            (false, Some(t)) if t > 0 => g.data.len() as f32 / t as f32,
+            (false, Some(t)) if t > 0 => g.len as f32 / t as f32,
             _ => 0.0,
         }
     }
 
-    /// Снимок всех данных после завершения загрузки.
-    pub fn snapshot(&self) -> Vec<u8> {
-        self.inner.lock().data.clone()
+    /// Все данные после завершения загрузки.
+    pub fn snapshot(&self) -> io::Result<Vec<u8>> {
+        let len = self.inner.lock().len;
+        let mut data = vec![0; len as usize];
+        self.file.read_exact_at(&mut data, 0)?;
+        Ok(data)
     }
 }
 
@@ -109,11 +141,11 @@ impl Read for StreamReader {
             if self.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "cancelled"));
             }
-            let len = g.data.len() as u64;
+            let len = g.len;
             if self.pos < len {
+                drop(g);
                 let n = ((len - self.pos) as usize).min(out.len());
-                let start = self.pos as usize;
-                out[..n].copy_from_slice(&g.data[start..start + n]);
+                self.buf.file.read_exact_at(&mut out[..n], self.pos)?;
                 self.pos += n as u64;
                 return Ok(n);
             }

@@ -117,7 +117,7 @@ impl Fetcher {
             }
             _ => None,
         };
-        let buf = StreamBuffer::new(info.size);
+        let buf = StreamBuffer::new(info.size)?;
         let codec = info.codec.clone();
         let rank = quality_rank(self.quality());
         self.active.lock().insert(track.id.clone(), buf.clone());
@@ -165,7 +165,7 @@ impl Fetcher {
                 if let Some(c) = cipher.as_mut() {
                     c.apply_keystream(&mut chunk);
                 }
-                buf.push(&chunk);
+                buf.push(&chunk)?;
             }
             return Ok(());
         }
@@ -182,9 +182,12 @@ impl Fetcher {
         } else {
             None
         };
-        let lib = self.library.clone();
-        let data = buf.snapshot();
         let id = track.id.clone();
+        let data = match buf.snapshot() {
+            Ok(d) => d,
+            Err(e) => return tracing::warn!("не удалось прочитать загрузку {id}: {e}"),
+        };
+        let lib = self.library.clone();
         let res = tokio::task::spawn_blocking(move || {
             lib.store(Download {
                 track,
