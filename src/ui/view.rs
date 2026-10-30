@@ -47,6 +47,7 @@ impl Ctx {
 pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let area = f.area();
     app.overlays.clear();
+    app.occluders.clear();
     // Блоб живёт только на экране волны; под справкой и полноэкранным текстом его не видно.
     let on_wave = matches!(app.page().view, View::Wave) && !app.lyrics_mode && app.wave.items.ready().is_some();
     let blob_visible =
@@ -59,6 +60,18 @@ pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         Screen::Login(l) => login(f, area, l, ctx),
         Screen::Main => main_screen(f, app, ctx),
     }
+    // OSC-текст пишется поверх готового кадра, поэтому сам перекрыл бы справку и всплывашки.
+    let occ = std::mem::take(&mut app.occluders);
+    app.overlays.retain(|o| {
+        let w: usize = o.runs.iter().map(|r| r.text.width()).sum();
+        let r = Rect {
+            x: o.x,
+            y: o.y,
+            width: (w * o.scale as usize) as u16,
+            height: o.scale as u16,
+        };
+        !occ.iter().any(|c| c.intersects(r))
+    });
 }
 
 // ── утилиты текста ───────────────────────────────────────────────────────────
@@ -382,6 +395,7 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     apply_scramble(f, app, area, main);
     draw_toasts(f, area, app, ctx);
     if app.show_help {
+        app.occluders.push(area);
         draw_help(f, area, ctx);
     }
 }
@@ -914,6 +928,7 @@ fn cover_popup(f: &mut Frame, area: Rect, app: &mut App, start: usize, sel: usiz
         height: h,
     };
     f.render_widget(Clear, r);
+    app.occluders.push(r);
     app.images.render(&key, r, f.buffer_mut(), ctx.cell_aspect);
 }
 
@@ -2319,8 +2334,9 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     f.render_widget(Paragraph::new(Line::styled(ctx_line, ctx.dim())), l3);
 }
 
-fn draw_toasts(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
+fn draw_toasts(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let mut y = area.y + 1;
+    let mut occ = Vec::new();
     for t in app.toasts.iter().rev().take(4) {
         let age = t.at.elapsed().as_secs_f32();
         let w = (t.text.width() as u16 + 4).min(area.width.saturating_sub(4));
@@ -2344,6 +2360,7 @@ fn draw_toasts(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
         let bg = Rgb(20.0, 20.0, 20.0).lerp(base, fade);
         let fg = ctx.p.dim.lerp(Rgb(250.0, 250.0, 250.0), fade);
         f.render_widget(Clear, r);
+        occ.push(r);
         f.render_widget(
             Paragraph::new(Line::styled(
                 fit(&format!(" {} ", t.text), r.width as usize),
@@ -2353,6 +2370,7 @@ fn draw_toasts(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
         );
         y += 1;
     }
+    app.occluders.extend(occ);
 }
 
 fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {

@@ -338,6 +338,8 @@ pub struct App {
     pub focused: bool,
     /// Оверлеи кадра (крупный текст, ссылки) — пересобираются при каждой отрисовке.
     pub overlays: Vec<crate::ui::term::Overlay>,
+    /// Всплывашки поверх кадра: OSC-оверлеи под ними не рисуются.
+    pub occluders: Vec<ratatui::layout::Rect>,
     /// Разовые OSC-команды терминалу (курсор, буфер обмена, уведомления).
     pub osc_out: Vec<u8>,
     pointer: bool,
@@ -491,6 +493,7 @@ impl App {
             mouse: (0, 0),
             focused: true,
             overlays: Vec::new(),
+            occluders: Vec::new(),
             osc_out: Vec::new(),
             pointer: false,
             kitty_text,
