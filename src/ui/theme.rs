@@ -88,10 +88,6 @@ impl Rgb {
         let (h, s, l) = self.to_hsl();
         Rgb::from_hsl(h + by, s, l)
     }
-
-    fn saturation(self) -> f32 {
-        self.to_hsl().1
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,51 +128,41 @@ impl Palette {
         }
     }
 
-    /// k-means по уменьшенной обложке: два самых «характерных» цвета → акценты.
+    /// Median cut как в Quickshell `ColorQuantizer`: обложка 64×64, 2⁴ корзин равной
+    /// населённости, похожие корзины сливаются. Акцент — самый «характерный» цвет.
     pub fn from_image(img: &image::RgbaImage) -> Palette {
-        let small = image::imageops::thumbnail(img, 40, 40);
-        let px: Vec<[f32; 3]> = small
+        let small = image::imageops::thumbnail(img, 64, 64);
+        let mut px: Vec<[f32; 3]> = small
             .pixels()
+            .filter(|p| p[3] > 0)
             .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
             .collect();
         if px.is_empty() {
             return Palette::default();
         }
-        let k = 6;
-        let mut centers: Vec<[f32; 3]> = (0..k).map(|i| px[i * px.len() / k]).collect();
-        let mut assign = vec![0usize; px.len()];
-        for _ in 0..12 {
-            for (i, p) in px.iter().enumerate() {
-                assign[i] = (0..k)
-                    .min_by(|&a, &b| dist(p, &centers[a]).total_cmp(&dist(p, &centers[b])))
-                    .unwrap_or(0);
-            }
-            let mut sum = vec![[0f32; 4]; k];
-            for (i, p) in px.iter().enumerate() {
-                let s = &mut sum[assign[i]];
-                s[0] += p[0];
-                s[1] += p[1];
-                s[2] += p[2];
-                s[3] += 1.0;
-            }
-            for (c, s) in centers.iter_mut().zip(&sum) {
-                if s[3] > 0.0 {
-                    *c = [s[0] / s[3], s[1] / s[3], s[2] / s[3]];
+        let mut buckets = Vec::new();
+        median_cut(&mut px, 0, 4, &mut buckets);
+        // Слить почти одинаковые корзины: их число = доля цвета в обложке.
+        let mut clusters: Vec<([f32; 3], f32)> = Vec::new();
+        for c in buckets {
+            match clusters.iter_mut().find(|(k, _)| dist(k, &c) < 28.0 * 28.0) {
+                Some((k, n)) => {
+                    for i in 0..3 {
+                        k[i] = (k[i] * *n + c[i]) / (*n + 1.0);
+                    }
+                    *n += 1.0;
                 }
+                None => clusters.push((c, 1.0)),
             }
         }
-        let mut counts = vec![0usize; k];
-        for a in &assign {
-            counts[*a] += 1;
-        }
-        // Оценка кластера: населённость × насыщенность — серые фоны обложек не побеждают.
-        let mut ranked: Vec<(Rgb, f32)> = centers
+        // Оценка: доля × насыщенность; почти белое/чёрное не годится в акцент.
+        let mut ranked: Vec<(Rgb, f32)> = clusters
             .iter()
-            .zip(&counts)
-            .filter(|(_, n)| **n > 0)
             .map(|(c, n)| {
                 let rgb = Rgb(c[0], c[1], c[2]);
-                (rgb, (*n as f32).sqrt() * (0.15 + rgb.saturation()))
+                let (_, sat, l) = rgb.to_hsl();
+                let usable = if !(0.08..=0.94).contains(&l) { 0.1 } else { 1.0 };
+                (rgb, n.sqrt() * (0.12 + sat) * usable)
             })
             .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -187,7 +173,13 @@ impl Palette {
             .iter()
             .skip(1)
             .map(|r| r.0)
-            .find(|c| dist(&[c.0, c.1, c.2], &[dominant.0, dominant.1, dominant.2]) > 70.0 * 70.0)
+            .find(|c| {
+                // Другой оттенок и не серый — иначе градиент получается плоским.
+                let (h1, s1, _) = c.to_hsl();
+                let (h0, _, _) = dominant.to_hsl();
+                let dh = (h1 - h0).abs().min(1.0 - (h1 - h0).abs());
+                dh > 0.06 && s1 > 0.25
+            })
             .map(|c| c.tuned(0.4, 0.5, 0.68))
             .unwrap_or_else(|| accent.rotate_hue(0.08));
         Palette {
@@ -202,6 +194,33 @@ impl Palette {
 
 fn dist(a: &[f32; 3], b: &[f32; 3]) -> f32 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
+}
+
+/// Рекурсивное деление пополам по каналу с наибольшим разбросом; на глубине `max` — среднее.
+fn median_cut(px: &mut [[f32; 3]], depth: u32, max: u32, out: &mut Vec<[f32; 3]>) {
+    if px.is_empty() {
+        return;
+    }
+    if depth >= max || px.len() < 2 {
+        let n = px.len() as f32;
+        let sum = px
+            .iter()
+            .fold([0f32; 3], |a, p| [a[0] + p[0], a[1] + p[1], a[2] + p[2]]);
+        out.push([sum[0] / n, sum[1] / n, sum[2] / n]);
+        return;
+    }
+    let range = |i: usize| {
+        let (lo, hi) = px
+            .iter()
+            .fold((255f32, 0f32), |(lo, hi), p| (lo.min(p[i]), hi.max(p[i])));
+        hi - lo
+    };
+    let ch = (0..3).max_by(|&a, &b| range(a).total_cmp(&range(b))).unwrap_or(0);
+    px.sort_by(|a, b| a[ch].total_cmp(&b[ch]));
+    let mid = px.len() / 2;
+    let (l, r) = px.split_at_mut(mid);
+    median_cut(l, depth + 1, max, out);
+    median_cut(r, depth + 1, max, out);
 }
 
 /// Плавный переход палитры при смене трека.
@@ -246,4 +265,46 @@ pub fn shimmer(a: Rgb, b: Rgb, t: f32, phase: f32) -> Rgb {
     let x = (t - (phase * 0.35).fract() * 1.6 + 0.3).abs();
     let glow = (1.0 - x / 0.12).max(0.0);
     base.lerp(Rgb(255.0, 255.0, 255.0), glow * 0.35)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yellow_smiley_is_yellow() {
+        // Белый фон, жёлтый круг, чёрные детали — как обложка со смайлом.
+        let img = image::RgbaImage::from_fn(200, 200, |x, y| {
+            let (dx, dy) = (x as f32 - 100.0, y as f32 - 100.0);
+            let r = (dx * dx + dy * dy).sqrt();
+            if r < 15.0 {
+                image::Rgba([10, 10, 10, 255])
+            } else if r < 80.0 {
+                image::Rgba([250, 230, 20, 255])
+            } else {
+                image::Rgba([255, 255, 255, 255])
+            }
+        });
+        let p = Palette::from_image(&img);
+        let Rgb(r, g, b) = p.accent;
+        eprintln!("accent = {r:.0} {g:.0} {b:.0}");
+        assert!(
+            r > 150.0 && g > 150.0 && b < 120.0,
+            "ожидали жёлтый, получили {r:.0} {g:.0} {b:.0}"
+        );
+    }
+
+    /// `YAMUSICRS_COVER=cover.jpg cargo test palette_of_file -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn palette_of_file() {
+        let img = image::open(std::env::var("YAMUSICRS_COVER").unwrap())
+            .unwrap()
+            .to_rgba8();
+        let p = Palette::from_image(&img);
+        eprintln!(
+            "accent {:?}\naccent2 {:?}\nsurface {:?}",
+            p.accent, p.accent2, p.surface
+        );
+    }
 }

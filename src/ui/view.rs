@@ -788,7 +788,57 @@ fn track_list(f: &mut Frame, area: Rect, app: &mut App, tracks: &[Track], ctx: &
         .map(|i| track_row(app, ctx, &tracks[idx[i]], idx[i] + 1, area.width as usize, i == sel))
         .collect();
     f.render_widget(Paragraph::new(lines), area);
+    let covers: Vec<(usize, Option<String>, bool)> = range
+        .clone()
+        .map(|i| {
+            (
+                i,
+                tracks[idx[i]].cover_uri().map(str::to_owned),
+                is_now(app, &tracks[idx[i]]),
+            )
+        })
+        .collect();
+    row_thumbs(f, area, app, range.start, sel, &covers, ctx);
     scrollbar(f, area, range.start, h, idx.len(), ctx);
+}
+
+fn is_now(app: &App, t: &Track) -> bool {
+    app.now.as_ref().is_some_and(|n| n.track.id == t.id)
+}
+
+/// Мини-обложка 2×1 в левой колонке у строки под курсором и под мышью.
+/// Играющая строка оставляет свой индикатор, пока на неё не навели мышь.
+fn row_thumbs(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    start: usize,
+    sel: usize,
+    covers: &[(usize, Option<String>, bool)],
+    ctx: &Ctx,
+) {
+    for (i, uri, is_playing_row) in covers {
+        let hovered = app.hover == Some(*i);
+        if !(hovered || *i == sel) {
+            continue;
+        }
+        let Some(uri) = uri else { continue };
+        if *is_playing_row && !hovered {
+            continue;
+        }
+        let key = crate::app::thumb_key(uri);
+        if !app.images.contains(&key) {
+            app.want_thumb(uri);
+            continue;
+        }
+        let r = Rect {
+            x: area.x,
+            y: area.y + (*i - start) as u16,
+            width: 2,
+            height: 1,
+        };
+        app.images.render(&key, r, f.buffer_mut(), ctx.cell_aspect);
+    }
 }
 
 fn scrollbar(f: &mut Frame, area: Rect, offset: usize, h: usize, len: usize, ctx: &Ctx) {
@@ -852,6 +902,14 @@ fn mixed_list(f: &mut Frame, area: Rect, app: &mut App, rows: &[RowKind], ctx: &
         });
     }
     f.render_widget(Paragraph::new(lines), area);
+    let covers: Vec<(usize, Option<String>, bool)> = range
+        .clone()
+        .filter_map(|i| match &rows[i] {
+            RowKind::Track(t) => Some((i, t.cover_uri().map(str::to_owned), is_now(app, t))),
+            _ => None,
+        })
+        .collect();
+    row_thumbs(f, area, app, range.start, sel, &covers, ctx);
     scrollbar(f, area, range.start, h, rows.len(), ctx);
 }
 
@@ -1239,27 +1297,44 @@ fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool) {
     let w = area.width as usize;
     match lyrics {
         Lyrics::Synced(lines) => {
-            let spacing = if big { 2.0 } else { 1.0 };
+            // Каждая реплика переносится по словам и занимает свои строки; между репликами — пустая строка.
+            let gap = 1usize;
+            let wrap_w = w.saturating_sub(4).max(8);
+            let wrapped: Vec<Vec<String>> = lines
+                .iter()
+                .map(|l| {
+                    let t = if l.text.trim().is_empty() {
+                        "♪"
+                    } else {
+                        l.text.as_str()
+                    };
+                    textwrap::wrap(t, wrap_w).into_iter().map(|c| c.into_owned()).collect()
+                })
+                .collect();
+            // Верх каждой реплики в строках от начала текста.
+            let mut tops = Vec::with_capacity(wrapped.len() + 1);
+            let mut acc = 0usize;
+            for wl in &wrapped {
+                tops.push(acc as f32);
+                acc += wl.len() + gap;
+            }
+            tops.push(acc as f32);
+            // Дробный индекс прокрутки → дробная строка: плавно между верхами соседних реплик.
+            let sc = app.lyrics_scroll.max(-1.0);
+            let scroll_row = if sc < 0.0 {
+                sc * (1 + gap) as f32
+            } else {
+                let i = (sc.floor() as usize).min(wrapped.len().saturating_sub(1));
+                let frac = sc - i as f32;
+                tops[i] + (tops[i + 1] - tops[i]) * frac
+            };
             let center = area.y as f32 + area.height as f32 * if big { 0.42 } else { 0.35 };
             let cur = lyrics::current(lines, pos + 0.25);
             let buf = f.buffer_mut();
-            for (i, l) in lines.iter().enumerate() {
-                let y = center + (i as f32 - app.lyrics_scroll) * spacing;
-                let yi = y.round() as i32;
-                if yi < area.y as i32 || yi >= (area.y + area.height) as i32 {
-                    continue;
-                }
-                let d = (i as f32 - app.lyrics_scroll).abs();
-                let text = if l.text.trim().is_empty() {
-                    "♪".to_string()
-                } else {
-                    l.text.clone()
-                };
-                let text = fit(&text, w.saturating_sub(2));
-                let tw = text.trim_end().width();
-                let x0 = area.x as usize + (w.saturating_sub(tw)) / 2;
+            for (i, (l, rows)) in lines.iter().zip(&wrapped).enumerate() {
                 let is_cur = Some(i) == cur;
-                // Караоке-заливка текущей строки по времени до следующей.
+                let d = (i as f32 - app.lyrics_scroll).abs();
+                // Караоке-заливка текущей реплики по времени до следующей.
                 let frac = if is_cur {
                     let end = lines.get(i + 1).map_or(l.at + 4.0, |n| n.at);
                     ((pos + 0.25 - l.at) / (end - l.at).max(0.1)).clamp(0.0, 1.0) as f32
@@ -1272,32 +1347,40 @@ fn draw_lyrics(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, big: bool) {
                     let k = (d / if big { 6.0 } else { 4.0 }).min(1.0);
                     ctx.p.fg.lerp(ctx.p.dim.scale(0.6), 0.3 + 0.7 * k)
                 };
-                let mut x = x0;
-                let n = text.trim_end().chars().count().max(1);
-                for (ci, ch) in text.trim_end().chars().enumerate() {
-                    let cw = ch.width().unwrap_or(1);
-                    if x + cw > (area.x + area.width) as usize {
-                        break;
+                let total: usize = rows.iter().map(|r| r.chars().count()).sum::<usize>().max(1);
+                let mut done = 0usize;
+                for (ri, row) in rows.iter().enumerate() {
+                    let yi = (center + tops[i] + ri as f32 - scroll_row).round() as i32;
+                    let n = row.chars().count();
+                    if yi < area.y as i32 || yi >= (area.y + area.height) as i32 {
+                        done += n;
+                        continue;
                     }
-                    let col = if is_cur {
-                        let p = ci as f32 / n as f32;
-                        if p < frac {
+                    let tw = row.width();
+                    let mut x = area.x as usize + w.saturating_sub(tw) / 2;
+                    for (ci, ch) in row.chars().enumerate() {
+                        let cw = ch.width().unwrap_or(1);
+                        if x + cw > (area.x + area.width) as usize {
+                            break;
+                        }
+                        let p = (done + ci) as f32 / total as f32;
+                        let col = if is_cur && p < frac {
                             shimmer(ctx.p.accent, ctx.p.accent2, p, ctx.t * 0.3)
                         } else {
                             base
+                        };
+                        if let Some(c) = buf.cell_mut((x as u16, yi as u16)) {
+                            c.set_char(ch).set_fg(col.color());
+                            if is_cur {
+                                c.modifier.insert(Modifier::BOLD);
+                            }
                         }
-                    } else {
-                        base
-                    };
-                    if let Some(c) = buf.cell_mut((x as u16, yi as u16)) {
-                        c.set_char(ch).set_fg(col.color());
-                        if is_cur {
-                            c.modifier.insert(Modifier::BOLD);
-                        }
+                        x += cw;
                     }
-                    x += cw;
+                    done += n;
                 }
             }
+            let spacing = (1 + gap) as f32;
             // Вступление/проигрыш: пульсирующие точки.
             if cur.is_none() || lines.get(cur.unwrap_or(0)).is_some_and(|l| l.text.trim().is_empty()) {
                 let dots: String = (0..3)

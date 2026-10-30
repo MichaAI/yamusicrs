@@ -275,6 +275,8 @@ pub struct App {
     pub theme: ThemeAnim,
     pub fx: EffectManager<&'static str>,
     covers_loading: HashSet<String>,
+    /// Палитры уже загруженных обложек: тема должна меняться и на треках из кеша.
+    palettes: HashMap<String, Palette>,
     pub lyrics: Option<(String, Lyrics)>,
     pub lyrics_scroll: f32,
     pub lyrics_mode: bool,
@@ -294,6 +296,8 @@ pub struct App {
     last_mpris_pos: Instant,
     /// Последний клик по строке списка — для двойного клика.
     last_click: Option<(Instant, usize)>,
+    /// Строка списка под мышью.
+    pub hover: Option<usize>,
     stored_token: Option<StoredToken>,
 }
 
@@ -380,6 +384,7 @@ impl App {
             theme: ThemeAnim::new(),
             fx: EffectManager::default(),
             covers_loading: HashSet::new(),
+            palettes: HashMap::new(),
             lyrics: None,
             lyrics_scroll: 0.0,
             lyrics_mode: false,
@@ -396,6 +401,7 @@ impl App {
             areas: Areas::default(),
             last_mpris_pos: Instant::now(),
             last_click: None,
+            hover: None,
             stored_token: None,
             cfg,
         };
@@ -632,17 +638,36 @@ impl App {
     }
 
     fn fetch_cover(&mut self, uri: &str) {
-        if self.images.contains(uri) || !self.covers_loading.insert(uri.to_string()) {
+        self.fetch_image(uri.to_string(), uri, 600, true);
+    }
+
+    /// Тема под обложку трека: сразу, если палитра уже посчитана, иначе — когда обложка придёт.
+    fn apply_theme_for(&mut self, t: &Track) {
+        if let Some(p) = t.cover_uri().and_then(|u| self.palettes.get(u)).copied() {
+            self.theme.set(p);
+        }
+    }
+
+    /// Миниатюра обложки для строки списка (под курсором или мышью).
+    pub fn want_thumb(&mut self, uri: &str) {
+        self.fetch_image(thumb_key(uri), uri, 100, false);
+    }
+
+    fn fetch_image(&mut self, key: String, uri: &str, size: u32, palette: bool) {
+        if self.images.contains(&key) || !self.covers_loading.insert(key.clone()) {
             return;
         }
-        let key = uri.to_string();
+        let url = api::cover_url(uri, size);
         self.spawn(move |c, tx| async move {
-            let url = api::cover_url(&key, 600);
             let r = async {
                 let bytes = crate::fetch::fetch_bytes(&c, &url).await?;
                 let img = tokio::task::spawn_blocking(move || -> color_eyre::Result<_> {
                     let img = image::load_from_memory(&bytes)?.to_rgba8();
-                    let pal = Palette::from_image(&img);
+                    let pal = if palette {
+                        Palette::from_image(&img)
+                    } else {
+                        Palette::default()
+                    };
                     Ok((img, pal))
                 })
                 .await??;
@@ -717,6 +742,7 @@ impl App {
     }
 
     fn view_fx(&mut self) {
+        self.hover = None;
         let bg = self.theme.current().surface.color();
         self.fx.add_unique_effect(
             "view",
@@ -1445,6 +1471,7 @@ impl App {
                 match result {
                     Ok((img, pal)) => {
                         self.images.insert(key.clone(), img);
+                        self.palettes.insert(key.clone(), pal);
                         let now_cover = self.now.as_ref().and_then(|n| n.track.cover_uri()).map(str::to_owned);
                         let loading_cover = self
                             .loading_track
@@ -1676,6 +1703,7 @@ impl App {
             let c = c.to_string();
             self.fetch_cover(&c);
         }
+        self.apply_theme_for(&track);
         self.fetch_lyrics(&track);
         self.wave_feedback("trackStarted", &track, None);
         let _ = self.mpris.send(mpris::Update::Track {
@@ -1712,6 +1740,11 @@ impl App {
             m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height
         };
         match m.kind {
+            MouseEventKind::Moved => {
+                self.hover = inside(self.areas.list)
+                    .then(|| self.page().offset + (m.row - self.areas.list.y) as usize)
+                    .filter(|r| *r < self.page_len());
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 if inside(self.areas.player) {
@@ -2041,6 +2074,10 @@ fn not_image() -> tachyonfx::CellFilter {
 fn screen_rect() -> ratatui::layout::Rect {
     let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
     ratatui::layout::Rect::new(0, 0, w, h)
+}
+
+pub fn thumb_key(uri: &str) -> String {
+    format!("thumb:{uri}")
 }
 
 pub fn quality_label(q: Quality) -> &'static str {
