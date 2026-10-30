@@ -1,0 +1,391 @@
+//! Модели ответов API. Описаны только поля, которые реально используются клиентом.
+
+use serde::{Deserialize, Deserializer};
+
+/// Яндекс отдаёт идентификаторы то строкой, то числом — принимаем оба варианта.
+pub fn id_str<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        S(String),
+        N(i64),
+    }
+    Ok(match Id::deserialize(d)? {
+        Id::S(s) => s,
+        Id::N(n) => n.to_string(),
+    })
+}
+
+fn opt_id_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        S(String),
+        N(i64),
+    }
+    Ok(Option::<Id>::deserialize(d)?.map(|id| match id {
+        Id::S(s) => s,
+        Id::N(n) => n.to_string(),
+    }))
+}
+
+fn id_or_empty<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(opt_id_str(d)?.unwrap_or_default())
+}
+
+/// Разбирает массив поштучно: один кривой элемент не должен ронять весь список.
+pub fn lenient_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| match serde_json::from_value(v) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("пропускаю элемент ответа: {e}");
+                None
+            }
+        })
+        .collect())
+}
+
+/// Превращает `avatars.yandex.net/.../%%` в полноценный URL нужного размера.
+pub fn cover_url(uri: &str, size: u32) -> String {
+    format!("https://{}", uri.replace("%%", &format!("{size}x{size}")))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Artist {
+    /// У исполнителей загруженных пользователем треков id нет — только имя.
+    #[serde(default, deserialize_with = "id_or_empty")]
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cover {
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub items_uri: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+pub struct TrackPosition {
+    #[serde(default)]
+    pub volume: u32,
+    #[serde(default)]
+    pub index: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Album {
+    #[serde(default, deserialize_with = "id_or_empty")]
+    pub id: String,
+    pub title: String,
+    pub version: Option<String>,
+    pub year: Option<i32>,
+    pub release_date: Option<String>,
+    pub genre: Option<String>,
+    pub cover_uri: Option<String>,
+    pub og_image: Option<String>,
+    pub track_count: Option<u32>,
+    pub track_position: Option<TrackPosition>,
+    #[serde(default)]
+    pub artists: Vec<Artist>,
+    /// Только в `/albums/{id}/with-tracks`.
+    #[serde(default)]
+    pub volumes: Vec<Vec<serde_json::Value>>,
+}
+
+impl Album {
+    pub fn cover_uri(&self) -> Option<&str> {
+        self.cover_uri.as_deref().or(self.og_image.as_deref())
+    }
+
+    pub fn full_title(&self) -> String {
+        match &self.version {
+            Some(v) if !v.is_empty() => format!("{} ({v})", self.title),
+            _ => self.title.clone(),
+        }
+    }
+
+    pub fn artist_names(&self) -> String {
+        join_artists(&self.artists)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsInfo {
+    #[serde(default)]
+    pub has_available_sync_lyrics: bool,
+    #[serde(default)]
+    pub has_available_text_lyrics: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct R128 {
+    /// Интегральная громкость, LUFS.
+    pub i: f32,
+    /// True peak, dBTP.
+    pub tp: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Track {
+    #[serde(deserialize_with = "id_str")]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    pub version: Option<String>,
+    pub duration_ms: Option<u64>,
+    #[serde(default = "yes")]
+    pub available: bool,
+    #[serde(default)]
+    pub artists: Vec<Artist>,
+    #[serde(default)]
+    pub albums: Vec<Album>,
+    pub cover_uri: Option<String>,
+    pub og_image: Option<String>,
+    pub lyrics_info: Option<LyricsInfo>,
+    pub content_warning: Option<String>,
+    pub r128: Option<R128>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Track {
+    pub fn full_title(&self) -> String {
+        match &self.version {
+            Some(v) if !v.is_empty() => format!("{} ({v})", self.title),
+            _ => self.title.clone(),
+        }
+    }
+
+    pub fn artist_names(&self) -> String {
+        join_artists(&self.artists)
+    }
+
+    pub fn album(&self) -> Option<&Album> {
+        self.albums.first()
+    }
+
+    pub fn cover_uri(&self) -> Option<&str> {
+        self.cover_uri
+            .as_deref()
+            .or_else(|| self.album().and_then(|a| a.cover_uri()))
+            .or(self.og_image.as_deref())
+    }
+
+    /// Идентификатор в форме `trackId:albumId`, которую ждут rotor и likes.
+    pub fn full_id(&self) -> String {
+        match self.album() {
+            Some(a) => format!("{}:{}", self.id, a.id),
+            None => self.id.clone(),
+        }
+    }
+
+    pub fn duration_secs(&self) -> f64 {
+        self.duration_ms.unwrap_or(0) as f64 / 1000.0
+    }
+
+    pub fn explicit(&self) -> bool {
+        self.content_warning.as_deref() == Some("explicit")
+    }
+
+    pub fn has_sync_lyrics(&self) -> bool {
+        self.lyrics_info.as_ref().is_some_and(|l| l.has_available_sync_lyrics)
+    }
+
+    pub fn has_text_lyrics(&self) -> bool {
+        self.lyrics_info.as_ref().is_some_and(|l| l.has_available_text_lyrics)
+    }
+}
+
+pub fn join_artists(artists: &[Artist]) -> String {
+    let names: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
+    if names.is_empty() {
+        "Неизвестный исполнитель".into()
+    } else {
+        names.join(", ")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Owner {
+    pub login: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackShort {
+    #[serde(deserialize_with = "id_str")]
+    pub id: String,
+    #[serde(default, deserialize_with = "opt_id_str")]
+    pub album_id: Option<String>,
+    pub track: Option<Track>,
+}
+
+impl TrackShort {
+    pub fn full_id(&self) -> String {
+        match &self.album_id {
+            Some(a) => format!("{}:{a}", self.id),
+            None => self.id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Playlist {
+    #[serde(deserialize_with = "id_str")]
+    pub uid: String,
+    #[serde(deserialize_with = "id_str")]
+    pub kind: String,
+    pub title: String,
+    pub track_count: Option<u32>,
+    pub owner: Option<Owner>,
+    pub cover: Option<Cover>,
+    pub og_image: Option<String>,
+    #[serde(default)]
+    pub tracks: Vec<TrackShort>,
+}
+
+impl Playlist {
+    pub fn cover_uri(&self) -> Option<&str> {
+        self.cover
+            .as_ref()
+            .and_then(|c| c.uri.as_deref().or(c.items_uri.first().map(String::as_str)))
+            .or(self.og_image.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    #[serde(default, deserialize_with = "opt_id_str")]
+    pub uid: Option<String>,
+    pub login: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Plus {
+    #[serde(default)]
+    pub has_plus: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountStatus {
+    pub account: Account,
+    pub plus: Option<Plus>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LikesLibrary {
+    pub library: LikesTracks,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LikesTracks {
+    #[serde(default)]
+    pub tracks: Vec<TrackShort>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SearchBlock<T: serde::de::DeserializeOwned> {
+    #[serde(default = "Vec::new", deserialize_with = "lenient_vec")]
+    pub results: Vec<T>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SearchResult {
+    #[serde(default)]
+    pub tracks: Option<SearchBlock<Track>>,
+    #[serde(default)]
+    pub albums: Option<SearchBlock<Album>>,
+    #[serde(default)]
+    pub artists: Option<SearchBlock<Artist>>,
+    #[serde(default)]
+    pub playlists: Option<SearchBlock<Playlist>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistBrief {
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub albums: Vec<Album>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub popular_tracks: Vec<Track>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileInfo {
+    pub download_info: DownloadInfo,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadInfo {
+    pub codec: String,
+    pub transport: String,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub urls: Vec<String>,
+    pub key: Option<String>,
+    pub size: Option<u64>,
+}
+
+impl DownloadInfo {
+    pub fn urls(&self) -> Vec<String> {
+        let mut v = self.urls.clone();
+        if let Some(u) = &self.url
+            && !v.contains(u)
+        {
+            v.insert(0, u.clone());
+        }
+        v
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsDownload {
+    pub download_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceItem {
+    pub track: Option<Track>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotorSession {
+    pub radio_session_id: String,
+    pub batch_id: Option<String>,
+    #[serde(default)]
+    pub sequence: Vec<SequenceItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotorTracks {
+    pub batch_id: Option<String>,
+    #[serde(default)]
+    pub sequence: Vec<SequenceItem>,
+}
