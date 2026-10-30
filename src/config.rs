@@ -114,6 +114,19 @@ pub struct State {
     pub wave_mood: usize,
     pub wave_diversity: usize,
     pub wave_language: usize,
+    /// Что играло при выходе — восстанавливается на паузе при следующем запуске.
+    pub resume: Option<Resume>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Resume {
+    pub title: String,
+    /// `trackId:albumId` всей очереди.
+    pub ids: Vec<String>,
+    pub pos: usize,
+    pub secs: f64,
+    /// Сессия волны и последний batch, если играла волна.
+    pub wave: Option<(String, Option<String>)>,
 }
 
 impl State {

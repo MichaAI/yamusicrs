@@ -21,6 +21,10 @@ use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
 
 pub enum Msg {
+    Resumed {
+        resume: crate::config::Resume,
+        result: Result<Vec<Track>, String>,
+    },
     Authed(Result<(Client, AccountStatus, StoredToken), String>),
     DeviceCode(Result<DeviceCode, String>),
     LoggedIn(Result<StoredToken, String>),
@@ -269,6 +273,8 @@ pub struct App {
     tokens: HashMap<Token, (u64, usize, Track)>,
     next_token: Token,
     next_loaded: Option<Token>,
+    /// Токен трека, который надо загрузить и оставить на паузе (восстановление сессии).
+    start_paused: Option<Token>,
     /// Откуда открыт трек (библиотека/сеть) — до момента, когда он реально зазвучит.
     pending_origins: HashMap<Token, Origin>,
     pub images: Images,
@@ -294,6 +300,7 @@ pub struct App {
     /// Прямоугольники последнего кадра — для эффектов.
     pub areas: Areas,
     last_mpris_pos: Instant,
+    last_session_save: Instant,
     /// Последний клик по строке списка — для двойного клика.
     last_click: Option<(Instant, usize)>,
     /// Строка списка под мышью.
@@ -379,6 +386,7 @@ impl App {
             tokens: HashMap::new(),
             next_token: 1,
             next_loaded: None,
+            start_paused: None,
             pending_origins: HashMap::new(),
             images,
             theme: ThemeAnim::new(),
@@ -400,6 +408,7 @@ impl App {
             started: Instant::now(),
             areas: Areas::default(),
             last_mpris_pos: Instant::now(),
+            last_session_save: Instant::now(),
             last_click: None,
             hover: None,
             stored_token: None,
@@ -502,6 +511,38 @@ impl App {
         );
         self.load_likes();
         self.load_playlists();
+        self.restore_session();
+    }
+
+    /// Восстанавливает очередь прошлого запуска и ставит трек на паузу с той же секунды.
+    fn restore_session(&mut self) {
+        let Some(r) = self.state.resume.clone().filter(|r| !r.ids.is_empty()) else {
+            return;
+        };
+        self.spawn(move |c, tx| async move {
+            let result = c.tracks(&r.ids).await.map_err(err_str);
+            let _ = tx.send(Msg::Resumed { resume: r, result });
+        });
+    }
+
+    /// Сессия на диск: при смене трека и периодически — переживёт и kill терминала.
+    fn persist_session(&mut self) {
+        self.save_session();
+        self.state.save(&self.paths);
+        self.last_session_save = Instant::now();
+    }
+
+    fn save_session(&mut self) {
+        self.state.resume = (!self.queue.items.is_empty()).then(|| crate::config::Resume {
+            title: self.queue.title.clone(),
+            ids: self.queue.items.iter().map(Track::full_id).collect(),
+            pos: self.queue.pos.unwrap_or(0),
+            secs: self.now.as_ref().map_or(0.0, |n| n.pos),
+            wave: match &self.queue.kind {
+                QueueKind::Wave { session, batch } => Some((session.clone(), batch.clone())),
+                QueueKind::List => None,
+            },
+        });
     }
 
     // ── загрузки данных ──────────────────────────────────────────────────────
@@ -985,6 +1026,10 @@ impl App {
     }
 
     pub fn play_index(&mut self, idx: usize) {
+        self.play_index_at(idx, 0.0, false);
+    }
+
+    fn play_index_at(&mut self, idx: usize, start: f64, paused: bool) {
         let Some(token) = self.alloc_token(idx) else {
             return;
         };
@@ -996,6 +1041,7 @@ impl App {
         }
         self.user_switch = true;
         self.requested = Some(token);
+        self.start_paused = paused.then_some(token);
         self.next_loaded = None;
         self.queue.pos = Some(idx);
         let track = self.queue.items[idx].clone();
@@ -1010,7 +1056,7 @@ impl App {
             let _ = tx.send(Msg::Opened {
                 token,
                 next: false,
-                start: 0.0,
+                start,
                 result: r,
             });
         });
@@ -1331,6 +1377,26 @@ impl App {
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Authed(Ok((c, s, t))) => self.on_authed(c, s, t),
+            Msg::Resumed { resume, result } => {
+                // Пользователь уже что-то включил сам — не перебиваем.
+                if !self.queue.items.is_empty() {
+                    return;
+                }
+                match result {
+                    Ok(tracks) if !tracks.is_empty() => {
+                        let kind = match resume.wave {
+                            Some((session, batch)) => QueueKind::Wave { session, batch },
+                            None => QueueKind::List,
+                        };
+                        let pos = resume.pos.min(tracks.len() - 1);
+                        self.replace_queue(tracks, kind, resume.title);
+                        self.play_index_at(pos, resume.secs, true);
+                        self.toast("Продолжаем с того же места — Space".into());
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("не удалось восстановить сессию: {e}"),
+                }
+            }
             Msg::Authed(Err(e)) => self.begin_login(Some(e)),
             Msg::DeviceCode(r) => {
                 let poll = if let Screen::Login(l) = &mut self.screen {
@@ -1535,10 +1601,12 @@ impl App {
                     }
                 } else if self.requested == Some(token) {
                     self.origins_insert(token, origin);
-                    self.player.load(token, src, gain, start);
-                    if self.player.paused() {
-                        self.player.set_paused(false);
+                    // Пауза ставится до загрузки, чтобы при восстановлении не проскочил звук.
+                    let paused = self.start_paused.take() == Some(token);
+                    if paused != self.player.paused() {
+                        self.player.set_paused(paused);
                     }
+                    self.player.load(token, src, gain, start);
                     // Перезагрузка играющего трека: on_track_started не сработает, следующий ставим сами.
                     if self.now.as_ref().is_some_and(|n| n.token == token) {
                         self.schedule_next();
@@ -1651,6 +1719,9 @@ impl App {
             }
             _ => self.on_track_started(pos),
         }
+        if self.last_session_save.elapsed() > Duration::from_secs(15) && self.now.is_some() {
+            self.persist_session();
+        }
         if self.last_mpris_pos.elapsed() > Duration::from_millis(500)
             && let Some(n) = &self.now
         {
@@ -1706,6 +1777,7 @@ impl App {
         self.apply_theme_for(&track);
         self.fetch_lyrics(&track);
         self.wave_feedback("trackStarted", &track, None);
+        self.persist_session();
         let _ = self.mpris.send(mpris::Update::Track {
             id: track.full_id(),
             title: track.full_title(),
@@ -2040,6 +2112,7 @@ impl App {
         if let Some(now) = &self.now {
             self.report_end(now.token, now.pos, true);
         }
+        self.save_session();
         self.state.save(&self.paths);
         self.player.stop();
     }
