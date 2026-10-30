@@ -201,6 +201,9 @@ impl Fetcher {
             Ok(Err(e)) => tracing::warn!("не удалось сохранить {id}: {e:#}"),
             Err(e) => tracing::warn!("persist panic: {e}"),
         }
+        // Копии трека (снимок, remux, теги) освобождены, но glibc держит их в аренах потоков.
+        // SAFETY: malloc_trim безопасна в любой момент.
+        unsafe { libc::malloc_trim(0) };
     }
 }
 

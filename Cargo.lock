@@ -5110,6 +5110,7 @@ dependencies = [
  "hex",
  "hmac",
  "image",
+ "libc",
  "lofty",
  "mpris-server",
  "parking_lot",

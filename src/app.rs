@@ -1928,6 +1928,8 @@ impl App {
         // Старые токены больше не нужны.
         let keep = pos.token;
         self.tokens.retain(|t, _| *t >= keep || Some(*t) == self.requested);
+        // Буфер предзагруженного, но так и не сыгранного трека держит весь файл в памяти.
+        self.pending_origins.retain(|t, _| self.tokens.contains_key(t));
 
         if let Some(c) = track.cover_uri() {
             let c = c.to_string();

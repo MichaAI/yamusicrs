@@ -9,6 +9,7 @@ license = "Apache-2.0"
 # runtime / util
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
 futures-util = "0.3"
+libc = "0.2"
 color-eyre = "0.6"
 thiserror = "2"
 tracing = "0.1"
