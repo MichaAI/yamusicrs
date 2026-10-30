@@ -1409,6 +1409,11 @@ fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, target: Cols, 
         energy,
         dither: app.cfg.blob_dither as f32,
     };
+    // Kitty рисует блоб поверх фона ячеек, так что под справкой он просвечивал бы сквозь неё.
+    if app.show_help {
+        app.images.hide_blob();
+        return colors;
+    }
     let (images, gfx) = (&mut app.images, &mut app.gfx);
     if !images.blob(rect, pw, ph, || gfx.blob(pw, ph, &params)) {
         blob_halfblocks(f, rect, colors, app.wave_phase);
