@@ -62,7 +62,10 @@ fn sgr(out: &mut Vec<u8>, style: Style, curly: Option<Color>) {
 impl Overlay {
     /// Ширина в клетках экрана.
     pub fn cols(&self) -> usize {
-        self.runs.iter().map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str())).sum::<usize>()
+        self.runs
+            .iter()
+            .map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str()))
+            .sum::<usize>()
             * self.scale as usize
     }
 

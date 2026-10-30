@@ -476,6 +476,16 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
     let hints: &[(&str, &str)] = if app.search_editing {
         &[("Enter", "искать"), ("Esc", "выйти из поля"), ("^U", "очистить")]
+    } else if app.stage_mode && app.now.is_some() {
+        &[
+            ("Space", "пауза"),
+            ("n/p", "трек"),
+            ("←→", "перемотка"),
+            ("↑↓", "громкость"),
+            ("l", "♥"),
+            ("v/Esc", "выйти"),
+            ("?", "все клавиши"),
+        ]
     } else {
         match app.page().view {
             View::Wave if matches!(app.queue.kind, crate::app::QueueKind::Wave { .. }) => &[
@@ -1492,7 +1502,8 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         return;
     };
     let [left, right] = Layout::horizontal([Constraint::Percentage(52), Constraint::Min(30)]).areas(area);
-    let [cover_zone, info] = Layout::vertical([Constraint::Min(8), Constraint::Length(6)]).areas(left);
+    let [cover_zone, info, ctrl] =
+        Layout::vertical([Constraint::Min(8), Constraint::Length(6), Constraint::Length(4)]).areas(left);
 
     // Обложка ~70% зоны, ореол-блоб в 1.6 раза больше и под ней.
     let max_h = (cover_zone.height as f32 * 0.72) as u16;
@@ -1614,12 +1625,64 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         }
     }
 
+    if ctrl.height >= 3 && ctrl.width >= CONTROLS_W {
+        let r = Rect {
+            x: ctrl.x + (ctrl.width - CONTROLS_W) / 2,
+            y: ctrl.y,
+            width: CONTROLS_W,
+            height: 3,
+        };
+        control_box(f, app, ctx, r);
+    }
+
     let lyr = Rect {
         x: right.x + 1,
         width: right.width.saturating_sub(2),
         ..right
     };
     lyrics_panel(f, lyr, app, ctx, true);
+}
+
+/// Рамка с кнопками «назад · play/pause · вперёд»; ширина — `CONTROLS_W`.
+const CONTROLS_W: u16 = 2 + 2 * 2 + 3 + 3 * 2;
+
+fn control_box(f: &mut Frame, app: &mut App, ctx: &Ctx, r: Rect) {
+    let (pad, gap, icon) = (2u16, 3u16, 1u16);
+    let b = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ctx.p.dim.lerp(ctx.p.accent, 0.3).scale(0.8).color()));
+    f.render_widget(b, r);
+    // Nerd Font (Font Awesome, BMP): назад, play/pause, вперёд — escape-кодами, чтобы не терялись.
+    let play = if app.player.paused() { "\u{f04b}" } else { "\u{f04c}" };
+    let buttons = [
+        ("\u{f048}", 0u8, ctx.fg()),
+        (play, 1, ctx.accent()),
+        ("\u{f051}", 2, ctx.fg()),
+    ];
+    for (i, (label, action, style)) in buttons.into_iter().enumerate() {
+        let x = r.x + 1 + pad + i as u16 * (icon + gap);
+        f.render_widget(
+            Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))),
+            Rect {
+                x,
+                y: r.y + 1,
+                width: icon,
+                height: 1,
+            },
+        );
+        // Кликабельна вся колонка кнопки вместе с половинами промежутков.
+        let zx = x.saturating_sub(gap / 2 + 1).max(r.x);
+        app.controls.push((
+            Rect {
+                x: zx,
+                y: r.y,
+                width: icon + gap,
+                height: 3,
+            },
+            action,
+        ));
+    }
 }
 
 // ── боковая панель ───────────────────────────────────────────────────────────
@@ -1673,8 +1736,7 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     app.areas.info = info;
     // Кнопки управления — справа от названия и артиста, в рамке на три строки.
     // Рамка ровно по содержимому: значки шириной в 1 клетку (BMP), равные отступы.
-    let (pad, gap, icon) = (2u16, 3u16, 1u16);
-    let box_w = 2 + pad * 2 + icon * 3 + gap * 2;
+    let box_w = CONTROLS_W;
     let with_box = info.width >= box_w + 16 && info.height >= 3;
     let text = if with_box {
         Rect {
@@ -1711,41 +1773,7 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             width: box_w,
             height: 3,
         };
-        let b = Block::new()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(ctx.p.dim.lerp(ctx.p.accent, 0.3).scale(0.8).color()));
-        f.render_widget(b, r);
-        // Nerd Font (Font Awesome, BMP): назад, play/pause, вперёд — escape-кодами, чтобы не терялись.
-        let play = if app.player.paused() { "\u{f04b}" } else { "\u{f04c}" };
-        let buttons = [
-            ("\u{f048}", 0u8, ctx.fg()),
-            (play, 1, ctx.accent()),
-            ("\u{f051}", 2, ctx.fg()),
-        ];
-        for (i, (label, action, style)) in buttons.into_iter().enumerate() {
-            let x = r.x + 1 + pad + i as u16 * (icon + gap);
-            f.render_widget(
-                Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))),
-                Rect {
-                    x,
-                    y: r.y + 1,
-                    width: icon,
-                    height: 1,
-                },
-            );
-            // Кликабельна вся колонка кнопки вместе с половинами промежутков.
-            let zx = x.saturating_sub(gap / 2 + 1).max(r.x);
-            app.controls.push((
-                Rect {
-                    x: zx,
-                    y: r.y,
-                    width: icon + gap,
-                    height: 3,
-                },
-                action,
-            ));
-        }
+        control_box(f, app, ctx, r);
     }
     if app.kitty_text {
         let w = text.width.saturating_sub(1);

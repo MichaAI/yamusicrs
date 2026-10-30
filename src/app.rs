@@ -1971,8 +1971,10 @@ impl App {
         let on_tab =
             m.row == self.areas.header.y && self.areas.tabs.iter().any(|(a, b)| m.column >= *a && m.column < *b);
         let on_lyric = inside(self.areas.lyrics) && self.lyrics_hits.iter().any(|(y, _)| *y == m.row);
-        let on_wave = matches!(self.page().view, View::Wave)
-            && (self.wave.hits.iter().any(|(r, _)| inside(*r)) || self.controls.iter().any(|(r, _)| inside(*r)));
+        let stage = self.stage_mode && self.now.is_some();
+        let on_wave =
+            (!stage && matches!(self.page().view, View::Wave) && self.wave.hits.iter().any(|(r, _)| inside(*r)))
+                || self.controls.iter().any(|(r, _)| inside(*r));
         let pointer = self.hover.is_some()
             || on_tab
             || on_lyric
@@ -2047,7 +2049,9 @@ impl App {
             m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height
         };
         // Экран волны: клик по пресету — выбрать (повторный — включить), кнопки ⏮ ▶ ⏭, колесо — по дуге.
-        if matches!(self.page().view, View::Wave) && inside(self.areas.main) {
+        let stage = self.stage_mode && self.now.is_some();
+        // В сцене экран волны не виден — его пресеты и кнопки не должны ловить клики.
+        if !stage && matches!(self.page().view, View::Wave) && inside(self.areas.main) {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(i) = self.wave.hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1) {
@@ -2083,7 +2087,7 @@ impl App {
                 } else if inside(self.areas.lyrics) {
                     self.lyrics_user_offset += if up { -1.0 } else { 1.0 };
                     self.lyrics_user_at = Some(Instant::now());
-                } else if inside(self.areas.player) {
+                } else if inside(self.areas.player) || stage {
                     self.set_volume(self.player.volume() + if up { 0.05 } else { -0.05 });
                 } else if inside(self.areas.main) {
                     self.move_sel(if up { -3 } else { 3 });
@@ -2234,6 +2238,17 @@ impl App {
         let k = latin_key(k);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let page_rows = (self.areas.main.height as isize - 4).max(1);
+        // В сцене списка не видно: стрелки и Enter управляют плеером, а не скрытой страницей.
+        if self.stage_mode && self.now.is_some() {
+            match k.code {
+                KeyCode::Up | KeyCode::Char('k') => return self.set_volume(self.player.volume() + 0.05),
+                KeyCode::Down | KeyCode::Char('j') => return self.set_volume(self.player.volume() - 0.05),
+                KeyCode::Enter => return self.toggle_pause(),
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => return,
+                KeyCode::Char('g' | 'G' | 'a' | 'A' | 'L' | 'f') => return,
+                _ => {}
+            }
+        }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.show_help = true,
