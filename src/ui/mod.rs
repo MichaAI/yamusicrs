@@ -77,8 +77,14 @@ async fn event_loop(
                     },
                     Some(Ok(Event::Paste(s))) => app.on_paste(s),
                     Some(Ok(Event::Mouse(m))) => app.on_mouse(m),
-                    Some(Ok(Event::FocusGained)) => app.focused = true,
-                    Some(Ok(Event::FocusLost)) => app.focused = false,
+                    Some(Ok(Event::FocusGained)) => {
+                        app.focused = true;
+                        app.images.blob_every = std::time::Duration::from_millis(66);
+                    }
+                    Some(Ok(Event::FocusLost)) => {
+                        app.focused = false;
+                        app.images.blob_every = std::time::Duration::from_millis(125);
+                    }
                     Some(Ok(Event::Resize(..))) => {
                         cell_aspect = kitty::cell_aspect();
                         app.images.on_resize();

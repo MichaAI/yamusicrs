@@ -53,6 +53,8 @@ pub struct Images {
     blob_frame: Option<(u32, u32, Vec<u8>)>,
     /// Цвет текста над блобом по клеткам (true — тёмный): гистерезис против мигания.
     pub contrast_memo: std::cell::RefCell<HashMap<(u16, u16), bool>>,
+    /// Как часто обновлять блоб (реже, когда окно не в фокусе).
+    pub blob_every: std::time::Duration,
     /// Передавать кадры через POSIX shared memory (без base64 в потоке терминала).
     shm: bool,
     shm_seq: u64,
@@ -82,6 +84,7 @@ impl Images {
             blob: None,
             blob_frame: None,
             contrast_memo: std::cell::RefCell::new(HashMap::new()),
+            blob_every: BLOB_FRAME,
             shm: std::path::Path::new("/dev/shm").is_dir(),
             shm_seq: 0,
         }
@@ -271,7 +274,7 @@ impl Images {
                 last: std::time::Instant::now(),
                 size: (w, h),
             });
-        } else if self.blob.as_ref().is_some_and(|b| b.last.elapsed() >= BLOB_FRAME) {
+        } else if self.blob.as_ref().is_some_and(|b| b.last.elapsed() >= self.blob_every) {
             let b = self.blob.as_mut().expect("blob");
             b.last = std::time::Instant::now();
             let id = b.id;

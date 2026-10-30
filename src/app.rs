@@ -2412,9 +2412,9 @@ impl App {
     }
 
     pub fn frame_interval(&self, fps: u32) -> Duration {
-        if !self.focused {
-            return Duration::from_secs(1);
-        }
+        // Без фокуса окно может быть видно (соседний сплит) — плавность сохраняем,
+        // только поменьше кадров.
+        let fps = if self.focused { fps } else { fps.min(12) };
         let heavy = self.scrambling()
             || self.theme.animating()
             || !self.toasts.is_empty()

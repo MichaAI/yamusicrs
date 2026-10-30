@@ -102,6 +102,8 @@ pub struct Palette {
     pub dim: Rgb,
     /// Тонированный фон выделения/панелей.
     pub surface: Rgb,
+    /// Четыре разных цвета обложки для блоба.
+    pub blob: [Rgb; 4],
 }
 
 impl Default for Palette {
@@ -113,6 +115,12 @@ impl Default for Palette {
             fg: Rgb::hex(0xE6E6E6),
             dim: Rgb::hex(0x8A8A8A),
             surface: Rgb::hex(0x2A2620),
+            blob: [
+                Rgb::hex(0xFFCC00),
+                Rgb::hex(0xFF6B3D),
+                Rgb::hex(0xF02A4F),
+                Rgb::hex(0x7A5ADC),
+            ],
         }
     }
 }
@@ -125,6 +133,7 @@ impl Palette {
             fg: self.fg.lerp(o.fg, t),
             dim: self.dim.lerp(o.dim, t),
             surface: self.surface.lerp(o.surface, t),
+            blob: [0, 1, 2, 3].map(|i| self.blob[i].lerp(o.blob[i], t)),
         }
     }
 
@@ -182,12 +191,33 @@ impl Palette {
             })
             .map(|c| c.tuned(0.4, 0.5, 0.68))
             .unwrap_or_else(|| accent.rotate_hue(0.08));
+        // Для блоба — до четырёх заметно разных цветов обложки (по оценке «характерности»),
+        // недостающие достраиваются соседними оттенками акцента.
+        let mut blob: Vec<Rgb> = Vec::new();
+        for (c, _) in &ranked {
+            let c = c.tuned(0.30, 0.42, 0.70);
+            if blob
+                .iter()
+                .all(|b| dist(&[b.0, b.1, b.2], &[c.0, c.1, c.2]) > 45.0 * 45.0)
+            {
+                blob.push(c);
+            }
+            if blob.len() == 4 {
+                break;
+            }
+        }
+        for shift in [0.09, -0.09, 0.18, -0.18] {
+            if blob.len() < 4 {
+                blob.push(accent.rotate_hue(shift));
+            }
+        }
         Palette {
             accent,
             accent2,
             fg: Rgb::hex(0xE8E8E8).lerp(accent, 0.08),
             dim: Rgb::hex(0x8C8C8C).lerp(accent, 0.15),
             surface: dominant.tuned(0.25, 0.12, 0.16),
+            blob: [blob[0], blob[1], blob[2], blob[3]],
         }
     }
 }

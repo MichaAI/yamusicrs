@@ -1184,30 +1184,13 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
 }
 
 /// Правая часть: блоб в цвете пресета, название поверх, кнопки управления.
-fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate::api::WheelItem>, ctx: &Ctx) {
+fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate::api::WheelItem>, ctx: &Ctx) {
     let wave_on = matches!(app.queue.kind, QueueKind::Wave { .. });
     let playing = wave_on && app.now.is_some() && !app.player.paused();
     let [stage, hint] = Layout::vertical([Constraint::Min(6), Constraint::Length(2)]).areas(area);
 
-    // Палитра блоба: пресет под мышью (или выбранный) + цвета обложки играющего трека.
-    let (mx, my) = app.mouse;
-    let hovered = app
-        .wave
-        .hits
-        .iter()
-        .find(|(r, _)| mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height)
-        .and_then(|(_, i)| app.wave.items.ready().and_then(|v| v.get(*i)).cloned());
-    let agent = hovered
-        .as_ref()
-        .or(sel)
-        .and_then(|i| i.color())
-        .map_or(ctx.p.accent, |(r, g, b)| Rgb(r as f32, g as f32, b as f32));
-    let (c3, c4) = if app.now.is_some() {
-        (ctx.p.accent, ctx.p.accent2)
-    } else {
-        (agent.rotate_hue(0.33), agent.rotate_hue(-0.2))
-    };
-    let colors = to_cols([agent, agent.rotate_hue(0.12), c3, c4]);
+    // Палитра блоба — только из обложки (до четырёх разных цветов).
+    let colors = to_cols(ctx.p.blob);
     // Блоб «дышит» быстрее, когда играет.
     let speed = if playing { 1.0 } else { 0.3 };
     // Скорость меняется плавно — без рывка при паузе/запуске.
@@ -1489,12 +1472,7 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         width: gw.min(area.width),
         height: gh.min(area.height),
     };
-    let colors = to_cols([
-        ctx.p.accent,
-        ctx.p.accent.rotate_hue(-0.08),
-        ctx.p.accent2,
-        ctx.p.accent2.rotate_hue(0.1),
-    ]);
+    let colors = to_cols(ctx.p.blob);
     let speed = if app.player.paused() { 0.15 } else { 0.6 };
     // Скорость меняется плавно — без рывка при паузе/запуске.
     app.blob_speed += (speed - app.blob_speed) * (ctx.dt * 2.0).min(1.0);
