@@ -360,6 +360,7 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         draw_stage(f, body, app, ctx);
         draw_player(f, player, app, ctx);
         draw_footer(f, footer, app, ctx);
+        apply_scramble(f, app, area, body);
         draw_toasts(f, area, app, ctx);
         return;
     }
@@ -378,6 +379,7 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
     draw_player(f, player, app, ctx);
     draw_footer(f, footer, app, ctx);
+    apply_scramble(f, app, area, main);
     draw_toasts(f, area, app, ctx);
     if app.show_help {
         draw_help(f, area, ctx);
@@ -1340,11 +1342,11 @@ fn blob_contrast(images: &super::kitty::Images, blob: Rect, x: f32, y: f32, colo
     }
     let px = [0, 1, 2].map(|i| p[i] * a + BG[i] * (1.0 - a));
     let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
-    Some(if lum > 135.0 {
-        Color::Rgb(18, 16, 22)
-    } else {
-        Color::Rgb(250, 250, 250)
-    })
+    // Плавно от светлого текста к тёмному, а не переключением по порогу.
+    let k = ((lum - 95.0) / 90.0).clamp(0.0, 1.0);
+    let k = k * k * (3.0 - 2.0 * k) * a.min(1.0);
+    let ch = |light: f32, dark: f32| (light + (dark - light) * k) as u8;
+    Some(Color::Rgb(ch(250.0, 22.0), ch(250.0, 20.0), ch(250.0, 28.0)))
 }
 
 /// Текст поверх блоба: каждой букве — тёмный или белый цвет по яркости того, что под ней.
@@ -1600,7 +1602,7 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let [cover, gap, info, lyr] = Layout::vertical([
         Constraint::Length(cover_h),
         Constraint::Length(1),
-        Constraint::Length(5),
+        Constraint::Length(6),
         Constraint::Min(0),
     ])
     .areas(inner);
@@ -1620,8 +1622,8 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     }
     app.areas.info = info;
     // Кнопки управления — справа от названия и артиста, в рамке на три строки.
-    // Рамка ровно по содержимому: «␣␣󰒮␣␣␣󰐊␣␣␣󰒭␣␣» — значки по 2 клетки, равные отступы.
-    let (pad, gap, icon) = (2u16, 3u16, 2u16);
+    // Рамка ровно по содержимому: значки шириной в 1 клетку (BMP), равные отступы.
+    let (pad, gap, icon) = (2u16, 3u16, 1u16);
     let box_w = 2 + pad * 2 + icon * 3 + gap * 2;
     let with_box = info.width >= box_w + 16 && info.height >= 3;
     let text = if with_box {
@@ -1632,7 +1634,26 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     } else {
         info
     };
-    draw_info(f, text, app, ctx, &track);
+    // Название вдвое крупнее (OSC 66), если влезает по ширине.
+    let title = track.full_title();
+    let big = ctx.big_text && title.width() * 2 + 2 <= text.width as usize;
+    draw_info(f, text, app, ctx, &track, big);
+    if big {
+        let n = title.chars().count().max(1);
+        let runs = title
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                let c = shimmer(ctx.p.fg, ctx.p.accent, i as f32 / n as f32, ctx.t * 0.25);
+                Run {
+                    text: ch.to_string(),
+                    style: Style::new().fg(c.color()).add_modifier(Modifier::BOLD),
+                    curly: None,
+                }
+            })
+            .collect();
+        put_big(f, app, text.x + 1, text.y, 2, runs, Some(App::track_url(&track)));
+    }
     if with_box {
         let r = Rect {
             x: info.x + info.width - box_w,
@@ -1645,8 +1666,8 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(ctx.p.dim.lerp(ctx.p.accent, 0.3).scale(0.8).color()));
         f.render_widget(b, r);
-        let play = if app.player.paused() { "󰐊" } else { "󰏤" };
-        let buttons = [("󰒮", 0u8, ctx.fg()), (play, 1, ctx.accent()), ("󰒭", 2, ctx.fg())];
+        let play = if app.player.paused() { "" } else { "" };
+        let buttons = [("", 0u8, ctx.fg()), (play, 1, ctx.accent()), ("", 2, ctx.fg())];
         for (i, (label, action, style)) in buttons.into_iter().enumerate() {
             let x = r.x + 1 + pad + i as u16 * (icon + gap);
             f.render_widget(
@@ -1673,9 +1694,15 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     }
     if app.kitty_text {
         let w = text.width.saturating_sub(1);
-        let links = [Some(App::track_url(&track)), artist_url(&track), album_url(&track)];
+        // При крупном названии оно уже со ссылкой и занимает две строки.
+        let shift = u16::from(big);
+        let links = [
+            (!big).then(|| App::track_url(&track)),
+            artist_url(&track),
+            album_url(&track),
+        ];
         for (row, url) in links.into_iter().enumerate() {
-            if let Some(o) = url.and_then(|u| link_cells(f, text.x + 1, text.y + row as u16, w, u)) {
+            if let Some(o) = url.and_then(|u| link_cells(f, text.x + 1, text.y + row as u16 + shift, w, u)) {
                 app.overlays.push(o);
             }
         }
@@ -1698,9 +1725,13 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     }
 }
 
-fn draw_info(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, t: &Track) {
+fn draw_info(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, t: &Track, big_title: bool) {
     let w = area.width as usize;
     let mut lines = Vec::new();
+    if big_title {
+        // Две строки под крупное название — его дорисует оверлей.
+        lines.push(Line::raw(""));
+    }
     let title = marquee(&t.full_title(), w.saturating_sub(2), ctx.t);
     let mut tl = vec![Span::raw(" ")];
     tl.extend(gradient_line(
@@ -1710,7 +1741,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, t: &Track) {
         ctx.t * 0.25,
         true,
     ));
-    lines.push(Line::from(tl));
+    lines.push(if big_title { Line::raw("") } else { Line::from(tl) });
     lines.push(Line::styled(
         format!(" {}", marquee(&t.artist_names(), w.saturating_sub(2), ctx.t + 1.3)),
         ctx.accent(),
@@ -2077,16 +2108,72 @@ fn draw_lyrics(
             }
         }
         Lyrics::Plain(text) => {
-            // Обычный текст прокручивается пропорционально прогрессу трека.
-            let dur = app.now.as_ref().map_or(1.0, |n| n.track.duration_secs().max(1.0));
-            let total = text.len() as f32;
-            let scroll = ((pos / dur) as f32 * (total - area.height as f32 * 0.5)).max(0.0) as u16;
+            // Текст без таймингов стоит на месте и листается колесом.
+            let max = (text.len() as u16).saturating_sub(area.height / 2);
+            let scroll = app.plain_scroll.min(max);
             let lines: Vec<Line> = text.iter().map(|l| Line::styled(l.clone(), ctx.fg())).collect();
             f.render_widget(
-                Paragraph::new(lines).alignment(Alignment::Center).scroll((scroll, 0)),
+                Paragraph::new(lines)
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true })
+                    .scroll((scroll, 0)),
                 area,
             );
         }
+    }
+}
+
+// ── эффект «перебор символов» ────────────────────────────────────────────────
+
+/// Буквы сначала перебираются случайными знаками и проявляются слева направо.
+/// Картинки (плейсхолдеры kitty) и кнопки управления не трогаются.
+fn scramble(buf: &mut ratatui::buffer::Buffer, rect: Rect, since: std::time::Instant, skip: &[Rect], tint: Color) {
+    const GLYPHS: [char; 16] = [
+        '░', '▒', '/', '\\', '<', '>', '=', '+', '*', '#', '%', '_', '~', ':', '·', '¦',
+    ];
+    let dur = crate::app::SCRAMBLE.as_secs_f32();
+    let t = since.elapsed().as_secs_f32();
+    if t >= dur {
+        return;
+    }
+    let tick = (t * 20.0) as u32;
+    for y in rect.y..rect.y + rect.height {
+        for x in rect.x..rect.x + rect.width {
+            if skip
+                .iter()
+                .any(|r| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
+            {
+                continue;
+            }
+            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            let sym = cell.symbol();
+            if sym.trim().is_empty() || sym.starts_with('\u{10EEEE}') {
+                continue;
+            }
+            // Порог проявления: слева направо + немного случайности на клетку.
+            let h = (x as u32).wrapping_mul(2654435761) ^ (y as u32).wrapping_mul(40503);
+            let jitter = (h % 1000) as f32 / 1000.0;
+            let reveal = ((x - rect.x) as f32 / rect.width.max(1) as f32) * 0.65 + jitter * 0.35;
+            if t / dur < reveal {
+                let g = GLYPHS[((h >> 7).wrapping_add(tick.wrapping_mul(7919)) % GLYPHS.len() as u32) as usize];
+                cell.set_char(g).set_fg(tint);
+            }
+        }
+    }
+}
+
+fn apply_scramble(f: &mut Frame, app: &App, screen: Rect, main: Rect) {
+    let tint = Color::Rgb(140, 130, 150);
+    let skip = app.controls.iter().map(|c| c.0).collect::<Vec<_>>();
+    let buf = f.buffer_mut();
+    if let Some(t) = app.fx_start {
+        scramble(buf, screen, t, &skip, tint);
+    }
+    if let Some(t) = app.fx_view {
+        scramble(buf, main, t, &skip, tint);
+    }
+    if let Some(t) = app.fx_track {
+        scramble(buf, app.areas.info, t, &skip, tint);
     }
 }
 

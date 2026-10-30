@@ -129,8 +129,6 @@ async fn event_loop(
         };
         terminal.draw(|f| {
             view::draw(f, app, &ctx);
-            let area = f.area();
-            app.fx.process_effects(elapsed.into(), f.buffer_mut(), area);
         })?;
         // Картинки и команды размещения уходят в терминал отдельно от текстового диффа.
         app.images.flush(terminal.backend_mut())?;

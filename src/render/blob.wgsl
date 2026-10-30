@@ -1,8 +1,9 @@
-// Блоб: плоское пятно из метаболов, внутри — «жидкий мрамор» из искажённого шума
-// и цветных разводов в четырёх цветах. Та же формула — в render::blob_px (CPU).
+// Блоб: плоские пастельные метаболы. Поле r²/d² даёт «перемычки» при сближении,
+// цвет — острова шаров с мягкими стыками, внутри — медленные изолинии, снаружи — ореол.
+// Та же формула — в render::blob_px (CPU).
 
 struct Params {
-    c: array<vec4<f32>, 4>,   // палитра (0..1)
+    c: array<vec4<f32>, 4>,   // палитра (0..1), уже пастельная
     p: vec4<f32>,             // phase, energy, aspect (w/h), _
 };
 
@@ -22,31 +23,18 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     return o;
 }
 
-fn hash(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
-}
-
-fn noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = hash(i);
-    let b = hash(i + vec2<f32>(1.0, 0.0));
-    let c = hash(i + vec2<f32>(0.0, 1.0));
-    let d = hash(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-fn fbm(p: vec2<f32>) -> f32 {
-    return 0.55 * noise(p) + 0.30 * noise(p * 2.03 + 7.1) + 0.15 * noise(p * 4.01 + 3.7);
-}
-
-// Циклическая палитра из четырёх цветов с плавными переходами.
-fn palette(x: f32) -> vec3<f32> {
-    let s = fract(x) * 4.0;
-    let i = i32(floor(s));
-    let f = smoothstep(0.0, 1.0, fract(s));
-    return mix(P.c[i % 4].rgb, P.c[(i + 1) % 4].rgb, f);
+// Шар k: центр и радиус в момент t. 0..4 — основные, 5..6 — быстрые капли-спутники.
+fn ball(k: i32, t: f32, e: f32) -> vec3<f32> {
+    let fk = f32(k);
+    if (k < 5) {
+        let amp = 0.26 + 0.10 * e;
+        let c = vec2<f32>(amp * sin(t * (0.23 + 0.06 * fk) + fk * 2.1),
+                          amp * 0.9 * sin(t * (0.17 + 0.05 * fk) + fk * 1.3 + 1.2));
+        return vec3<f32>(c, 0.24 + 0.05 * sin(t * 0.31 + fk * 1.7));
+    }
+    let amp = 0.55 + 0.08 * sin(t * 0.4 + fk);
+    let a = t * (0.45 + 0.1 * fk) + fk * 3.0;
+    return vec3<f32>(amp * cos(a), amp * 0.8 * sin(a * 1.3), 0.09);
 }
 
 @fragment
@@ -57,26 +45,30 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var q = in.uv * 2.0 - 1.0;
     if (aspect > 1.0) { q.x *= aspect; } else { q.y /= aspect; }
 
-    // Форма: метаболы, плавно меняющие положение и размер.
     var f = 0.0;
-    for (var k = 0; k < 5; k++) {
-        let fk = f32(k);
-        let amp = 0.28 + 0.10 * e;
-        let c = vec2<f32>(amp * sin(t * (0.21 + 0.07 * fk) + fk * 1.9), amp * cos(t * (0.17 + 0.05 * fk) + fk * 2.7));
-        let r = 0.36 + 0.10 * sin(t * 0.33 + fk * 1.3);
-        f += exp(-dot(q - c, q - c) / (r * r));
+    var wsum = 0.0;
+    var acc = vec3<f32>(0.0);
+    for (var k = 0; k < 7; k++) {
+        let b = ball(k, t, e);
+        let d2 = max(dot(q - b.xy, q - b.xy), 1e-4);
+        let v = b.z * b.z / d2;
+        f += v;
+        // Острова цвета: вес шара резко растёт с его влиянием → мягкие, но узкие стыки.
+        let w = pow(v, 3.0);
+        wsum += w;
+        acc += w * P.c[k % 4].rgb;
     }
-    // Край чуть «дышит» шумом — живой, а не циркульный.
-    f += (fbm(q * 2.2 + t * 0.15) - 0.5) * 0.35;
-    let a = smoothstep(0.42, 0.62, f);
+    var col = acc / max(wsum, 1e-6);
 
-    // Внутри: поле шума, искажённое самим собой, — разводы и полосы.
-    let w1 = vec2<f32>(fbm(q * 1.6 + vec2<f32>(t * 0.11, -t * 0.07)), fbm(q * 1.6 + vec2<f32>(5.2 - t * 0.09, 1.3 + t * 0.05)));
-    let w2 = vec2<f32>(fbm(q * 1.8 + w1 * 2.4 + 1.7), fbm(q * 1.8 + w1 * 2.4 + 9.2));
-    let v = fbm(q * 1.3 + w2 * 2.2 + t * 0.04);
-    let bands = 0.5 + 0.5 * sin(v * 9.0 + t * 0.6 + w1.x * 4.0);
-    let col = mix(palette(v * 1.6 + t * 0.03), palette(v * 1.6 + 0.5 + t * 0.03), bands * 0.45);
+    // Тонкие изолинии внутри — чуть светлее, медленно плывут.
+    let iso = abs(fract(log2(f + 1.0) * 2.2 - t * 0.05) - 0.5);
+    let line = (1.0 - smoothstep(0.0, 0.06, iso)) * smoothstep(1.05, 1.6, f);
+    col = mix(col, vec3<f32>(1.0), 0.18 * line);
 
+    // Тело: край по изоповерхности f=1, сглаженный; снаружи — мягкий ореол.
+    let body = smoothstep(0.88, 1.06, f);
+    let halo = smoothstep(0.25, 0.95, f) * 0.35;
+    let a = max(body * 0.94, halo);
     let n = fract(sin(dot(in.pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.547) - 0.5;
-    return vec4<f32>(clamp(col + n / 255.0, vec3<f32>(0.0), vec3<f32>(1.0)), a * 0.95);
+    return vec4<f32>(clamp(col + n / 255.0, vec3<f32>(0.0), vec3<f32>(1.0)), a);
 }

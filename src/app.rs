@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use rand::seq::SliceRandom;
-use tachyonfx::{EffectManager, Interpolation, Motion, fx};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::auth::{self, DeviceCode, Poll, StoredToken};
@@ -289,7 +288,12 @@ pub struct App {
     /// Кнопки ⏮ ▶ ⏭ (в боковой панели): прямоугольник и действие 0/1/2.
     pub controls: Vec<(ratatui::layout::Rect, u8)>,
     pub theme: ThemeAnim,
-    pub fx: EffectManager<&'static str>,
+    /// Моменты запуска эффекта «перебор символов»: старт, смена вида, смена трека.
+    pub fx_start: Option<Instant>,
+    pub fx_view: Option<Instant>,
+    pub fx_track: Option<Instant>,
+    /// Ручная прокрутка текста без таймингов (строки).
+    pub plain_scroll: u16,
     covers_loading: HashSet<String>,
     /// Палитры уже загруженных обложек: тема должна меняться и на треках из кеша.
     palettes: HashMap<String, Palette>,
@@ -358,6 +362,9 @@ pub struct Areas {
 
 /// Через сколько ручная прокрутка текста возвращается к текущей строке.
 const LYRICS_RETURN: Duration = Duration::from_secs(4);
+
+/// Длительность эффекта перебора символов.
+pub const SCRAMBLE: Duration = Duration::from_millis(650);
 
 fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -446,7 +453,10 @@ impl App {
             gfx,
             controls: Vec::new(),
             theme: ThemeAnim::new(),
-            fx: EffectManager::default(),
+            fx_start: None,
+            fx_view: None,
+            fx_track: None,
+            plain_scroll: 0,
             covers_loading: HashSet::new(),
             palettes: HashMap::new(),
             lyrics: None,
@@ -572,12 +582,7 @@ impl App {
         }
         self.account = Some(status);
         self.screen = Screen::Main;
-        self.fx.add_unique_effect(
-            "startup",
-            fx::coalesce((900, Interpolation::QuadOut))
-                .with_area(screen_rect())
-                .with_filter(not_image()),
-        );
+        self.fx_start = Some(Instant::now());
         self.load_likes();
         self.load_playlists();
         self.load_wheel();
@@ -800,6 +805,7 @@ impl App {
         self.lyrics_scroll = 0.0;
         self.lyrics_user_offset = 0.0;
         self.lyrics_user_at = None;
+        self.plain_scroll = 0;
         let (sync, text) = (t.has_sync_lyrics(), t.has_text_lyrics());
         if !sync && !text {
             return;
@@ -861,16 +867,7 @@ impl App {
 
     fn view_fx(&mut self) {
         self.hover = None;
-        let bg = self.theme.current().surface.color();
-        self.fx.add_unique_effect(
-            "view",
-            fx::parallel(&[
-                fx::fade_from_fg(bg, (260, Interpolation::QuadOut)),
-                fx::sweep_in(Motion::UpToDown, 8, 0, bg, (220, Interpolation::QuadOut)),
-            ])
-            .with_area(self.areas.main)
-            .with_filter(not_image()),
-        );
+        self.fx_view = Some(Instant::now());
     }
 
     /// Список треков текущего вида, если это вид-список треков (их можно фильтровать).
@@ -1944,16 +1941,7 @@ impl App {
         let _ = self.mpris.send(mpris::Update::Status {
             playing: !self.player.paused(),
         });
-        let bg = self.theme.current().surface.color();
-        self.fx.add_unique_effect(
-            "track",
-            fx::parallel(&[
-                fx::sweep_in(Motion::LeftToRight, 18, 4, bg, (700, Interpolation::QuadOut)),
-                fx::fade_from_fg(bg, (500, Interpolation::SineOut)),
-            ])
-            .with_area(self.areas.info)
-            .with_filter(not_image()),
-        );
+        self.fx_track = Some(Instant::now());
         self.schedule_next();
     }
 
@@ -1961,13 +1949,7 @@ impl App {
 
     fn toggle_stage(&mut self) {
         self.stage_mode = !self.stage_mode;
-        let bg = self.theme.current().surface.color();
-        self.fx.add_unique_effect(
-            "stage",
-            fx::fade_from_fg(bg, (350, Interpolation::QuadOut))
-                .with_area(screen_rect())
-                .with_filter(not_image()),
-        );
+        self.fx_view = Some(Instant::now());
     }
 
     /// Курсор-рука над всем, что кликается.
@@ -2084,7 +2066,13 @@ impl App {
         match m.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;
-                if inside(self.areas.lyrics) {
+                if inside(self.areas.lyrics) && matches!(self.lyrics, Some((_, Lyrics::Plain(_)))) {
+                    self.plain_scroll = if up {
+                        self.plain_scroll.saturating_sub(2)
+                    } else {
+                        self.plain_scroll + 2
+                    };
+                } else if inside(self.areas.lyrics) {
                     self.lyrics_user_offset += if up { -1.0 } else { 1.0 };
                     self.lyrics_user_at = Some(Instant::now());
                 } else if inside(self.areas.player) {
@@ -2410,11 +2398,19 @@ impl App {
     /// Нужна ли перерисовка с полной частотой кадров.
     /// Сколько ждать до следующего кадра без ввода: полные fps только когда что-то
     /// действительно движется; просто играет — 8 fps; окно не в фокусе — раз в секунду.
+    /// Идёт ли сейчас эффект перебора символов.
+    pub fn scrambling(&self) -> bool {
+        [self.fx_start, self.fx_view, self.fx_track]
+            .iter()
+            .flatten()
+            .any(|t| t.elapsed() < SCRAMBLE)
+    }
+
     pub fn frame_interval(&self, fps: u32) -> Duration {
         if !self.focused {
             return Duration::from_secs(1);
         }
-        let heavy = self.fx.is_running()
+        let heavy = self.scrambling()
             || self.theme.animating()
             || !self.toasts.is_empty()
             || self.loading_track.is_some()
@@ -2463,16 +2459,6 @@ fn latin_key(mut k: KeyEvent) -> KeyEvent {
         k.code = KeyCode::Char(qwerty(c));
     }
     k
-}
-
-/// Эффекты не должны трогать ячейки kitty-картинок: в их цвете закодирован id изображения.
-fn not_image() -> tachyonfx::CellFilter {
-    tachyonfx::CellFilter::eval_cell(|c: &ratatui::buffer::Cell| !c.symbol().starts_with('\u{10EEEE}'))
-}
-
-fn screen_rect() -> ratatui::layout::Rect {
-    let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-    ratatui::layout::Rect::new(0, 0, w, h)
 }
 
 pub fn agent_key(uri: &str) -> String {
