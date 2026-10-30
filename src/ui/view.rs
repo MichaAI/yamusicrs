@@ -1196,43 +1196,38 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate:
     );
 
     // Кнопки ⏮ ▶ ⏭ — кликабельные.
-    let play = if wave_on && !app.player.paused() { "⏸" } else { "▶" };
-    let labels = [("⏮", 0u8), (play, 1), ("⏭", 2)];
-    let total = 3 * 5 + 2 * 4;
-    let mut x = controls.x + controls.width.saturating_sub(total) / 2;
+    // Иконки Nerd Font (Material Design): 󰒮 󰐊 󰏤 󰒭. После иконки — пробел: kitty
+    // рисует PUA-значки шире клетки, если справа свободно.
+    let play = if wave_on && !app.player.paused() {
+        "󰏤 "
+    } else {
+        "󰐊 "
+    };
+    let (bw, gap) = (5u16, 4u16);
+    let total = bw * 3 + gap * 2;
+    let x0 = controls.x + controls.width.saturating_sub(total) / 2;
     app.wave.controls.clear();
-    for (label, action) in labels {
-        let w = 5u16;
+    let buttons = [
+        ("󰒮 ", 0u8, ctx.fg()),
+        (play, 1, Style::new().fg(agent.color())),
+        ("󰒭 ", 2, ctx.fg()),
+    ];
+    for (i, (label, action, style)) in buttons.into_iter().enumerate() {
         let r = Rect {
-            x,
+            x: x0 + i as u16 * (bw + gap),
             y: controls.y,
-            width: w,
+            width: bw,
             height: 3,
         };
-        let (fg, bg) = if action == 1 {
-            (Color::Black, agent.color())
-        } else {
-            (ctx.p.fg.color(), ctx.p.surface.color())
-        };
-        let b = Block::new()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(if action == 1 {
-                agent.color()
-            } else {
-                ctx.p.dim.scale(0.6).color()
-            }));
         f.render_widget(
-            Paragraph::new(Line::styled(
-                label,
-                Style::new().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-            ))
-            .alignment(Alignment::Center)
-            .block(b),
-            r,
+            Paragraph::new(Line::styled(label, style.add_modifier(Modifier::BOLD))).alignment(Alignment::Center),
+            Rect {
+                y: r.y + 1,
+                height: 1,
+                ..r
+            },
         );
         app.wave.controls.push((r, action));
-        x += w + 4;
     }
 
     let hint_line = if app.wave.loading {
