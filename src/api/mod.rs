@@ -14,6 +14,8 @@ use sha2::Sha256;
 pub use models::*;
 
 const BASE: &str = "https://api.music.yandex.net";
+/// Новый API веб-клиента: на нём живёт «колесо» волны.
+const WEB_BASE: &str = "https://api.music.yandex.ru";
 const ANDROID_CLIENT: &str = "YandexMusicAndroid/24023621";
 /// `get-file-info` подписывается ключом десктопного клиента и проверяется вместе с этим заголовком.
 const DESKTOP_CLIENT: &str = "YandexMusicDesktopAppWindows/5.95.0";
@@ -335,6 +337,22 @@ impl Client {
     }
 
     // ── Моя волна ────────────────────────────────────────────────────────────
+
+    /// Персональные пресеты Моей волны — то, что веб показывает дугой.
+    pub async fn wheel(&self) -> Result<Vec<WheelItem>> {
+        let rb = self
+            .http
+            .post(format!("{WEB_BASE}/wheel/new"))
+            .header("Authorization", format!("OAuth {}", self.token))
+            .header("X-Yandex-Music-Client", ANDROID_CLIENT)
+            .header("Accept-Language", "ru")
+            .json(&json!({}));
+        let w: Wheel = self.send(rb).await?;
+        Ok(w.items
+            .into_iter()
+            .filter(|i| i.data.wave.as_ref().is_some_and(|w| !w.seeds.is_empty()))
+            .collect())
+    }
 
     pub async fn rotor_new(&self, seeds: &[String]) -> Result<RotorSession> {
         self.post_json(

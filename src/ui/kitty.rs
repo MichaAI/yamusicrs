@@ -47,7 +47,20 @@ pub struct Images {
     by_key: HashMap<String, Image>,
     /// Escape-последовательности, которые надо вывести до следующего кадра.
     out: Vec<u8>,
+    blob: Option<BlobState>,
 }
+
+/// Анимированный блоб волны: одна картинка в терминале, кадры правятся на месте.
+struct BlobState {
+    id: u32,
+    placed: Option<Rect>,
+    last: std::time::Instant,
+}
+
+/// Сторона кадра блоба в пикселях: терминал сам растянет и размоет.
+const BLOB_PX: u32 = 72;
+/// Не чаще ~15 кадров в секунду — блобу больше не нужно.
+const BLOB_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
 
 impl Images {
     pub fn new(kitty: bool) -> Self {
@@ -59,6 +72,7 @@ impl Images {
             tick: 0,
             by_key: HashMap::new(),
             out: Vec::new(),
+            blob: None,
         }
     }
 
@@ -214,9 +228,71 @@ impl Images {
     }
 
     /// Удаляет все наши картинки из терминала (при выходе).
+    /// Рисует блоб под текстом в `rect` (только kitty; иначе false — рисуйте фолбэк).
+    pub fn blob(&mut self, rect: Rect, colors: [[f32; 3]; 2], phase: f32) -> bool {
+        if !self.kitty || rect.width == 0 || rect.height == 0 {
+            return false;
+        }
+        let fresh = self.blob.is_none();
+        if fresh {
+            let id = self.alloc_id();
+            self.blob = Some(BlobState {
+                id,
+                placed: None,
+                last: std::time::Instant::now(),
+            });
+        }
+        let b = self.blob.as_mut().expect("blob");
+        let id = b.id;
+        if fresh {
+            let px = blob_frame(BLOB_PX, colors, phase);
+            send_rgba(&mut self.out, &format!("a=t,f=32,s={BLOB_PX},v={BLOB_PX},i={id}"), &px);
+        } else if b.last.elapsed() >= BLOB_FRAME {
+            b.last = std::time::Instant::now();
+            let px = blob_frame(BLOB_PX, colors, phase);
+            // r=1 — правим корневой кадр, X=1 — заменяем пиксели, а не смешиваем.
+            send_rgba(
+                &mut self.out,
+                &format!("a=f,r=1,X=1,f=32,s={BLOB_PX},v={BLOB_PX},i={id}"),
+                &px,
+            );
+        }
+        let b = self.blob.as_mut().expect("blob");
+        if b.placed != Some(rect) {
+            if b.placed.is_some() {
+                let _ = write!(self.out, "\x1b_Ga=d,d=i,i={id},p=1,q=2\x1b\\");
+            }
+            // Обычное размещение под текстом (z<0): надпись поверх блоба остаётся видна.
+            let _ = write!(
+                self.out,
+                "\x1b7\x1b[{};{}H\x1b_Ga=p,i={id},p=1,c={},r={},z=-1,C=1,q=2\x1b\\\x1b8",
+                rect.y + 1,
+                rect.x + 1,
+                rect.width,
+                rect.height
+            );
+            b.placed = Some(rect);
+        }
+        true
+    }
+
+    /// Убирает блоб с экрана (данные остаются в терминале до выхода).
+    pub fn hide_blob(&mut self) {
+        if let Some(b) = self.blob.as_mut()
+            && b.placed.take().is_some()
+        {
+            let _ = write!(self.out, "\x1b_Ga=d,d=i,i={},p=1,q=2\x1b\\", b.id);
+        }
+    }
+
     pub fn clear_all(&mut self, w: &mut impl Write) -> std::io::Result<()> {
         if self.kitty {
-            for id in self.by_key.values().flat_map(|i| i.variants.values()) {
+            for id in self
+                .by_key
+                .values()
+                .flat_map(|i| i.variants.values())
+                .chain(self.blob.as_ref().map(|b| &b.id))
+            {
                 write!(w, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")?;
             }
             w.flush()?;
@@ -267,6 +343,67 @@ fn transmit(out: &mut Vec<u8>, id: u32, rgba: &image::RgbaImage) {
         out.extend_from_slice(chunk);
         out.extend_from_slice(b"\x1b\\");
     }
+}
+
+/// Сырые RGBA-данные кусками по 4096 символов base64.
+fn send_rgba(out: &mut Vec<u8>, head: &str, px: &[u8]) {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(px);
+    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(4096).collect();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let more = u8::from(i + 1 < chunks.len());
+        if i == 0 {
+            let _ = write!(out, "\x1b_G{head},q=2,m={more};");
+        } else {
+            let _ = write!(out, "\x1b_Gm={more};");
+        }
+        out.extend_from_slice(chunk);
+        out.extend_from_slice(b"\x1b\\");
+    }
+}
+
+/// Пиксель блоба в точке (u, v) ∈ [-1, 1]²: RGBA, альфа мягко уходит в ноль к краям.
+/// Четыре «метабола» гуляют по кругу; цвет — смесь двух акцентов по тому, какой шар ближе.
+pub fn blob_pixel(u: f32, v: f32, colors: [[f32; 3]; 2], t: f32) -> [f32; 4] {
+    const BALLS: [(f32, f32, f32, f32, f32); 4] = [
+        (0.31, 0.53, 0.0, 0.48, 0.0),
+        (0.47, 0.29, 2.1, 0.40, 1.0),
+        (0.23, 0.41, 4.2, 0.36, 0.0),
+        (0.39, 0.61, 1.3, 0.30, 1.0),
+    ];
+    let (mut field, mut w2) = (0.0f32, 0.0f32);
+    for (fx, fy, ph, r, which) in BALLS {
+        let cx = 0.38 * (t * fx + ph).sin();
+        let cy = 0.38 * (t * fy + ph * 1.7).cos();
+        let d2 = (u - cx).powi(2) + (v - cy).powi(2);
+        let f = (-d2 / (r * r)).exp();
+        field += f;
+        w2 += f * which;
+    }
+    let mix = (w2 / field.max(1e-4)).clamp(0.0, 1.0);
+    let c = [0, 1, 2].map(|i| colors[0][i] + (colors[1][i] - colors[0][i]) * mix);
+    // Ядро яркое, края — мягкое свечение.
+    let a = ((field - 0.25) / 0.9).clamp(0.0, 1.0);
+    let a = a * a * (3.0 - 2.0 * a);
+    let glow = 1.0 + 0.25 * (field - 1.0).max(0.0);
+    [
+        (c[0] * glow).min(255.0),
+        (c[1] * glow).min(255.0),
+        (c[2] * glow).min(255.0),
+        a * 255.0,
+    ]
+}
+
+fn blob_frame(n: u32, colors: [[f32; 3]; 2], t: f32) -> Vec<u8> {
+    let mut px = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let u = x as f32 / (n - 1) as f32 * 2.0 - 1.0;
+            let v = y as f32 / (n - 1) as f32 * 2.0 - 1.0;
+            let p = blob_pixel(u, v, colors, t);
+            px.extend(p.map(|c| c as u8));
+        }
+    }
+    px
 }
 
 /// Отношение высоты ячейки к ширине по данным терминала.

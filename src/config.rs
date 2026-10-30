@@ -111,9 +111,6 @@ pub struct State {
     pub volume: Option<f32>,
     /// Качество, выбранное в интерфейсе (перекрывает конфиг).
     pub quality: Option<Quality>,
-    pub wave_mood: usize,
-    pub wave_diversity: usize,
-    pub wave_language: usize,
     /// Что играло при выходе — восстанавливается на паузе при следующем запуске.
     pub resume: Option<Resume>,
 }

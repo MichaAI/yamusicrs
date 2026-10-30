@@ -93,6 +93,7 @@ async fn event_loop(
         let ctx = view::Ctx {
             p: app.theme.current(),
             t: app.started.elapsed().as_secs_f32(),
+            dt: elapsed.as_secs_f32().min(0.1),
             cell_aspect,
         };
         terminal.draw(|f| {

@@ -21,6 +21,7 @@ use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
 
 pub enum Msg {
+    Wheel(Result<Vec<api::WheelItem>, String>),
     Resumed {
         resume: crate::config::Resume,
         result: Result<Vec<Track>, String>,
@@ -218,33 +219,23 @@ pub enum Screen {
     Main,
 }
 
-pub const WAVE_MOODS: [(&str, &str); 5] = [
-    ("Любое", ""),
-    ("Бодрое", "settingMoodEnergy:active"),
-    ("Весёлое", "settingMoodEnergy:fun"),
-    ("Спокойное", "settingMoodEnergy:calm"),
-    ("Грустное", "settingMoodEnergy:sad"),
-];
-pub const WAVE_DIVERSITY: [(&str, &str); 4] = [
-    ("По умолчанию", ""),
-    ("Любимое", "settingDiversity:favorite"),
-    ("Незнакомое", "settingDiversity:discover"),
-    ("Популярное", "settingDiversity:popular"),
-];
-pub const WAVE_LANGUAGE: [(&str, &str); 4] = [
-    ("Любой", ""),
-    ("Русский", "settingLanguage:russian"),
-    ("Иностранный", "settingLanguage:not-russian"),
-    ("Без слов", "settingLanguage:without-words"),
-];
-
 pub struct WaveUi {
-    /// Строка настроек под курсором: 0 настроение, 1 характер, 2 язык.
-    pub row: usize,
     pub loading: bool,
-    /// Сиды, с которыми запущена текущая волна.
+    /// Персональные пресеты («колесо») с `wheel/new`.
+    pub items: Loadable<Vec<api::WheelItem>>,
+    /// Плавная позиция дуги (догоняет курсор).
+    pub arc: f32,
+    /// Сиды и название играющей волны.
     pub active_seeds: Option<Vec<String>>,
+    pub active_name: Option<String>,
+    /// Пункты дуги на экране — для мыши.
+    pub hits: Vec<(ratatui::layout::Rect, usize)>,
+    /// Кнопки ⏮ ▶ ⏭: прямоугольник и действие (0, 1, 2).
+    pub controls: Vec<(ratatui::layout::Rect, u8)>,
 }
+
+/// Сиды «просто Моей волны».
+const MY_WAVE: &str = "user:onyourwave";
 
 pub struct App {
     pub tx: UnboundedSender<Msg>,
@@ -267,6 +258,8 @@ pub struct App {
     pub search: Option<Loadable<Vec<SearchItem>>>,
     pub queue: Queue,
     pub wave: WaveUi,
+    /// Фаза анимации блоба (быстрее, когда играет).
+    pub wave_phase: f32,
     pub now: Option<Now>,
     /// Токен последней явной загрузки (чтобы игнорировать устаревшие ответы).
     requested: Option<Token>,
@@ -312,6 +305,7 @@ pub struct App {
     last_click: Option<(Instant, usize)>,
     /// Строка списка под мышью.
     pub hover: Option<usize>,
+    sel_moved_at: Instant,
     stored_token: Option<StoredToken>,
 }
 
@@ -391,10 +385,15 @@ impl App {
                 generation: 0,
             },
             wave: WaveUi {
-                row: 0,
                 loading: false,
+                items: Loadable::Loading,
+                arc: 0.0,
                 active_seeds: None,
+                active_name: None,
+                hits: Vec::new(),
+                controls: Vec::new(),
             },
+            wave_phase: 0.0,
             now: None,
             requested: None,
             loading_track: None,
@@ -429,6 +428,7 @@ impl App {
             last_session_save: Instant::now(),
             last_click: None,
             hover: None,
+            sel_moved_at: Instant::now(),
             stored_token: None,
             cfg,
         };
@@ -529,6 +529,7 @@ impl App {
         );
         self.load_likes();
         self.load_playlists();
+        self.load_wheel();
         self.restore_session();
     }
 
@@ -709,7 +710,7 @@ impl App {
 
     /// Миниатюра обложки для строки списка (под курсором или мышью).
     pub fn want_thumb(&mut self, uri: &str) {
-        self.fetch_image(thumb_key(uri), uri, 100, false);
+        self.fetch_image(thumb_key(uri), uri, 300, false);
     }
 
     fn fetch_image(&mut self, key: String, uri: &str, size: u32, palette: bool) {
@@ -864,7 +865,7 @@ impl App {
             return f.len();
         }
         match &self.page().view {
-            View::Wave => 3,
+            View::Wave => self.wave.items.ready().map_or(0, Vec::len),
             View::Likes => self.likes.ready().map_or(0, Vec::len),
             View::Playlists => self.playlists.ready().map_or(0, Vec::len),
             View::Search => match &self.search {
@@ -877,7 +878,13 @@ impl App {
         }
     }
 
+    /// Курсор постоял на месте — можно показывать всплывающую обложку.
+    pub fn selection_settled(&self) -> bool {
+        self.sel_moved_at.elapsed() > Duration::from_millis(450)
+    }
+
     fn move_sel(&mut self, delta: isize) {
+        self.sel_moved_at = Instant::now();
         let len = self.page_len();
         if len == 0 {
             return;
@@ -941,11 +948,14 @@ impl App {
         let orig = self.sel_index();
         match &self.page().view {
             View::Wave => {
-                // Та же волна уже играет — Enter ставит на паузу, а не перезапускает.
-                if matches!(self.queue.kind, QueueKind::Wave { .. }) && !self.wave_settings_changed() {
+                let Some(item) = self.wave.items.ready().and_then(|v| v.get(sel)).cloned() else {
+                    return;
+                };
+                // Этот пресет уже играет — Enter ставит на паузу, а не перезапускает.
+                if self.is_active_preset(&item) {
                     self.toggle_pause();
                 } else {
-                    self.start_wave();
+                    self.start_wave(item.seeds(), item.name().to_string());
                 }
             }
             View::Likes => {
@@ -1255,32 +1265,25 @@ impl App {
 
     // ── Моя волна ────────────────────────────────────────────────────────────
 
-    fn wave_seeds(&self) -> Vec<String> {
-        let mut s = vec!["user:onyourwave".to_string()];
-        for v in [
-            WAVE_MOODS[self.state.wave_mood % WAVE_MOODS.len()].1,
-            WAVE_DIVERSITY[self.state.wave_diversity % WAVE_DIVERSITY.len()].1,
-            WAVE_LANGUAGE[self.state.wave_language % WAVE_LANGUAGE.len()].1,
-        ] {
-            if !v.is_empty() {
-                s.push(v.to_string());
-            }
-        }
-        s
+    fn load_wheel(&mut self) {
+        self.spawn(|c, tx| async move {
+            let _ = tx.send(Msg::Wheel(c.wheel().await.map_err(err_str)));
+        });
     }
 
-    /// Настройки на экране отличаются от тех, с которыми запущена играющая волна.
-    pub fn wave_settings_changed(&self) -> bool {
-        self.wave.active_seeds.as_ref().is_some_and(|s| *s != self.wave_seeds())
+    /// Пресет сейчас играет (волна запущена с его сидами).
+    pub fn is_active_preset(&self, item: &api::WheelItem) -> bool {
+        matches!(self.queue.kind, QueueKind::Wave { .. })
+            && self.wave.active_seeds.as_ref().is_some_and(|s| *s == item.seeds())
     }
 
-    fn start_wave(&mut self) {
+    fn start_wave(&mut self, seeds: Vec<String>, name: String) {
         if self.wave.loading {
             return;
         }
         self.wave.loading = true;
-        let seeds = self.wave_seeds();
         self.wave.active_seeds = Some(seeds.clone());
+        self.wave.active_name = Some(name);
         self.spawn(move |c, tx| async move {
             let r = c.rotor_new(&seeds).await.map_err(err_str);
             if let Ok(s) = &r {
@@ -1410,6 +1413,26 @@ impl App {
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Authed(Ok((c, s, t))) => self.on_authed(c, s, t),
+            Msg::Wheel(r) => match r {
+                Ok(items) => {
+                    // Курсор — на «Назад к привычному» (обычная Моя волна), как на вебе.
+                    let home = items.iter().position(|i| i.seeds() == [MY_WAVE]).unwrap_or(0);
+                    for icon in items
+                        .iter()
+                        .filter_map(|i| i.icon())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                    {
+                        self.fetch_image(agent_key(&icon), &icon, 200, false);
+                    }
+                    self.wave.items = Loadable::Ready(items);
+                    if let Some(p) = self.stack.iter_mut().find(|p| matches!(p.view, View::Wave)) {
+                        p.sel = home;
+                    }
+                    self.wave.arc = home as f32;
+                }
+                Err(e) => self.wave.items = Loadable::Failed(e),
+            },
             Msg::Resumed { resume, result } => {
                 // Пользователь уже что-то включил сам — не перебиваем.
                 if !self.queue.items.is_empty() {
@@ -1742,6 +1765,14 @@ impl App {
     /// Вызывается каждый кадр: синхронизирует «что играет» с аудиодвижком.
     pub fn tick(&mut self) {
         self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(4));
+        // Дуга волны догоняет курсор.
+        if let Some(p) = self.stack.iter().find(|p| matches!(p.view, View::Wave)) {
+            let target = p.sel as f32;
+            self.wave.arc += (target - self.wave.arc) * 0.22;
+            if (target - self.wave.arc).abs() < 0.01 {
+                self.wave.arc = target;
+            }
+        }
         let Some(pos) = self.player.position() else {
             return;
         };
@@ -1851,6 +1882,36 @@ impl App {
         let inside = |r: ratatui::layout::Rect| {
             m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height
         };
+        // Экран волны: клик по пресету — выбрать (повторный — включить), кнопки ⏮ ▶ ⏭, колесо — по дуге.
+        if matches!(self.page().view, View::Wave) && inside(self.areas.main) {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(a) = self.wave.controls.iter().find(|(r, _)| inside(*r)).map(|c| c.1) {
+                        match a {
+                            0 => self.prev(),
+                            1 => {
+                                if matches!(self.queue.kind, QueueKind::Wave { .. }) {
+                                    self.toggle_pause();
+                                } else {
+                                    self.activate();
+                                }
+                            }
+                            _ => self.next(),
+                        }
+                    } else if let Some(i) = self.wave.hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1) {
+                        if self.page().sel == i {
+                            self.activate();
+                        } else {
+                            self.page_mut().sel = i;
+                        }
+                    }
+                    return;
+                }
+                MouseEventKind::ScrollUp => return self.move_sel(-1),
+                MouseEventKind::ScrollDown => return self.move_sel(1),
+                _ => {}
+            }
+        }
         match m.kind {
             MouseEventKind::Moved => {
                 self.hover = inside(self.areas.list)
@@ -2056,15 +2117,6 @@ impl App {
             KeyCode::PageDown => self.move_sel(page_rows),
             KeyCode::Home | KeyCode::Char('g') => self.move_sel(-(1 << 20)),
             KeyCode::End | KeyCode::Char('G') => self.move_sel(1 << 20),
-            KeyCode::Left | KeyCode::Right if matches!(self.page().view, View::Wave) => {
-                let d = if k.code == KeyCode::Left { -1isize } else { 1 };
-                let (v, n) = match self.wave.row {
-                    0 => (&mut self.state.wave_mood, WAVE_MOODS.len()),
-                    1 => (&mut self.state.wave_diversity, WAVE_DIVERSITY.len()),
-                    _ => (&mut self.state.wave_language, WAVE_LANGUAGE.len()),
-                };
-                *v = (*v as isize + d).rem_euclid(n as isize) as usize;
-            }
             KeyCode::Left => self.seek_by(if shift { -30.0 } else { -5.0 }),
             KeyCode::Right => self.seek_by(if shift { 30.0 } else { 5.0 }),
             KeyCode::Enter => self.activate(),
@@ -2106,7 +2158,7 @@ impl App {
             }
             KeyCode::Char('w') => {
                 self.set_tab(Tab::Wave);
-                self.start_wave();
+                self.start_wave(vec![MY_WAVE.into()], "Моя волна".into());
             }
             KeyCode::Char('t') => self.lyrics_mode = !self.lyrics_mode,
             KeyCode::Char('r') => {
@@ -2139,12 +2191,10 @@ impl App {
             KeyCode::Char('R') => {
                 self.load_likes();
                 self.load_playlists();
+                self.load_wheel();
                 self.toast("Обновляю библиотеку…".into());
             }
             _ => {}
-        }
-        if let View::Wave = self.page().view {
-            self.wave.row = self.page().sel.min(2);
         }
     }
 
@@ -2204,6 +2254,10 @@ fn not_image() -> tachyonfx::CellFilter {
 fn screen_rect() -> ratatui::layout::Rect {
     let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
     ratatui::layout::Rect::new(0, 0, w, h)
+}
+
+pub fn agent_key(uri: &str) -> String {
+    format!("agent:{uri}")
 }
 
 pub fn thumb_key(uri: &str) -> String {

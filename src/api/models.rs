@@ -54,7 +54,13 @@ where
 
 /// Превращает `avatars.yandex.net/.../%%` в полноценный URL нужного размера.
 pub fn cover_url(uri: &str, size: u32) -> String {
-    format!("https://{}", uri.replace("%%", &format!("{size}x{size}")))
+    let u = uri.replace("%%", &format!("{size}x{size}"));
+    // Обложки агентов волны приходят уже с протоколом.
+    if u.starts_with("http") {
+        u
+    } else {
+        format!("https://{u}")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -388,4 +394,77 @@ pub struct RotorTracks {
     pub batch_id: Option<String>,
     #[serde(default)]
     pub sequence: Vec<SequenceItem>,
+}
+
+/// «Колесо» Моей волны (`POST api.music.yandex.ru/wheel/new`) — персональные пресеты.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Wheel {
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub items: Vec<WheelItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WheelItem {
+    /// `DEFAULT` или `CONTROL_ACCENT` (служебные: «Назад к привычному», «Встряхнуть»).
+    #[serde(default)]
+    pub style: String,
+    pub data: WheelData,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WheelData {
+    pub wave: Option<WheelWave>,
+    pub agent: Option<WheelAgent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WheelWave {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub seeds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WheelAgent {
+    pub cover: Option<AgentCover>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentCover {
+    pub uri: Option<String>,
+    /// Фирменный цвет агента, `#RRGGBB`.
+    pub color: Option<String>,
+}
+
+impl WheelItem {
+    pub fn name(&self) -> &str {
+        self.data.wave.as_ref().map_or("", |w| w.name.as_str())
+    }
+
+    pub fn seeds(&self) -> Vec<String> {
+        self.data.wave.as_ref().map(|w| w.seeds.clone()).unwrap_or_default()
+    }
+
+    pub fn icon(&self) -> Option<&str> {
+        self.data.agent.as_ref()?.cover.as_ref()?.uri.as_deref()
+    }
+
+    pub fn color(&self) -> Option<(u8, u8, u8)> {
+        let c = self
+            .data
+            .agent
+            .as_ref()?
+            .cover
+            .as_ref()?
+            .color
+            .as_deref()?
+            .trim_start_matches('#');
+        let v = u32::from_str_radix(c, 16).ok()?;
+        Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
+    }
+
+    pub fn accent(&self) -> bool {
+        self.style == "CONTROL_ACCENT"
+    }
 }

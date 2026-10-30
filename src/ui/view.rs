@@ -10,8 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::theme::{Palette, Rgb, shimmer};
 use crate::api::Track;
 use crate::app::{
-    App, ArtistRow, Loadable, LoginState, QueueKind, Screen, SearchItem, Tab, View, WAVE_DIVERSITY, WAVE_LANGUAGE,
-    WAVE_MOODS, artist_rows, quality_label,
+    App, ArtistRow, Loadable, LoginState, QueueKind, Screen, SearchItem, Tab, View, artist_rows, quality_label,
 };
 use crate::fetch::Origin;
 use crate::lyrics::{self, Lyrics};
@@ -22,6 +21,8 @@ pub struct Ctx {
     pub p: Palette,
     /// Время с запуска, сек — фаза всех анимаций.
     pub t: f32,
+    /// Время с прошлого кадра, сек.
+    pub dt: f32,
     pub cell_aspect: f32,
 }
 
@@ -42,6 +43,15 @@ impl Ctx {
 
 pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let area = f.area();
+    // Блоб живёт только на экране волны; под справкой и полноэкранным текстом его не видно.
+    let blob_visible = matches!(app.screen, Screen::Main)
+        && matches!(app.page().view, View::Wave)
+        && !app.show_help
+        && !app.lyrics_mode
+        && app.wave.items.ready().is_some();
+    if !blob_visible {
+        app.images.hide_blob();
+    }
     match &app.screen {
         Screen::Connecting => connecting(f, area, ctx),
         Screen::Login(l) => login(f, area, l, ctx),
@@ -678,6 +688,17 @@ fn row_style(ctx: &Ctx, selected: bool) -> Style {
     }
 }
 
+/// Ширины колонок «название / артист / альбом» строки трека.
+fn track_columns(w: usize) -> (usize, usize, usize) {
+    let flex = w.saturating_sub(2 + 1 + 5 + 1 + 6 + 4);
+    let (tw, aw) = if flex > 60 {
+        (flex * 45 / 100, flex * 30 / 100)
+    } else {
+        (flex * 60 / 100, flex * 40 / 100)
+    };
+    (tw, aw, flex.saturating_sub(tw + aw))
+}
+
 fn track_row<'a>(app: &App, ctx: &Ctx, t: &Track, n: usize, w: usize, selected: bool) -> Line<'a> {
     let playing = app.now.as_ref().is_some_and(|x| x.track.id == t.id);
     let loading = app.loading_track.as_ref().is_some_and(|x| x.id == t.id) && !playing;
@@ -699,13 +720,7 @@ fn track_row<'a>(app: &App, ctx: &Ctx, t: &Track, n: usize, w: usize, selected: 
     };
     let liked = app.is_liked(t);
     let cached = app.library.contains(&t.id);
-    let flex = w.saturating_sub(2 + 1 + 5 + 1 + 6 + 4);
-    let (tw, aw) = if flex > 60 {
-        (flex * 45 / 100, flex * 30 / 100)
-    } else {
-        (flex * 60 / 100, flex * 40 / 100)
-    };
-    let albw = flex.saturating_sub(tw + aw);
+    let (tw, aw, albw) = track_columns(w);
     let title_style = if playing {
         ctx.accent().add_modifier(Modifier::BOLD)
     } else if !t.available {
@@ -797,57 +812,58 @@ fn track_list(f: &mut Frame, area: Rect, app: &mut App, tracks: &[Track], ctx: &
         .map(|i| track_row(app, ctx, &tracks[idx[i]], idx[i] + 1, area.width as usize, i == sel))
         .collect();
     f.render_widget(Paragraph::new(lines), area);
-    let covers: Vec<(usize, Option<String>, bool)> = range
+    let covers: Vec<RowCover> = range
         .clone()
         .map(|i| {
             (
                 i,
                 tracks[idx[i]].cover_uri().map(str::to_owned),
-                is_now(app, &tracks[idx[i]]),
+                tracks[idx[i]].full_title(),
             )
         })
         .collect();
-    row_thumbs(f, area, app, range.start, sel, &covers, ctx);
+    cover_popup(f, area, app, range.start, sel, &covers, ctx);
     scrollbar(f, area, range.start, h, idx.len(), ctx);
 }
 
-fn is_now(app: &App, t: &Track) -> bool {
-    app.now.as_ref().is_some_and(|n| n.track.id == t.id)
-}
+/// Строка списка для всплывающей обложки: (видимый индекс, обложка, название).
+type RowCover = (usize, Option<String>, String);
 
-/// Мини-обложка 2×1 в левой колонке у строки под курсором и под мышью.
-/// Играющая строка оставляет свой индикатор, пока на неё не навели мышь.
-fn row_thumbs(
-    f: &mut Frame,
-    area: Rect,
-    app: &mut App,
-    start: usize,
-    sel: usize,
-    covers: &[(usize, Option<String>, bool)],
-    ctx: &Ctx,
-) {
-    for (i, uri, is_playing_row) in covers {
-        let hovered = app.hover == Some(*i);
-        if !(hovered || *i == sel) {
-            continue;
-        }
-        let Some(uri) = uri else { continue };
-        if *is_playing_row && !hovered {
-            continue;
-        }
-        let key = crate::app::thumb_key(uri);
-        if !app.images.contains(&key) {
-            app.want_thumb(uri);
-            continue;
-        }
-        let r = Rect {
-            x: area.x,
-            y: area.y + (*i - start) as u16,
-            width: 2,
-            height: 1,
-        };
-        app.images.render(&key, r, f.buffer_mut(), ctx.cell_aspect);
+/// Всплывающая обложка трека под мышью (или под курсором, если он постоял на месте):
+/// сразу после названия, под строкой — чтобы саму строку не закрывать.
+fn cover_popup(f: &mut Frame, area: Rect, app: &mut App, start: usize, sel: usize, covers: &[RowCover], ctx: &Ctx) {
+    let target = app.hover.and_then(|h| covers.iter().find(|c| c.0 == h)).or_else(|| {
+        app.selection_settled()
+            .then(|| covers.iter().find(|c| c.0 == sel))
+            .flatten()
+    });
+    let Some((i, Some(uri), title)) = target else { return };
+    let key = crate::app::thumb_key(uri);
+    if !app.images.contains(&key) {
+        app.want_thumb(uri);
+        return;
     }
+    let h = 8.min(area.height.saturating_sub(2) / 2).max(3);
+    let w = ((h as f32) * ctx.cell_aspect).round() as u16;
+    let row_y = area.y + (*i - start) as u16;
+    // Колонки как в track_row: маркер 2 + пробел + номер 5, дальше название.
+    let title_x = area.x + 8;
+    let (tw, _, _) = track_columns(area.width as usize);
+    let text_w = title.width().min(tw) as u16;
+    let x = (title_x + text_w + 2).min(area.x + area.width.saturating_sub(w + 2));
+    let y = if row_y + 1 + h <= area.y + area.height {
+        row_y + 1
+    } else {
+        row_y.saturating_sub(h)
+    };
+    let r = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, r);
+    app.images.render(&key, r, f.buffer_mut(), ctx.cell_aspect);
 }
 
 fn scrollbar(f: &mut Frame, area: Rect, offset: usize, h: usize, len: usize, ctx: &Ctx) {
@@ -911,14 +927,14 @@ fn mixed_list(f: &mut Frame, area: Rect, app: &mut App, rows: &[RowKind], ctx: &
         });
     }
     f.render_widget(Paragraph::new(lines), area);
-    let covers: Vec<(usize, Option<String>, bool)> = range
+    let covers: Vec<RowCover> = range
         .clone()
         .filter_map(|i| match &rows[i] {
-            RowKind::Track(t) => Some((i, t.cover_uri().map(str::to_owned), is_now(app, t))),
+            RowKind::Track(t) => Some((i, t.cover_uri().map(str::to_owned), t.full_title())),
             _ => None,
         })
         .collect();
-    row_thumbs(f, area, app, range.start, sel, &covers, ctx);
+    cover_popup(f, area, app, range.start, sel, &covers, ctx);
     scrollbar(f, area, range.start, h, rows.len(), ctx);
 }
 
@@ -1001,155 +1017,251 @@ fn draw_search(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     }
 }
 
-fn draw_wave(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
+fn draw_wave(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
+    app.wave.hits.clear();
+    let items = match &app.wave.items {
+        Loadable::Ready(v) => v.clone(),
+        other => {
+            app.images.hide_blob();
+            return status(f, area, other, ctx, "Загружаю Мою волну");
+        }
+    };
+    let [left, right] = Layout::horizontal([Constraint::Percentage(46), Constraint::Min(20)]).areas(area);
+    let sel = app.page().sel.min(items.len().saturating_sub(1));
+    draw_wheel(f, left, app, &items, sel, ctx);
+    draw_wave_stage(f, right, app, items.get(sel), ctx);
+}
+
+/// Дуга пресетов: выбранный по центру и ближе всех к краю, остальные уходят по кривой и гаснут.
+fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::WheelItem], sel: usize, ctx: &Ctx) {
+    const SLOT: f32 = 4.0; // строк на пункт: иконка в 3 строки + зазор
+    let icon_h = 3u16;
+    let icon_w = ((icon_h as f32) * ctx.cell_aspect).round() as u16;
+    let mid = area.y as f32 + area.height as f32 / 2.0 - 1.0;
+    let radius = (area.width as f32 * 0.55).min(40.0);
+    for (i, item) in items.iter().enumerate() {
+        let d = i as f32 - app.wave.arc;
+        let y = (mid + d * SLOT).round() as i32 - 1;
+        if y < area.y as i32 || y + icon_h as i32 > (area.y + area.height) as i32 {
+            continue;
+        }
+        let y = y as u16;
+        let theta = (d * 0.33).clamp(-1.4, 1.4);
+        let x = area.x + 2 + (radius * (1.0 - theta.cos())) as u16;
+        if x + icon_w + 4 >= area.x + area.width {
+            continue;
+        }
+        let icon_rect = Rect {
+            x,
+            y,
+            width: icon_w,
+            height: icon_h,
+        };
+        match item.icon().map(crate::app::agent_key) {
+            Some(k) if app.images.contains(&k) => app.images.render(&k, icon_rect, f.buffer_mut(), ctx.cell_aspect),
+            _ => {
+                let c = item
+                    .color()
+                    .map_or(ctx.p.accent, |(r, g, b)| Rgb(r as f32, g as f32, b as f32));
+                f.render_widget(
+                    Paragraph::new(Line::styled("●", Style::new().fg(c.color()))).alignment(Alignment::Center),
+                    Rect {
+                        y: y + 1,
+                        height: 1,
+                        ..icon_rect
+                    },
+                );
+            }
+        }
+        // Яркость по расстоянию от центра дуги.
+        let fade = (1.0 - d.abs() / 4.5).clamp(0.15, 1.0);
+        let is_sel = i == sel;
+        let active = app.is_active_preset(item);
+        let base = if item.accent() { Rgb::hex(0xFFDB4D) } else { ctx.p.fg };
+        let col = base.lerp(ctx.p.dim.scale(0.4), 1.0 - fade);
+        let mut name_style = Style::new().fg(col.color());
+        if is_sel {
+            name_style = name_style.add_modifier(Modifier::BOLD);
+        }
+        let tx = x + icon_w + 2;
+        let tw = (area.x + area.width).saturating_sub(tx + 1);
+        let mut spans = Vec::new();
+        if active {
+            spans.push(Span::styled(
+                format!("{} ", playing_glyph(ctx, app.player.paused())),
+                ctx.accent(),
+            ));
+        }
+        spans.push(Span::styled(
+            fit(item.name(), tw as usize).trim_end().to_string(),
+            name_style,
+        ));
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: tx,
+                y: y + 1,
+                width: tw,
+                height: 1,
+            },
+        );
+        if is_sel && let Some(desc) = item.data.wave.as_ref().and_then(|w| w.description.clone()) {
+            f.render_widget(
+                Paragraph::new(Line::styled(fit(&desc, tw as usize), ctx.dim())),
+                Rect {
+                    x: tx,
+                    y: y + 2,
+                    width: tw,
+                    height: 1,
+                },
+            );
+        }
+        app.wave.hits.push((
+            Rect {
+                x,
+                y,
+                width: area.x + area.width - x,
+                height: icon_h,
+            },
+            i,
+        ));
+    }
+}
+
+/// Правая часть: блоб в цвете пресета, название поверх, кнопки управления.
+fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, sel: Option<&crate::api::WheelItem>, ctx: &Ctx) {
     let wave_on = matches!(app.queue.kind, QueueKind::Wave { .. });
     let playing = wave_on && app.now.is_some() && !app.player.paused();
-    let [top, wave_area, settings, rest] = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Length(5),
-        Constraint::Length(7),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    let [stage, controls, hint] =
+        Layout::vertical([Constraint::Min(6), Constraint::Length(3), Constraint::Length(2)]).areas(area);
 
-    let title = "М О Я   В О Л Н А";
-    let mut t = vec![];
-    t.extend(gradient_line(title, ctx.p.accent, ctx.p.accent2, ctx.t * 0.6, true));
-    let sub = if wave_on {
-        "играет — настройки применятся при следующем запуске"
+    // Цвет блоба — агент выбранного пресета, второй — палитра обложки играющего трека.
+    let agent = sel
+        .and_then(|i| i.color())
+        .map_or(ctx.p.accent, |(r, g, b)| Rgb(r as f32, g as f32, b as f32));
+    let second = if wave_on { ctx.p.accent } else { agent.rotate_hue(0.12) };
+    let colors = [[agent.0, agent.1, agent.2], [second.0, second.1, second.2]];
+    // Блоб «дышит» быстрее, когда играет.
+    let speed = if playing { 1.0 } else { 0.3 };
+    app.wave_phase += ctx.dt * speed;
+    let blob_rect = super::kitty::fit_square(stage, ctx.cell_aspect);
+    if !app.images.blob(blob_rect, colors, app.wave_phase) {
+        blob_halfblocks(f, blob_rect, colors, app.wave_phase);
+    }
+
+    let title = if wave_on {
+        app.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
     } else {
-        "бесконечный поток под твой вкус"
+        "Моя волна".into()
     };
+    let spaced: String = title.to_uppercase().chars().flat_map(|c| [c, ' ']).collect();
+    let ty = stage.y + stage.height / 2;
     f.render_widget(
-        Paragraph::new(vec![Line::raw(""), Line::from(t), Line::styled(sub, ctx.dim())]).alignment(Alignment::Center),
-        top,
+        Paragraph::new(Line::from(Span::styled(
+            spaced.trim_end().to_string(),
+            Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center),
+        Rect {
+            y: ty,
+            height: 1,
+            ..stage
+        },
     );
-
-    // Декоративная волна: две синусоиды разной частоты, амплитуда растёт, когда играет.
-    const LV: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let amp = if playing { 1.0 } else { 0.35 };
-    let w = wave_area.width as usize;
-    let h = wave_area.height as f32;
-    let buf = f.buffer_mut();
-    for x in 0..w {
-        let fx = x as f32;
-        let y = (fx * 0.11 + ctx.t * 1.7).sin() * 0.6 + (fx * 0.047 - ctx.t * 0.9).sin() * 0.4;
-        let edge = ((fx / w as f32) * std::f32::consts::PI).sin().powf(0.6);
-        let level = ((y * amp * edge + 1.0) / 2.0 * h).clamp(0.0, h);
-        let col = shimmer(ctx.p.accent, ctx.p.accent2, x as f32 / w as f32, ctx.t * 0.5);
-        for row in 0..wave_area.height {
-            let from_bottom = (wave_area.height - 1 - row) as f32;
-            let fill = (level - from_bottom).clamp(0.0, 1.0);
-            if fill <= 0.0 {
-                continue;
-            }
-            let ch = LV[((fill * 8.0) as usize).clamp(1, 8) - 1];
-            let fade = 0.35 + 0.65 * (from_bottom / h);
-            if let Some(c) = buf.cell_mut((wave_area.x + x as u16, wave_area.y + row)) {
-                c.set_char(ch).set_fg(col.scale(fade.min(1.0)).color());
-            }
-        }
+    if let Some(n) = app.now.as_ref().filter(|_| wave_on) {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!("{} — {}", n.track.full_title(), n.track.artist_names()),
+                Style::new().fg(Color::White),
+            ))
+            .alignment(Alignment::Center),
+            Rect {
+                y: ty + 2,
+                height: 1,
+                ..stage
+            },
+        );
     }
 
-    let opts: [(&str, Vec<&str>, usize); 3] = [
-        (
-            "Настроение",
-            WAVE_MOODS.iter().map(|m| m.0).collect(),
-            app.state.wave_mood,
-        ),
-        (
-            "Характер",
-            WAVE_DIVERSITY.iter().map(|m| m.0).collect(),
-            app.state.wave_diversity,
-        ),
-        (
-            "Язык",
-            WAVE_LANGUAGE.iter().map(|m| m.0).collect(),
-            app.state.wave_language,
-        ),
-    ];
-    let mut lines = vec![Line::raw("")];
-    for (i, (name, vals, cur)) in opts.iter().enumerate() {
-        let sel = app.page().sel == i;
-        let mut sp = vec![Span::styled(
-            fit(&format!("{}{name}", if sel { "▌ " } else { "  " }), 16),
-            if sel { ctx.accent() } else { ctx.dim() },
-        )];
-        for (j, v) in vals.iter().enumerate() {
-            let st = if j == *cur % vals.len() {
-                if sel {
-                    Style::new()
-                        .fg(Color::Black)
-                        .bg(ctx.p.accent.color())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    ctx.accent().add_modifier(Modifier::BOLD)
-                }
+    // Кнопки ⏮ ▶ ⏭ — кликабельные.
+    let play = if wave_on && !app.player.paused() { "⏸" } else { "▶" };
+    let labels = [("⏮", 0u8), (play, 1), ("⏭", 2)];
+    let total = 3 * 5 + 2 * 4;
+    let mut x = controls.x + controls.width.saturating_sub(total) / 2;
+    app.wave.controls.clear();
+    for (label, action) in labels {
+        let w = 5u16;
+        let r = Rect {
+            x,
+            y: controls.y,
+            width: w,
+            height: 3,
+        };
+        let (fg, bg) = if action == 1 {
+            (Color::Black, agent.color())
+        } else {
+            (ctx.p.fg.color(), ctx.p.surface.color())
+        };
+        let b = Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(if action == 1 {
+                agent.color()
             } else {
-                ctx.dim()
-            };
-            sp.push(Span::styled(format!(" {v} "), st));
-        }
-        lines.push(Line::from(sp));
-        lines.push(Line::raw(""));
+                ctx.p.dim.scale(0.6).color()
+            }));
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                label,
+                Style::new().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center)
+            .block(b),
+            r,
+        );
+        app.wave.controls.push((r, action));
+        x += w + 4;
     }
-    let start = if app.wave.loading {
+
+    let hint_line = if app.wave.loading {
         Line::from(vec![
             Span::styled(format!("{} ", ctx.spinner()), ctx.accent()),
             Span::styled("запускаю…", ctx.dim()),
         ])
     } else {
-        let key = |k: &'static str| Span::styled(k, ctx.accent().add_modifier(Modifier::BOLD));
-        if !wave_on {
-            Line::from(vec![key("Enter"), Span::styled(" — запустить", ctx.dim())])
-        } else if app.wave_settings_changed() {
-            Line::from(vec![
-                key("Enter"),
-                Span::styled(" — перезапустить с новыми настройками", ctx.dim()),
-            ])
-        } else {
-            Line::from(vec![
-                key("Enter"),
-                Span::styled(" / ", ctx.dim()),
-                key("Space"),
-                Span::styled(" — пауза   ", ctx.dim()),
-                key("n"),
-                Span::styled(" — дальше   ", ctx.dim()),
-                key("d"),
-                Span::styled(" — не нравится", ctx.dim()),
-            ])
-        }
+        Line::styled(
+            "↑↓ — выбрать · Enter — включить · n — дальше · d — не нравится",
+            ctx.dim(),
+        )
     };
-    lines.push(start);
-    let sw = 70.min(settings.width);
     f.render_widget(
-        Paragraph::new(lines),
+        Paragraph::new(hint_line).alignment(Alignment::Center),
         Rect {
-            x: settings.x + (settings.width - sw) / 2,
-            width: sw,
-            ..settings
+            y: hint.y + 1,
+            height: 1,
+            ..hint
         },
     );
+}
 
-    if wave_on && rest.height > 2 {
-        let upcoming: Vec<Line> = app
-            .queue
-            .items
-            .iter()
-            .enumerate()
-            .skip(app.queue.pos.map_or(0, |p| p + 1))
-            .take(rest.height as usize - 1)
-            .map(|(_, t)| {
-                Line::from(vec![
-                    Span::styled("  ↳ ", ctx.dim()),
-                    Span::styled(t.full_title(), ctx.fg()),
-                    Span::styled(format!(" — {}", t.artist_names()), ctx.dim()),
-                ])
-            })
-            .collect();
-        let mut lines = vec![Line::styled("  Дальше в волне", ctx.accent())];
-        lines.extend(upcoming);
-        f.render_widget(Paragraph::new(lines), rest);
+/// Фолбэк без kitty: тот же блоб полублоками.
+fn blob_halfblocks(f: &mut Frame, r: Rect, colors: [[f32; 3]; 2], t: f32) {
+    let buf = f.buffer_mut();
+    for y in 0..r.height {
+        for x in 0..r.width {
+            let u = x as f32 / r.width.max(1) as f32 * 2.0 - 1.0;
+            let px = |row: f32| {
+                let v = row / (r.height as f32 * 2.0) * 2.0 - 1.0;
+                let p = super::kitty::blob_pixel(u, v, colors, t);
+                let a = p[3] / 255.0;
+                Color::Rgb((p[0] * a) as u8, (p[1] * a) as u8, (p[2] * a) as u8)
+            };
+            if let Some(c) = buf.cell_mut((r.x + x, r.y + y)) {
+                c.set_symbol("▀")
+                    .set_fg(px(y as f32 * 2.0))
+                    .set_bg(px(y as f32 * 2.0 + 1.0));
+            }
+        }
     }
 }
 
