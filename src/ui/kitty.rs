@@ -20,17 +20,18 @@ use super::diacritics::DIACRITICS;
 
 const PLACEHOLDER: char = '\u{10EEEE}';
 /// Сторона картинки, которую отдаём терминалу.
-const UPLOAD_PX: u32 = 640;
+const UPLOAD_PX: u32 = 1000;
 /// Радиус скругления углов обложки, доля стороны.
 const CORNER_RADIUS: f32 = 0.14;
 /// Сколько обложек держим загруженными в терминале.
-const KEEP: usize = 48;
+const KEEP: usize = 96;
 
 /// Полублочный рендер: размер в ячейках и (верх, низ) для каждой ячейки.
 type HalfBlocks = ((u16, u16), Vec<(Color, Color)>);
 
 pub struct Image {
-    rgba: image::RgbaImage,
+    /// Уже скруглённая картинка в PNG: компактно в памяти и сразу годится для kitty.
+    png: Vec<u8>,
     /// Копия картинки в терминале на каждый размер в ячейках: одна обложка может
     /// одновременно стоять в шапке плейлиста и в боковой панели, и у каждого места
     /// должно быть своё размещение, иначе они перетягивают его друг у друга.
@@ -58,7 +59,7 @@ struct BlobState {
 }
 
 /// Сторона кадра блоба в пикселях: терминал сам растянет и размоет.
-const BLOB_PX: u32 = 72;
+const BLOB_PX: u32 = 128;
 /// Не чаще ~15 кадров в секунду — блобу больше не нужно.
 const BLOB_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
 
@@ -90,10 +91,17 @@ impl Images {
             img
         };
         round_corners(&mut rgba, CORNER_RADIUS);
+        let mut png = Vec::new();
+        if image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .is_err()
+        {
+            return;
+        }
         self.by_key.insert(
             key,
             Image {
-                rgba,
+                png,
                 variants: HashMap::new(),
                 last_used: self.tick,
                 halfblock: None,
@@ -161,7 +169,7 @@ impl Images {
                         }
                     }
                     let id = id.expect("id");
-                    transmit(&mut self.out, id, &img.rgba);
+                    transmit(&mut self.out, id, &img.png);
                     let _ = write!(self.out, "\x1b_Ga=p,U=1,i={id},c={},r={},C=1,q=2\x1b\\", size.0, size.1);
                     img.variants.insert(size, id);
                     id
@@ -183,8 +191,11 @@ impl Images {
         } else {
             let size = (rect.width, rect.height);
             if img.halfblock.as_ref().is_none_or(|(s, _)| *s != size) {
+                let Ok(full) = image::load_from_memory(&img.png) else {
+                    return;
+                };
                 let small = image::imageops::resize(
-                    &img.rgba,
+                    &full.to_rgba8(),
                     size.0 as u32,
                     size.1 as u32 * 2,
                     image::imageops::FilterType::Triangle,
@@ -246,7 +257,11 @@ impl Images {
         let id = b.id;
         if fresh {
             let px = blob_frame(BLOB_PX, colors, phase);
-            send_rgba(&mut self.out, &format!("a=t,f=32,s={BLOB_PX},v={BLOB_PX},i={id}"), &px);
+            send_rgba(
+                &mut self.out,
+                &format!("a=t,f=32,o=z,s={BLOB_PX},v={BLOB_PX},i={id}"),
+                &zlib(&px),
+            );
         } else if b.last.elapsed() >= BLOB_FRAME {
             b.last = std::time::Instant::now();
             let px = blob_frame(BLOB_PX, colors, phase);
@@ -274,6 +289,14 @@ impl Images {
             b.placed = Some(rect);
         }
         true
+    }
+
+    /// После ресайза ratatui чистит экран, а вместе с ним kitty удаляет обычное
+    /// размещение блоба — его надо поставить заново.
+    pub fn on_resize(&mut self) {
+        if let Some(b) = self.blob.as_mut() {
+            b.placed = None;
+        }
     }
 
     /// Убирает блоб с экрана (данные остаются в терминале до выхода).
@@ -323,15 +346,8 @@ fn delete(out: &mut Vec<u8>, id: u32) {
     let _ = write!(out, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\");
 }
 
-fn transmit(out: &mut Vec<u8>, id: u32, rgba: &image::RgbaImage) {
-    let mut png = Vec::new();
-    if image::DynamicImage::ImageRgba8(rgba.clone())
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .is_err()
-    {
-        return;
-    }
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+fn transmit(out: &mut Vec<u8>, id: u32, png: &[u8]) {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
     let chunks: Vec<&[u8]> = b64.as_bytes().chunks(4096).collect();
     for (i, chunk) in chunks.iter().enumerate() {
         let more = u8::from(i + 1 < chunks.len());
@@ -343,6 +359,14 @@ fn transmit(out: &mut Vec<u8>, id: u32, rgba: &image::RgbaImage) {
         out.extend_from_slice(chunk);
         out.extend_from_slice(b"\x1b\\");
     }
+}
+
+/// Плавные градиенты блоба сжимаются zlib в разы — меньше трафика в терминал.
+fn zlib(px: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let _ = e.write_all(px);
+    e.finish().unwrap_or_default()
 }
 
 /// Сырые RGBA-данные кусками по 4096 символов base64.

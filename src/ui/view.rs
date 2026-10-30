@@ -876,11 +876,18 @@ fn cover_popup(f: &mut Frame, area: Rect, app: &mut App, start: usize, sel: usiz
     let title_x = area.x + 8;
     let (tw, _, _) = track_columns(area.width as usize);
     let text_w = title.width().min(tw) as u16;
-    let x = (title_x + text_w + 2).min(area.x + area.width.saturating_sub(w + 2));
-    let y = if row_y + 1 + h <= area.y + area.height {
-        row_y + 1
+    // Под мышью — рядом с курсором, иначе после названия под строкой.
+    let hovered = app.hover == Some(*i);
+    let (ax, ay) = if hovered {
+        (app.mouse.0 + 3, app.mouse.1)
     } else {
-        row_y.saturating_sub(h)
+        (title_x + text_w + 2, row_y)
+    };
+    let x = ax.min(area.x + area.width.saturating_sub(w + 2));
+    let y = if ay + 1 + h <= area.y + area.height {
+        ay + 1
+    } else {
+        ay.saturating_sub(h)
     };
     let r = Rect {
         x,
@@ -1083,7 +1090,12 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
         };
         match item.icon().map(crate::app::agent_key) {
             Some(k) if app.images.contains(&k) => app.images.render(&k, icon_rect, f.buffer_mut(), ctx.cell_aspect),
-            _ => {
+            other => {
+                if other.is_some()
+                    && let Some(u) = item.icon()
+                {
+                    app.want_agent(u);
+                }
                 let c = item
                     .color()
                     .map_or(ctx.p.accent, |(r, g, b)| Rgb(r as f32, g as f32, b as f32));

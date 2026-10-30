@@ -25,8 +25,18 @@ struct Cli {
     play: Vec<std::path::PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> color_eyre::Result<()> {
+fn main() -> color_eyre::Result<()> {
+    // Плееру хватает двух рабочих потоков; блокирующих (декод картинок) — не больше четырёх.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .thread_keep_alive(std::time::Duration::from_secs(2))
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
     let paths = config::Paths::new();

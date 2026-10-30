@@ -4528,6 +4528,7 @@ dependencies = [
  "crossterm",
  "ctr",
  "directories",
+ "flate2",
  "futures-util",
  "hex",
  "hmac",

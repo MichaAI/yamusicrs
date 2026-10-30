@@ -9,8 +9,8 @@ mod view;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, EventStream,
-    KeyEventKind,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
+    EnableMouseCapture, Event, EventStream, KeyEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::SetTitle;
@@ -29,12 +29,18 @@ pub async fn run(mut app: App, mut rx: UnboundedReceiver<Msg>) -> color_eyre::Re
         std::io::stdout(),
         EnableBracketedPaste,
         EnableMouseCapture,
+        EnableFocusChange,
         SetTitle(TITLE)
     )?;
     let res = event_loop(&mut terminal, &mut app, &mut rx).await;
     app.shutdown();
     let _ = app.images.clear_all(terminal.backend_mut());
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        DisableFocusChange
+    );
     // \e[23;0t — вернуть заголовок, который был до запуска.
     print!("\x1b[23;0t");
     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -71,8 +77,11 @@ async fn event_loop(
                     },
                     Some(Ok(Event::Paste(s))) => app.on_paste(s),
                     Some(Ok(Event::Mouse(m))) => app.on_mouse(m),
+                    Some(Ok(Event::FocusGained)) => app.focused = true,
+                    Some(Ok(Event::FocusLost)) => app.focused = false,
                     Some(Ok(Event::Resize(..))) => {
                         cell_aspect = kitty::cell_aspect();
+                        app.images.on_resize();
                     }
                     Some(Err(e)) => return Err(e.into()),
                     None => return Ok(()),
@@ -99,8 +108,8 @@ async fn event_loop(
 
         app.tick();
         // В покое (пауза, нет анимаций) перерисовываемся редко — экономим CPU.
-        let idle_ok = last_draw.elapsed() < Duration::from_millis(500);
-        if !dirty && !app.animating() && idle_ok {
+        // Без ввода рисуем с частотой, которую диктует то, что сейчас на экране.
+        if !dirty && last_draw.elapsed() < app.frame_interval(fps) {
             continue;
         }
         if last_draw.elapsed() < Duration::from_secs_f64(0.8 / fps as f64) && !dirty {
@@ -129,11 +138,23 @@ async fn event_loop(
         if !app.overlays.is_empty() || !app.osc_out.is_empty() || !prev_overlays.is_empty() {
             let mut out = std::mem::take(&mut app.osc_out);
             // Исчезнувший крупный текст сам не стирается: пробел в верхней строке блока его убирает.
-            for o in prev_overlays.iter().filter(|o| o.scale > 1 && !app.overlays.contains(o)) {
-                let cols: usize = o.runs.iter().map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str())).sum();
+            for o in prev_overlays
+                .iter()
+                .filter(|o| o.scale > 1 && !app.overlays.contains(o))
+            {
+                let cols: usize = o
+                    .runs
+                    .iter()
+                    .map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str()))
+                    .sum();
                 let _ = std::io::Write::write_fmt(
                     &mut out,
-                    format_args!("\x1b[{};{}H\x1b[0m{}", o.y + 1, o.x + 1, " ".repeat(cols * o.scale as usize)),
+                    format_args!(
+                        "\x1b[{};{}H\x1b[0m{}",
+                        o.y + 1,
+                        o.x + 1,
+                        " ".repeat(cols * o.scale as usize)
+                    ),
                 );
             }
             prev_overlays = app.overlays.clone();

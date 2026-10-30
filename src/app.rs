@@ -322,6 +322,10 @@ pub struct App {
     last_click: Option<(Instant, usize)>,
     /// Строка списка под мышью.
     pub hover: Option<usize>,
+    /// Последняя позиция мыши (колонка, строка) — к ней привязан попап обложки.
+    pub mouse: (u16, u16),
+    /// Окно терминала в фокусе: без фокуса рисуем раз в секунду.
+    pub focused: bool,
     /// Оверлеи кадра (крупный текст, ссылки) — пересобираются при каждой отрисовке.
     pub overlays: Vec<crate::ui::term::Overlay>,
     /// Разовые OSC-команды терминалу (курсор, буфер обмена, уведомления).
@@ -458,6 +462,8 @@ impl App {
             last_stall: None,
             last_click: None,
             hover: None,
+            mouse: (0, 0),
+            focused: true,
             overlays: Vec::new(),
             osc_out: Vec::new(),
             pointer: false,
@@ -732,7 +738,7 @@ impl App {
     }
 
     fn fetch_cover(&mut self, uri: &str) {
-        self.fetch_image(uri.to_string(), uri, 600, true);
+        self.fetch_image(uri.to_string(), uri, 1000, true);
     }
 
     /// Тема под обложку трека: сразу, если палитра уже посчитана, иначе — когда обложка придёт.
@@ -740,6 +746,11 @@ impl App {
         if let Some(p) = t.cover_uri().and_then(|u| self.palettes.get(u)).copied() {
             self.theme.set(p);
         }
+    }
+
+    /// Иконка агента волны (догружается, если её вытеснили из кеша).
+    pub fn want_agent(&mut self, uri: &str) {
+        self.fetch_image(agent_key(uri), uri, 200, false);
     }
 
     /// Миниатюра обложки для строки списка (под курсором или мышью).
@@ -2064,6 +2075,7 @@ impl App {
                 _ => {}
             }
         }
+        self.mouse = (m.column, m.row);
         if m.kind == MouseEventKind::Moved {
             self.hover = inside(self.areas.list)
                 .then(|| self.page().view_offset + (m.row - self.areas.list.y) as usize)
@@ -2391,16 +2403,28 @@ impl App {
     }
 
     /// Нужна ли перерисовка с полной частотой кадров.
-    pub fn animating(&self) -> bool {
-        self.fx.is_running()
+    /// Сколько ждать до следующего кадра без ввода: полные fps только когда что-то
+    /// действительно движется; просто играет — 8 fps; окно не в фокусе — раз в секунду.
+    pub fn frame_interval(&self, fps: u32) -> Duration {
+        if !self.focused {
+            return Duration::from_secs(1);
+        }
+        let heavy = self.fx.is_running()
             || self.theme.animating()
             || !self.toasts.is_empty()
             || self.loading_track.is_some()
             || matches!(self.screen, Screen::Connecting | Screen::Login(_))
-            || (self.now.is_some() && !self.player.paused())
             || matches!(self.page().view, View::Wave)
+            || self.stage_mode
             || self.lyrics_moving
-            || (self.page().anim - self.page().offset as f32).abs() > 0.01
+            || (self.page().anim - self.page().offset as f32).abs() > 0.01;
+        if heavy {
+            Duration::from_secs_f64(1.0 / fps as f64)
+        } else if self.now.is_some() && !self.player.paused() {
+            Duration::from_millis(125)
+        } else {
+            Duration::from_millis(500)
+        }
     }
 
     pub fn shutdown(&mut self) {
