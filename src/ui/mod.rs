@@ -176,8 +176,13 @@ async fn event_loop(
         app.images.flush(terminal.backend_mut())?;
         // Оверлеи (крупный текст, ссылки) и разовые OSC-команды — поверх готового кадра.
         let mut out = std::mem::take(&mut app.osc_out);
-        prev_overlays = app.overlays.clone();
+        let prev = std::mem::replace(&mut prev_overlays, app.overlays.clone());
         for o in &app.overlays {
+            // Крупный символ поверх такого же kitty не заменяет, а сдвигает новый вправо:
+            // неизменный крупный текст не переписываем, изменённый уже стёрт выше.
+            if o.scale > 1 && prev.contains(o) {
+                continue;
+            }
             o.write(&mut out);
         }
         out.extend_from_slice(b"\x1b[?2026l");
