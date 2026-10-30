@@ -146,15 +146,14 @@ async fn event_loop(
             cell_aspect,
             big_text: app.kitty_text,
         };
+        // Весь кадр — одним синхронным обновлением (mode 2026), без промежуточных состояний.
+        let mut out = b"\x1b[?2026h".to_vec();
         terminal.draw(|f| {
             view::draw(f, app, &ctx);
-        })?;
-        // Картинки и команды размещения уходят в терминал отдельно от текстового диффа.
-        app.images.flush(terminal.backend_mut())?;
-        // Оверлеи (крупный текст, ссылки) и разовые OSC-команды — поверх готового кадра.
-        if !app.overlays.is_empty() || !app.osc_out.is_empty() || !prev_overlays.is_empty() {
-            let mut out = std::mem::take(&mut app.osc_out);
-            // Исчезнувший крупный текст сам не стирается: пробел в верхней строке блока его убирает.
+            // Исчезнувший крупный текст стираем ДО текста кадра: если писать в нижнюю строку
+            // крупного символа, kitty не стирает его, а сдвигает текст вправо за него.
+            // Пробел в верхней строке блока убирает символ целиком.
+            let width = f.area().width;
             for o in prev_overlays
                 .iter()
                 .filter(|o| o.scale > 1 && !app.overlays.contains(o))
@@ -164,24 +163,27 @@ async fn event_loop(
                     .iter()
                     .map(|r| unicode_width::UnicodeWidthStr::width(r.text.as_str()))
                     .sum();
+                let n = (cols * o.scale as usize).min(width.saturating_sub(o.x) as usize);
                 let _ = std::io::Write::write_fmt(
                     &mut out,
-                    format_args!(
-                        "\x1b[{};{}H\x1b[0m{}",
-                        o.y + 1,
-                        o.x + 1,
-                        " ".repeat(cols * o.scale as usize)
-                    ),
+                    format_args!("\x1b[{};{}H\x1b[0m{}", o.y + 1, o.x + 1, " ".repeat(n)),
                 );
             }
-            prev_overlays = app.overlays.clone();
-            for o in &app.overlays {
-                o.write(&mut out);
-            }
-            let w = terminal.backend_mut();
-            std::io::Write::write_all(w, &out)?;
-            std::io::Write::flush(w)?;
+            // Через тот же stdout, что и бэкенд ratatui: уходит в терминал раньше диффа кадра.
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), &std::mem::take(&mut out));
+        })?;
+        // Картинки и команды размещения уходят в терминал отдельно от текстового диффа.
+        app.images.flush(terminal.backend_mut())?;
+        // Оверлеи (крупный текст, ссылки) и разовые OSC-команды — поверх готового кадра.
+        let mut out = std::mem::take(&mut app.osc_out);
+        prev_overlays = app.overlays.clone();
+        for o in &app.overlays {
+            o.write(&mut out);
         }
+        out.extend_from_slice(b"\x1b[?2026l");
+        let w = terminal.backend_mut();
+        std::io::Write::write_all(w, &out)?;
+        std::io::Write::flush(w)?;
         let title = app.window_title();
         if title != last_title {
             execute!(terminal.backend_mut(), SetTitle(&title))?;
