@@ -51,6 +51,8 @@ pub struct Images {
     blob: Option<BlobState>,
     /// Последний кадр блоба (w, h, RGBA) — чтобы подбирать цвет текста поверх него.
     blob_frame: Option<(u32, u32, Vec<u8>)>,
+    /// Цвет текста над блобом по клеткам (true — тёмный): гистерезис против мигания.
+    pub contrast_memo: std::cell::RefCell<HashMap<(u16, u16), bool>>,
     /// Передавать кадры через POSIX shared memory (без base64 в потоке терминала).
     shm: bool,
     shm_seq: u64,
@@ -79,6 +81,7 @@ impl Images {
             out: Vec::new(),
             blob: None,
             blob_frame: None,
+            contrast_memo: std::cell::RefCell::new(HashMap::new()),
             shm: std::path::Path::new("/dev/shm").is_dir(),
             shm_seq: 0,
         }

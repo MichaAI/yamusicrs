@@ -1344,12 +1344,32 @@ fn blob_contrast(images: &super::kitty::Images, blob: Rect, x: f32, y: f32, colo
         return None;
     }
     let px = [0, 1, 2].map(|i| p[i] * a + BG[i] * (1.0 - a));
-    let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
-    // Плавно от светлого текста к тёмному, а не переключением по порогу.
-    let k = ((lum - 95.0) / 90.0).clamp(0.0, 1.0);
-    let k = k * k * (3.0 - 2.0 * k) * a.min(1.0);
-    let ch = |light: f32, dark: f32| (light + (dark - light) * k) as u8;
-    Some(Color::Rgb(ch(250.0, 22.0), ch(250.0, 20.0), ch(250.0, 28.0)))
+    // Относительная яркость по WCAG (линейный sRGB): так её и видит глаз.
+    let lin = |c: f32| {
+        let c = c / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let l = 0.2126 * lin(px[0]) + 0.7152 * lin(px[1]) + 0.0722 * lin(px[2]);
+    // Белый или почти чёрный — что контрастнее (граница ≈0.18), без серых середин.
+    // Гистерезис: буква меняет цвет, только если фон ушёл за границу заметно.
+    let key = (x as u16, y as u16);
+    let mut memo = images.contrast_memo.borrow_mut();
+    let prev = memo.get(&key).copied();
+    let dark = match prev {
+        Some(true) => l > 0.14,
+        Some(false) => l > 0.23,
+        None => l > 0.18,
+    };
+    memo.insert(key, dark);
+    Some(if dark {
+        Color::Rgb(16, 14, 20)
+    } else {
+        Color::Rgb(255, 255, 255)
+    })
 }
 
 /// Текст поверх блоба: каждой букве — тёмный или белый цвет по яркости того, что под ней.
