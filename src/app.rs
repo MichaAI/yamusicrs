@@ -1296,7 +1296,8 @@ impl App {
         }
         let p = !self.player.paused();
         self.player.set_paused(p);
-        let _ = self.mpris.send(mpris::Update::Status { playing: !p });
+        let pos = self.now.as_ref().map_or(0.0, |n| n.pos);
+        let _ = self.mpris.send(mpris::Update::Status { playing: !p, pos });
     }
 
     fn seek_to(&mut self, secs: f64) {
@@ -1868,7 +1869,7 @@ impl App {
                             self.report_end(now.token, now.pos, false);
                         }
                         self.player.stop();
-                        let _ = self.mpris.send(mpris::Update::Status { playing: false });
+                        let _ = self.mpris.send(mpris::Update::Status { playing: false, pos: 0.0 });
                     }
                 }
             }
@@ -1990,9 +1991,11 @@ impl App {
             album: track.album().map(|a| a.full_title()).unwrap_or_default(),
             length: track.duration_secs(),
             art: track.cover_uri().map(|u| api::cover_url(u, 400)),
+            pos: pos.secs,
         });
         let _ = self.mpris.send(mpris::Update::Status {
             playing: !self.player.paused(),
+            pos: pos.secs,
         });
         self.fx_track = Some(Instant::now());
         self.schedule_next();

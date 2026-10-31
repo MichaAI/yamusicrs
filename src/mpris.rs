@@ -26,9 +26,12 @@ pub enum Update {
         album: String,
         length: f64,
         art: Option<String>,
+        /// Позиция в новом треке: без неё виджеты продолжают отсчёт со старой.
+        pos: f64,
     },
     Status {
         playing: bool,
+        pos: f64,
     },
     Position(f64),
     Seeked(f64),
@@ -101,6 +104,7 @@ async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -
                 album,
                 length,
                 art,
+                pos,
             } => {
                 let tid = TrackId::try_from(format!("/ru/yandex/music/track/t{}", id.replace(':', "_")))
                     .unwrap_or(TrackId::NO_TRACK);
@@ -118,9 +122,17 @@ async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -
                 if let Some(a) = art {
                     m.set_art_url(Some(a));
                 }
-                player.set_metadata(m).await
+                // Клиенты перечитывают Position при смене Metadata, поэтому позиция — до неё,
+                // а Seeked после — для тех, кто только экстраполирует.
+                let t = Time::from_micros((pos * 1e6) as i64);
+                player.set_position(t);
+                match player.set_metadata(m).await {
+                    Ok(()) => player.seeked(t).await,
+                    e => e,
+                }
             }
-            Update::Status { playing } => {
+            Update::Status { playing, pos } => {
+                player.set_position(Time::from_micros((pos * 1e6) as i64));
                 player
                     .set_playback_status(if playing {
                         PlaybackStatus::Playing
