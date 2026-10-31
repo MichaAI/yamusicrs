@@ -330,11 +330,12 @@ impl Images {
         send_rgba(&mut self.out, &format!("{head},o=z"), &zlib(px));
     }
 
-    /// После ресайза ratatui чистит экран, а вместе с ним kitty удаляет обычное
-    /// размещение блоба — его надо поставить заново.
+    /// После очистки экрана (`CSI 2J`) kitty удаляет обычное размещение блоба, а
+    /// картинку без размещений освобождает вместе с данными — `a=p` и `a=f` по
+    /// старому id молча (q=2) не срабатывают. Забываем блоб, чтобы передать заново.
     pub fn on_resize(&mut self) {
-        if let Some(b) = self.blob.as_mut() {
-            b.placed = None;
+        if let Some(b) = self.blob.take() {
+            delete(&mut self.out, b.id);
         }
     }
 
