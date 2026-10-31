@@ -496,6 +496,13 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
                 ("←→", "настройка"),
                 ("?", "все клавиши"),
             ],
+            View::Releases => &[
+                ("←↑↓→", "выбор"),
+                ("Enter", "открыть"),
+                ("Shift+←→", "перемотка"),
+                ("Space", "пауза"),
+                ("?", "все клавиши"),
+            ],
             View::Wave => &[
                 ("↑↓", "настройка"),
                 ("←→", "значение"),
@@ -543,6 +550,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         View::Playlists => "Плейлисты".into(),
         View::Search => "Поиск".into(),
         View::Queue => format!("Очередь · {}", app.queue.title),
+        View::Releases => "Новые релизы".into(),
         View::Tracks { title, .. } => title.clone(),
         View::Artist { name, .. } => name.clone(),
     };
@@ -567,6 +575,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             track_list(f, inner, app, &tracks, ctx);
         }
         View::Playlists => draw_playlists(f, inner, app, ctx),
+        View::Releases => draw_releases(f, inner, app, ctx),
         View::Search => draw_search(f, inner, app, ctx),
         View::Queue => {
             let tracks = app.queue.items.clone();
@@ -1044,6 +1053,104 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         .map(|p| RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0))))
         .collect();
     mixed_list(f, area, app, &rows, ctx);
+}
+
+/// Сетка «Новые релизы», как на сайте: обложка, под ней название, артисты и тип.
+fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
+    app.grid_hits.clear();
+    let albums = match &app.releases {
+        Some(Loadable::Ready(a)) => a.clone(),
+        Some(other) => return status(f, area, other, ctx, "Загружаю новые релизы"),
+        None => return,
+    };
+    if albums.is_empty() {
+        let p = Paragraph::new("Новых релизов нет").style(ctx.dim()).alignment(Alignment::Center);
+        return f.render_widget(p, centered(area, area.width, 1));
+    }
+    // Поля по 1 колонке, между карточками 2; карточка не уже 16 и не шире 30 колонок.
+    const GAP: u16 = 2;
+    let area = Rect {
+        x: area.x + 1,
+        width: area.width.saturating_sub(3),
+        ..area
+    };
+    let cols = ((area.width + GAP) / (22 + GAP)).max(1).min(((area.width + GAP) / (16 + GAP)).max(1));
+    let cw = ((area.width + GAP) / cols).saturating_sub(GAP).min(30);
+    // floor — как в fit_square, иначе под квадратом остаётся пустая строка.
+    let cover_h = ((cw as f32 / ctx.cell_aspect).floor() as u16).max(1);
+    let card_h = cover_h + 4;
+    app.grid_cols = cols as usize;
+    let rows_total = albums.len().div_ceil(cols as usize);
+    let visible = ((area.height + 1) / card_h).max(1) as usize;
+    let sel = app.page().sel.min(albums.len() - 1);
+    let range = animated_window(app, sel / cols as usize, rows_total, visible);
+
+    for row in range.clone() {
+        let y = area.y + ((row - range.start) as u16) * card_h;
+        if y + card_h > area.y + area.height + 1 {
+            break;
+        }
+        for c in 0..cols as usize {
+            let i = row * cols as usize + c;
+            let Some(a) = albums.get(i) else { break };
+            let x = area.x + c as u16 * (cw + GAP);
+            let card = Rect {
+                x,
+                y,
+                width: cw,
+                height: card_h - 1,
+            };
+            app.grid_hits.push((card, i));
+            let cover = Rect { height: cover_h, ..card };
+            match a.cover_uri() {
+                Some(uri) => {
+                    let key = crate::app::thumb_key(uri);
+                    if app.images.contains(&key) {
+                        app.images.render(&key, cover, f.buffer_mut(), ctx.cell_aspect);
+                    } else {
+                        app.want_thumb(uri);
+                        cover_placeholder(f, cover, ctx, true);
+                    }
+                }
+                None => cover_placeholder(f, cover, ctx, false),
+            }
+            let selected = i == sel;
+            let text = Rect {
+                y: y + cover_h,
+                height: 3,
+                ..card
+            };
+            let badge = if a.explicit() { " Ⓔ" } else { "" };
+            let tw = (cw as usize).saturating_sub(badge.width());
+            let title_style = if selected {
+                ctx.accent().add_modifier(Modifier::BOLD)
+            } else {
+                ctx.fg().add_modifier(Modifier::BOLD)
+            };
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(fit(&a.full_title(), tw), title_style),
+                    Span::styled(badge, ctx.dim()),
+                ]),
+                Line::styled(fit(&a.artist_names(), cw as usize), ctx.dim()),
+                Line::styled(a.kind_label(), ctx.dim().add_modifier(Modifier::BOLD)),
+            ];
+            f.render_widget(Paragraph::new(lines).style(row_style(ctx, selected)), text);
+        }
+    }
+    // Обложки следующего ряда — заранее, чтобы при прокрутке не мигали заглушки.
+    let next = range.end * cols as usize;
+    for a in albums.iter().skip(next).take(cols as usize) {
+        if let Some(uri) = a.cover_uri() {
+            app.want_thumb(uri);
+        }
+    }
+    let full = Rect {
+        width: area.width + 2,
+        ..area
+    };
+    let ch = card_h as usize;
+    scrollbar(f, full, range.start * ch, area.height as usize, rows_total * ch, ctx);
 }
 
 fn draw_search(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
@@ -2429,7 +2536,7 @@ fn draw_toasts(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 
 fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
     let keys: &[(&str, &str)] = &[
-        ("1-5 / Tab", "вкладки"),
+        ("1-6 / Tab", "вкладки"),
         ("↑↓ j k, PgUp PgDn, g G", "навигация"),
         ("Enter", "играть / открыть"),
         ("Esc, Backspace", "назад"),

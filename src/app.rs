@@ -37,6 +37,7 @@ pub enum Msg {
     LoggedIn(Result<StoredToken, String>),
     Likes(Result<Vec<Track>, String>),
     Playlists(Result<Vec<Playlist>, String>),
+    Releases(Result<Vec<api::Album>, String>),
     Tracks {
         view_id: u64,
         result: Result<Vec<Track>, String>,
@@ -78,10 +79,18 @@ pub enum Tab {
     Playlists,
     Search,
     Queue,
+    Releases,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Wave, Tab::Likes, Tab::Playlists, Tab::Search, Tab::Queue];
+    pub const ALL: [Tab; 6] = [
+        Tab::Wave,
+        Tab::Likes,
+        Tab::Playlists,
+        Tab::Search,
+        Tab::Queue,
+        Tab::Releases,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -90,6 +99,7 @@ impl Tab {
             Tab::Playlists => "Плейлисты",
             Tab::Search => "Поиск",
             Tab::Queue => "Очередь",
+            Tab::Releases => "Новинки",
         }
     }
 }
@@ -125,6 +135,8 @@ pub enum View {
     Playlists,
     Search,
     Queue,
+    /// Сетка «Новые релизы».
+    Releases,
     Tracks {
         id: u64,
         title: String,
@@ -262,6 +274,11 @@ pub struct App {
     pub liked: HashSet<String>,
     pub likes: Loadable<Vec<Track>>,
     pub playlists: Loadable<Vec<Playlist>>,
+    /// Новые релизы; None — ещё не запрашивали (грузим при первом открытии).
+    pub releases: Option<Loadable<Vec<api::Album>>>,
+    /// Колонок в сетке релизов (знает отрисовка) и карточки на экране — для мыши.
+    pub grid_cols: usize,
+    pub grid_hits: Vec<(ratatui::layout::Rect, usize)>,
     pub search_input: String,
     pub search_editing: bool,
     pub search: Option<Loadable<Vec<SearchItem>>>,
@@ -360,7 +377,7 @@ pub struct Areas {
     pub progress: ratatui::layout::Rect,
     pub player: ratatui::layout::Rect,
     /// Вкладки в шапке: (x начала, x конца, вкладка).
-    pub tabs: [(u16, u16); 5],
+    pub tabs: [(u16, u16); 6],
     pub main: ratatui::layout::Rect,
     pub header: ratatui::layout::Rect,
 }
@@ -421,6 +438,9 @@ impl App {
             liked: HashSet::new(),
             likes: Loadable::Loading,
             playlists: Loadable::Loading,
+            releases: None,
+            grid_cols: 1,
+            grid_hits: Vec::new(),
             search_input: String::new(),
             search_editing: false,
             search: None,
@@ -664,6 +684,13 @@ impl App {
         });
     }
 
+    fn load_releases(&mut self) {
+        self.releases = Some(Loadable::Loading);
+        self.spawn(|c, tx| async move {
+            let _ = tx.send(Msg::Releases(c.new_releases().await.map_err(err_str)));
+        });
+    }
+
     fn new_view_id(&mut self) -> u64 {
         self.view_seq += 1;
         self.view_seq
@@ -862,8 +889,12 @@ impl App {
             Tab::Playlists => View::Playlists,
             Tab::Search => View::Search,
             Tab::Queue => View::Queue,
+            Tab::Releases => View::Releases,
         };
         self.stack = vec![Page::new(v)];
+        if t == Tab::Releases && self.releases.is_none() {
+            self.load_releases();
+        }
         if t == Tab::Queue {
             self.page_mut().sel = self.queue.pos.unwrap_or(0);
         }
@@ -934,6 +965,7 @@ impl App {
                 _ => 0,
             },
             View::Queue => self.queue.items.len(),
+            View::Releases => self.releases.as_ref().and_then(Loadable::ready).map_or(0, Vec::len),
             View::Tracks { tracks, .. } => tracks.ready().map_or(0, Vec::len),
             View::Artist { brief, .. } => brief.ready().map_or(0, |b| artist_rows(b).len()),
         }
@@ -1031,6 +1063,11 @@ impl App {
                 }
             }
             View::Queue => self.play_index(orig),
+            View::Releases => {
+                if let Some(a) = self.releases.as_ref().and_then(Loadable::ready).and_then(|r| r.get(sel)).cloned() {
+                    self.open_album(a);
+                }
+            }
             View::Tracks { tracks, title, .. } => {
                 if let Some(ts) = tracks.ready() {
                     let (ts, title) = (ts.clone(), title.clone());
@@ -1572,6 +1609,12 @@ impl App {
                 }
                 Err(e) => self.likes = Loadable::Failed(e),
             },
+            Msg::Releases(r) => {
+                self.releases = Some(match r {
+                    Ok(a) => Loadable::Ready(a),
+                    Err(e) => Loadable::Failed(e),
+                });
+            }
             Msg::Playlists(r) => {
                 self.playlists = match r {
                     Ok(p) => Loadable::Ready(p),
@@ -2070,6 +2113,24 @@ impl App {
                 _ => {}
             }
         }
+        // Сетка релизов: клик выбирает карточку, повторный — открывает; колесо — по рядам.
+        if !stage && !self.lyrics_mode && matches!(self.page().view, View::Releases) && inside(self.areas.main) {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(i) = self.grid_hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1) {
+                        if self.page().sel == i {
+                            self.activate();
+                        } else {
+                            self.page_mut().sel = i;
+                        }
+                    }
+                    return;
+                }
+                MouseEventKind::ScrollUp => return self.move_sel(-(self.grid_cols as isize)),
+                MouseEventKind::ScrollDown => return self.move_sel(self.grid_cols as isize),
+                _ => {}
+            }
+        }
         self.mouse = (m.column, m.row);
         if m.kind == MouseEventKind::Moved {
             self.hover = inside(self.areas.list)
@@ -2251,6 +2312,19 @@ impl App {
                 _ => {}
             }
         }
+        // Сетка релизов: ↑↓ — по рядам, ←→ — по карточкам (перемотка — с Shift).
+        if matches!(self.page().view, View::Releases) && !self.lyrics_mode && !(self.stage_mode && self.now.is_some()) {
+            let cols = self.grid_cols.max(1) as isize;
+            match k.code {
+                KeyCode::Up | KeyCode::Char('k') => return self.move_sel(-cols),
+                KeyCode::Down | KeyCode::Char('j') => return self.move_sel(cols),
+                KeyCode::Left if !shift => return self.move_sel(-1),
+                KeyCode::Right if !shift => return self.move_sel(1),
+                KeyCode::PageUp => return self.move_sel(-cols * 2),
+                KeyCode::PageDown => return self.move_sel(cols * 2),
+                _ => {}
+            }
+        }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.show_help = true,
@@ -2259,6 +2333,7 @@ impl App {
             KeyCode::Char('3') => self.set_tab(Tab::Playlists),
             KeyCode::Char('4') => self.set_tab(Tab::Search),
             KeyCode::Char('5') => self.set_tab(Tab::Queue),
+            KeyCode::Char('6') => self.set_tab(Tab::Releases),
             KeyCode::Tab | KeyCode::BackTab => {
                 let i = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
                 let n = Tab::ALL.len();
@@ -2387,6 +2462,9 @@ impl App {
                 self.load_likes();
                 self.load_playlists();
                 self.load_wheel();
+                if self.releases.is_some() {
+                    self.load_releases();
+                }
                 self.toast("Обновляю библиотеку…".into());
             }
             _ => {}

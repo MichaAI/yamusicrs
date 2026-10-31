@@ -102,6 +102,11 @@ pub struct Album {
     pub og_image: Option<String>,
     pub track_count: Option<u32>,
     pub track_position: Option<TrackPosition>,
+    /// `single`, `compilation`, `podcast`…; у обычного альбома поля нет.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// `explicit` — с ненормативной лексикой.
+    pub content_warning: Option<String>,
     #[serde(default)]
     pub artists: Vec<Artist>,
     /// Только в `/albums/{id}/with-tracks`.
@@ -124,6 +129,28 @@ impl Album {
     pub fn artist_names(&self) -> String {
         join_artists(&self.artists)
     }
+
+    /// Тип релиза для подписи под обложкой.
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind.as_deref() {
+            Some("single") => "Сингл",
+            Some("compilation") => "Сборник",
+            Some("podcast") => "Подкаст",
+            Some("audiobook") => "Аудиокнига",
+            _ => "Альбом",
+        }
+    }
+
+    pub fn explicit(&self) -> bool {
+        self.content_warning.as_deref() == Some("explicit")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewReleases {
+    #[serde(default)]
+    pub new_releases: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

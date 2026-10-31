@@ -319,6 +319,24 @@ impl Client {
         self.get(&format!("/albums/{id}/with-tracks"), &[]).await
     }
 
+    /// «Новые релизы» с главной: id альбомов, затем сами альбомы одной пачкой.
+    pub async fn new_releases(&self) -> Result<Vec<Album>> {
+        let nr: NewReleases = self.get("/landing3/new-releases", &[]).await?;
+        let ids: Vec<String> = nr.new_releases.iter().map(u64::to_string).collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let raw: Vec<Value> = self.post_form("/albums", &[("album-ids", ids.join(","))]).await?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|v| {
+                serde_json::from_value::<Album>(v)
+                    .map_err(|e| tracing::warn!("пропускаю альбом: {e}"))
+                    .ok()
+            })
+            .collect())
+    }
+
     pub async fn artist(&self, id: &str) -> Result<ArtistBrief> {
         self.get(&format!("/artists/{id}/brief-info"), &[]).await
     }
