@@ -503,6 +503,12 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
                 ("Space", "пауза"),
                 ("?", "все клавиши"),
             ],
+            View::Search if app.search_shows_history() => &[
+                ("Enter", "искать снова"),
+                ("Del", "убрать из истории"),
+                ("/", "новый поиск"),
+                ("?", "все клавиши"),
+            ],
             View::Wave => &[
                 ("↑↓", "настройка"),
                 ("←→", "значение"),
@@ -1207,6 +1213,7 @@ fn draw_search(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             SearchItem::Playlist(p) => {
                 RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0)))
             }
+            SearchItem::Query(q) => RowKind::Other(format!("⟲ {q}"), String::new()),
         })
         .collect();
     let sel = app.page().sel;
@@ -2639,6 +2646,7 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("o / i", "альбом / исполнитель"),
         ("w", "запустить Мою волну"),
         ("/", "поиск"),
+        ("Del", "убрать запрос из истории поиска"),
         ("t", "текст на весь экран"),
         ("v / клик по обложке", "сцена: обложка крупно + текст"),
         ("r / s", "повтор трека / перемешивание"),

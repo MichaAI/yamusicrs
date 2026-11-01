@@ -130,6 +130,8 @@ pub struct State {
     pub quality: Option<Quality>,
     /// Что играло при выходе — восстанавливается на паузе при следующем запуске.
     pub resume: Option<Resume>,
+    /// Недавние поисковые запросы, свежие первыми.
+    pub search_history: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

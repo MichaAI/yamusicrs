@@ -127,7 +127,12 @@ pub enum SearchItem {
     Album(api::Album),
     Artist(api::Artist),
     Playlist(Playlist),
+    /// Запрос из истории поиска.
+    Query(String),
 }
+
+/// Сколько запросов помнит история поиска.
+const SEARCH_HISTORY_LEN: usize = 30;
 
 pub enum View {
     Wave,
@@ -775,11 +780,49 @@ impl App {
         });
     }
 
+    /// Список «Недавние запросы» вместо результатов (или пусто, если истории нет).
+    fn show_search_history(&mut self) {
+        let h = &self.state.search_history;
+        self.search = (!h.is_empty()).then(|| {
+            let mut v = vec![SearchItem::Header("Недавние запросы")];
+            v.extend(h.iter().cloned().map(SearchItem::Query));
+            Loadable::Ready(v)
+        });
+        if matches!(self.page().view, View::Search) {
+            self.page_mut().sel = 0;
+            self.skip_headers(1);
+        }
+    }
+
+    /// Сейчас в поиске показана история, а не результаты.
+    pub fn search_shows_history(&self) -> bool {
+        matches!(&self.search, Some(Loadable::Ready(v)) if matches!(v.get(1), Some(SearchItem::Query(_))))
+    }
+
+    fn forget_search(&mut self, q: &str) {
+        self.state.search_history.retain(|h| h != q);
+        self.state.save(&self.paths);
+        let sel = self.page().sel;
+        self.show_search_history();
+        let len = self.page_len();
+        if len > 0 {
+            self.page_mut().sel = sel.min(len - 1);
+            self.skip_headers(-1);
+            self.skip_headers(1);
+        }
+    }
+
     fn run_search(&mut self) {
         let q = self.search_input.trim().to_string();
         if q.is_empty() {
+            self.show_search_history();
             return;
         }
+        let h = &mut self.state.search_history;
+        h.retain(|x| x.to_lowercase() != q.to_lowercase());
+        h.insert(0, q.clone());
+        h.truncate(SEARCH_HISTORY_LEN);
+        self.state.save(&self.paths);
         self.search = Some(Loadable::Loading);
         self.page_mut().sel = 0;
         self.spawn(move |c, tx| async move {
@@ -899,6 +942,7 @@ impl App {
             self.page_mut().sel = self.queue.pos.unwrap_or(0);
         }
         if t == Tab::Search && self.search.is_none() {
+            self.show_search_history();
             self.search_editing = true;
         }
         self.view_fx();
@@ -1099,6 +1143,10 @@ impl App {
                     Some(SearchItem::Album(a)) => self.open_album(a),
                     Some(SearchItem::Artist(a)) => self.open_artist(a),
                     Some(SearchItem::Playlist(p)) => self.open_playlist(p),
+                    Some(SearchItem::Query(q)) => {
+                        self.search_input = q;
+                        self.run_search();
+                    }
                     _ => {}
                 }
             }
@@ -2291,9 +2339,13 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     self.search_input.pop();
+                    if self.search_input.is_empty() {
+                        self.show_search_history();
+                    }
                 }
                 KeyCode::Char(c) if k.modifiers.contains(KeyModifiers::CONTROL) && qwerty(c) == 'u' => {
-                    self.search_input.clear()
+                    self.search_input.clear();
+                    self.show_search_history();
                 }
                 KeyCode::Char(c) => self.search_input.push(c),
                 KeyCode::Down => self.search_editing = false,
@@ -2369,6 +2421,15 @@ impl App {
                     self.refilter();
                 } else {
                     self.pop();
+                }
+            }
+            KeyCode::Delete if matches!(self.page().view, View::Search) => {
+                let q = match self.search.as_ref().and_then(Loadable::ready).and_then(|v| v.get(self.page().sel)) {
+                    Some(SearchItem::Query(q)) => Some(q.clone()),
+                    _ => None,
+                };
+                if let Some(q) = q {
+                    self.forget_search(&q);
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
