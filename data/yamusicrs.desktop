@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=yamusicrs
+GenericName=Music Player
+GenericName[ru]=Музыкальный плеер
+Comment=Terminal client for Yandex Music: lossless, PipeWire, synced lyrics
+Comment[ru]=Терминальный клиент Яндекс Музыки: lossless, PipeWire, синхронные тексты
+Exec=yamusicrs
+Icon=yamusicrs
+Terminal=true
+Categories=Audio;AudioVideo;Player;ConsoleOnly;
+Keywords=music;yandex;player;lossless;lyrics;музыка;яндекс;плеер;
+StartupNotify=false

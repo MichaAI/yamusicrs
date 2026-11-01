@@ -1108,7 +1108,13 @@ impl App {
             }
             View::Queue => self.play_index(orig),
             View::Releases => {
-                if let Some(a) = self.releases.as_ref().and_then(Loadable::ready).and_then(|r| r.get(sel)).cloned() {
+                if let Some(a) = self
+                    .releases
+                    .as_ref()
+                    .and_then(Loadable::ready)
+                    .and_then(|r| r.get(sel))
+                    .cloned()
+                {
                     self.open_album(a);
                 }
             }
@@ -1923,7 +1929,10 @@ impl App {
                             self.report_end(now.token, now.pos, false);
                         }
                         self.player.stop();
-                        let _ = self.mpris.send(mpris::Update::Status { playing: false, pos: 0.0 });
+                        let _ = self.mpris.send(mpris::Update::Status {
+                            playing: false,
+                            pos: 0.0,
+                        });
                     }
                 }
             }
@@ -2431,7 +2440,12 @@ impl App {
                 }
             }
             KeyCode::Delete if matches!(self.page().view, View::Search) => {
-                let q = match self.search.as_ref().and_then(Loadable::ready).and_then(|v| v.get(self.page().sel)) {
+                let q = match self
+                    .search
+                    .as_ref()
+                    .and_then(Loadable::ready)
+                    .and_then(|v| v.get(self.page().sel))
+                {
                     Some(SearchItem::Query(q)) => Some(q.clone()),
                     _ => None,
                 };
@@ -2707,7 +2721,10 @@ async fn connect(tok: StoredToken, tx: UnboundedSender<Msg>) {
             }
             Err(VerifyError::Transient(e)) => {
                 tracing::warn!("подключение: {e}; повтор через {delay} с");
-                if tx.send(Msg::ConnectError(format!("{e} — повтор через {delay} с"))).is_err() {
+                if tx
+                    .send(Msg::ConnectError(format!("{e} — повтор через {delay} с")))
+                    .is_err()
+                {
                     return;
                 }
                 tokio::time::sleep(Duration::from_secs(delay)).await;

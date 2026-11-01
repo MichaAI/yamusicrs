@@ -159,7 +159,9 @@ async fn init_gpu() -> Option<Gpu> {
             ..Default::default()
         })
         .await
-        .inspect_err(|e| tracing::warn!("GPU: нет Vulkan-адаптера ({e}); нужен libvulkan.so.1 в rpath — собирай через flake"))
+        .inspect_err(|e| {
+            tracing::warn!("GPU: нет Vulkan-адаптера ({e}); нужен libvulkan.so.1 в rpath — собирай через flake")
+        })
         .ok()?;
     let info = adapter.get_info();
     // Программный рендер (lavapipe) ничем не лучше своего CPU-пути.

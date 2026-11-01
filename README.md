@@ -3,13 +3,52 @@
 TUI-клиент Яндекс Музыки на Rust: lossless через нативный PipeWire, Моя волна,
 синхронные тексты, обложки в kitty, локальная библиотека из нормальных файлов.
 
-## Запуск
+## Установка (Nix)
 
 ```sh
-nix develop -c cargo run --release
-# или
-nix build && ./result/bin/yamusicrs
+nix run                           # из клона репозитория
+nix profile install .             # в профиль: бинарь, ярлык в меню, иконка
 ```
+
+Флейк отдаёт `packages.default`, `apps.default`, `overlays.default`,
+`nixosModules.default` и `homeManagerModules.default`.
+
+home-manager:
+
+```nix
+{
+  inputs.yamusicrs.url = "path:/home/me/projects/yamusicrs"; # или git-URL
+  # …
+  imports = [ inputs.yamusicrs.homeManagerModules.default ];
+  programs.yamusicrs = {
+    enable = true;
+    desktopTerminal = "kitty";   # ярлык откроет kitty (обложки/блоб видны только в kitty-подобных)
+    settings = {                 # ~/.config/yamusicrs/config.toml; пусто — файл не трогаем
+      quality = "lossless";
+      library_max_gb = 50;
+    };
+  };
+}
+```
+
+NixOS: `imports = [ inputs.yamusicrs.nixosModules.default ]; programs.yamusicrs.enable = true;`
+— ставит пакет и разрешает PipeWire частоты 44.1–192 кГц (`hiResRates`, по умолчанию вкл.).
+
+Без флейков в системе: `overlays.default` добавляет `pkgs.yamusicrs`.
+
+## Разработка
+
+```sh
+nix develop                        # или direnv: .envrc уже есть
+cargo build --release              # инкрементально в ./target
+nix flake check                    # пакет, тесты, clippy, rustfmt
+nix fmt                            # nixfmt для .nix
+```
+
+Пакет собран на [crane](https://github.com/ipetkov/crane): зависимости — отдельная
+derivation, `nix build` после правки кода пересобирает только сам yamusicrs.
+В devshell и пакете путь к `libvulkan` вшит в rpath — иначе wgpu его не найдёт и
+блоб молча уйдёт на CPU (в логе будет написано почему).
 
 Флаги: `--logout` — забыть токен, `--token <TOKEN|URL>` — войти готовым токеном.
 
