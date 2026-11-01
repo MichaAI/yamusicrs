@@ -2072,6 +2072,58 @@ fn album_url(t: &Track) -> Option<String> {
 }
 
 /// Слово вокруг позиции `at` в строке: [начало, конец) в индексах символов.
+/// Примерный «вес» символа во времени пения: гласные тянутся, согласные коротки,
+/// пробелы и знаки — почти мгновенны (запятая/точка дают короткую паузу).
+fn sung_weight(c: char) -> f32 {
+    const VOWELS: &str = "aeiouyаеёиоуыэюяäöüéèêàáíóúåæø";
+    let l = c.to_lowercase().next().unwrap_or(c);
+    if VOWELS.contains(l) {
+        1.0
+    } else if c.is_alphanumeric() {
+        0.35
+    } else if c.is_whitespace() {
+        0.12
+    } else if matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '…' | '—') {
+        0.3
+    } else {
+        0.03
+    }
+}
+
+/// Веса символов реплики; гласные последнего слова тянутся дольше (обычно его допевают).
+fn sung_weights(chars: &[char]) -> Vec<f32> {
+    let mut w: Vec<f32> = chars.iter().map(|&c| sung_weight(c)).collect();
+    let last = chars.iter().rposition(|c| c.is_alphanumeric());
+    if let Some(e) = last {
+        let mut s = e;
+        while s > 0 && !chars[s - 1].is_whitespace() {
+            s -= 1;
+        }
+        for i in s..=e {
+            if w[i] >= 1.0 {
+                w[i] = 1.8;
+            }
+        }
+    }
+    w
+}
+
+/// Доля времени `frac` → позиция заливки в символах (дробная) по весам.
+fn karaoke_fill(weights: &[f32], frac: f32) -> f32 {
+    let total: f32 = weights.iter().sum();
+    if total <= 0.0 {
+        return frac * weights.len() as f32;
+    }
+    let mut left = frac.clamp(0.0, 1.0) * total;
+    for (i, &w) in weights.iter().enumerate() {
+        if left < w {
+            return i as f32 + left / w.max(1e-6);
+        }
+        left -= w;
+    }
+    weights.len() as f32
+}
+
 fn current_word(chars: &[char], at: usize) -> Option<(usize, usize)> {
     let at = at.min(chars.len().checked_sub(1)?);
     let mut a = at;
@@ -2178,24 +2230,30 @@ fn draw_lyrics(
             for (i, (l, rows)) in lines.iter().zip(&wrapped).enumerate() {
                 let is_cur = Some(i) == cur;
                 let d = (i as f32 - app.lyrics_scroll).abs();
-                // Караоке-заливка текущей реплики по времени до следующей.
+                let all: Vec<char> = rows.iter().flat_map(|r| r.chars()).collect();
+                let total = all.len().max(1);
+                let weights = if is_cur { sung_weights(&all) } else { Vec::new() };
+                // Караоке-заливка текущей реплики по времени до следующей; если дальше долгий
+                // проигрыш, реплика допевается раньше — не дольше ~0.9 с на «слог».
                 let frac = if is_cur {
-                    let end = lines.get(i + 1).map_or(l.at + 4.0, |n| n.at);
+                    let sung: f64 = weights.iter().map(|&w| w as f64).sum();
+                    let next = lines.get(i + 1).map_or(l.at + 4.0, |n| n.at);
+                    let end = next.min(l.at + (sung * 0.9).max(2.0));
                     ((pos + 0.25 - l.at) / (end - l.at).max(0.1)).clamp(0.0, 1.0) as f32
                 } else {
                     0.0
                 };
+                // Позиция заливки в символах: слова с длинными гласными получают больше времени.
+                let fill = if is_cur { karaoke_fill(&weights, frac) } else { 0.0 };
                 let base = if is_cur {
                     ctx.p.fg
                 } else {
                     let k = (d / if big { 6.0 } else { 4.0 }).min(1.0);
                     ctx.p.fg.lerp(ctx.p.dim.scale(0.6), 0.3 + 0.7 * k)
                 };
-                let all: Vec<char> = rows.iter().flat_map(|r| r.chars()).collect();
-                let total = all.len().max(1);
                 // Текущее слово (по времени внутри строки) — для подчёркивания.
                 let word = if is_cur && frac > 0.0 {
-                    current_word(&all, (frac * total as f32) as usize)
+                    current_word(&all, fill as usize)
                 } else {
                     None
                 };
@@ -2215,7 +2273,7 @@ fn draw_lyrics(
                     let x0 = area.x as usize + w.saturating_sub(tw) / 2;
                     let color_at = |gi: usize| {
                         let p = gi as f32 / total as f32;
-                        if is_cur && p < frac {
+                        if is_cur && (gi as f32) < fill {
                             shimmer(ctx.p.accent, ctx.p.accent2, p, ctx.t * 0.3)
                         } else {
                             base
