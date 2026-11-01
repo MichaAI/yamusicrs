@@ -2108,11 +2108,14 @@ fn sung_weights(chars: &[char]) -> Vec<f32> {
     w
 }
 
-/// Темп пения песни в секундах на единицу веса. У LRC есть только начала строк, а промежуток
-/// до следующей включает вдох/проигрыш, поэтому берём нижний квантиль отношений «промежуток / вес»:
-/// плотные строки, спетые встык, показывают настоящий темп.
-fn sung_rate(lines: &[lyrics::Line]) -> f64 {
-    let mut r: Vec<f64> = lines
+/// Темп пения вокруг реплики `at` в секундах на единицу веса. У LRC (и в оф. клиенте) есть только
+/// начала строк, а промежуток до следующей включает вдох/проигрыш, поэтому берём нижний квантиль
+/// отношений «промежуток / вес» по соседним строкам: спетые встык показывают настоящий темп.
+/// Окно локальное — медленный припев и быстрый куплет в одной песне поются в разном темпе.
+fn sung_rate(lines: &[lyrics::Line], at: usize) -> f64 {
+    let lo = at.saturating_sub(4);
+    let hi = (at + 6).min(lines.len());
+    let mut r: Vec<f64> = lines[lo..hi]
         .windows(2)
         .filter_map(|w| {
             let chars: Vec<char> = w[0].text.chars().collect();
@@ -2121,8 +2124,8 @@ fn sung_rate(lines: &[lyrics::Line]) -> f64 {
             (wt >= 2.0 && gap > 0.2).then(|| gap / wt as f64)
         })
         .collect();
-    if r.len() < 3 {
-        return 0.3;
+    if r.is_empty() {
+        return 0.2;
     }
     r.sort_by(f64::total_cmp);
     r[r.len() * 3 / 10].clamp(0.08, 0.6)
@@ -2247,7 +2250,6 @@ fn draw_lyrics(
             };
             let center = area.y as f32 + area.height as f32 * if big { 0.42 } else { 0.35 };
             let bottom = (area.y + area.height) as i32;
-            let rate = sung_rate(lines);
             for (i, (l, rows)) in lines.iter().zip(&wrapped).enumerate() {
                 let is_cur = Some(i) == cur;
                 let d = (i as f32 - app.lyrics_scroll).abs();
@@ -2259,6 +2261,7 @@ fn draw_lyrics(
                 let frac = if is_cur {
                     let sung: f64 = weights.iter().map(|&w| w as f64).sum();
                     let next = lines.get(i + 1).map_or(f64::INFINITY, |n| n.at);
+                    let rate = sung_rate(lines, i);
                     let end = next.min(l.at + (sung * rate * 1.2 + 0.3).max(0.8));
                     ((pos + 0.25 - l.at) / (end - l.at).max(0.1)).clamp(0.0, 1.0) as f32
                 } else {
