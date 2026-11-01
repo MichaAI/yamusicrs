@@ -2108,6 +2108,26 @@ fn sung_weights(chars: &[char]) -> Vec<f32> {
     w
 }
 
+/// Темп пения песни в секундах на единицу веса. У LRC есть только начала строк, а промежуток
+/// до следующей включает вдох/проигрыш, поэтому берём нижний квантиль отношений «промежуток / вес»:
+/// плотные строки, спетые встык, показывают настоящий темп.
+fn sung_rate(lines: &[lyrics::Line]) -> f64 {
+    let mut r: Vec<f64> = lines
+        .windows(2)
+        .filter_map(|w| {
+            let chars: Vec<char> = w[0].text.chars().collect();
+            let wt: f32 = sung_weights(&chars).iter().sum();
+            let gap = w[1].at - w[0].at;
+            (wt >= 2.0 && gap > 0.2).then(|| gap / wt as f64)
+        })
+        .collect();
+    if r.len() < 3 {
+        return 0.3;
+    }
+    r.sort_by(f64::total_cmp);
+    r[r.len() * 3 / 10].clamp(0.08, 0.6)
+}
+
 /// Доля времени `frac` → позиция заливки в символах (дробная) по весам.
 fn karaoke_fill(weights: &[f32], frac: f32) -> f32 {
     let total: f32 = weights.iter().sum();
@@ -2227,18 +2247,19 @@ fn draw_lyrics(
             };
             let center = area.y as f32 + area.height as f32 * if big { 0.42 } else { 0.35 };
             let bottom = (area.y + area.height) as i32;
+            let rate = sung_rate(lines);
             for (i, (l, rows)) in lines.iter().zip(&wrapped).enumerate() {
                 let is_cur = Some(i) == cur;
                 let d = (i as f32 - app.lyrics_scroll).abs();
                 let all: Vec<char> = rows.iter().flat_map(|r| r.chars()).collect();
                 let total = all.len().max(1);
                 let weights = if is_cur { sung_weights(&all) } else { Vec::new() };
-                // Караоке-заливка текущей реплики по времени до следующей; если дальше долгий
-                // проигрыш, реплика допевается раньше — не дольше ~0.9 с на «слог».
+                // Караоке-заливка текущей реплики: конец — по темпу песни (с запасом),
+                // но не позже начала следующей; паузу после реплики не заливаем.
                 let frac = if is_cur {
                     let sung: f64 = weights.iter().map(|&w| w as f64).sum();
-                    let next = lines.get(i + 1).map_or(l.at + 4.0, |n| n.at);
-                    let end = next.min(l.at + (sung * 0.9).max(2.0));
+                    let next = lines.get(i + 1).map_or(f64::INFINITY, |n| n.at);
+                    let end = next.min(l.at + (sung * rate * 1.2 + 0.3).max(0.8));
                     ((pos + 0.25 - l.at) / (end - l.at).max(0.1)).clamp(0.0, 1.0) as f32
                 } else {
                     0.0
