@@ -65,6 +65,8 @@ async fn event_loop(
     let mut last_title = String::new();
     let mut osc = term::OscFilter::default();
     let mut prev_overlays: Vec<term::Overlay> = Vec::new();
+    // Отпечаток клеток буфера под каждым оверлеем прошлого кадра.
+    let mut prev_sigs: Vec<u64> = Vec::new();
 
     loop {
         tokio::select! {
@@ -148,13 +150,32 @@ async fn event_loop(
         };
         // Весь кадр — одним синхронным обновлением (mode 2026), без промежуточных состояний.
         let mut out = b"\x1b[?2026h".to_vec();
+        let mut sigs = Vec::new();
+        let mut keep = Vec::new();
         terminal.draw(|f| {
             view::draw(f, app, &ctx);
+            // Неизменный оверлей над неизменными клетками не трогаем: перерисовка каждый
+            // кадр сбрасывает в kitty подсветку ссылки под мышью — обводка мигает.
+            sigs = app.overlays.iter().map(|o| overlay_sig(f.buffer_mut(), o)).collect();
+            keep = app
+                .overlays
+                .iter()
+                .zip(&sigs)
+                .map(|(o, sig)| {
+                    prev_overlays
+                        .iter()
+                        .zip(&prev_sigs)
+                        .any(|(p, ps)| p == o && ps == sig)
+                })
+                .collect();
             // Прошлый крупный текст стираем ДО текста кадра: если писать в нижнюю строку
             // крупного символа, kitty не стирает его, а сдвигает текст вправо за него.
             let width = f.area().width;
             for o in prev_overlays.iter().filter(|o| o.scale > 1) {
-                o.erase(&mut out, width);
+                let kept = app.overlays.iter().zip(&keep).any(|(n, k)| *k && n == o);
+                if !kept {
+                    o.erase(&mut out, width);
+                }
             }
             // Через тот же stdout, что и бэкенд ratatui: уходит в терминал раньше диффа кадра.
             let _ = std::io::Write::write_all(&mut std::io::stdout(), &std::mem::take(&mut out));
@@ -164,8 +185,9 @@ async fn event_loop(
         // Оверлеи (крупный текст, ссылки) и разовые OSC-команды — поверх готового кадра.
         let mut out = std::mem::take(&mut app.osc_out);
         prev_overlays = app.overlays.clone();
+        prev_sigs = sigs;
         let width = terminal.size()?.width;
-        for o in &app.overlays {
+        for (o, _) in app.overlays.iter().zip(&keep).filter(|(_, k)| !**k) {
             // Место под крупный текст чистим заново: там мог остаться чужой крупный символ.
             if o.scale > 1 {
                 o.erase(&mut out, width);
@@ -182,4 +204,21 @@ async fn event_loop(
             last_title = title;
         }
     }
+}
+
+/// Отпечаток клеток буфера, которые накрывает оверлей: если ratatui их перерисует,
+/// оверлей надо написать заново.
+fn overlay_sig(buf: &mut ratatui::buffer::Buffer, o: &term::Overlay) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let area = buf.area;
+    for y in o.y..(o.y + o.scale as u16).min(area.bottom()) {
+        for x in o.x..(o.x + o.cols() as u16).min(area.right()) {
+            if let Some(c) = buf.cell((x, y)) {
+                c.symbol().hash(&mut h);
+                (c.fg, c.bg, c.modifier).hash(&mut h);
+            }
+        }
+    }
+    h.finish()
 }
