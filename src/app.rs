@@ -33,6 +33,8 @@ pub enum Msg {
         result: Result<Vec<Track>, String>,
     },
     Authed(Result<(Client, AccountStatus, StoredToken), String>),
+    /// Сеть/сервер недоступны при подключении — покажем и повторим сами.
+    ConnectError(String),
     DeviceCode(Result<DeviceCode, String>),
     LoggedIn(Result<StoredToken, String>),
     Likes(Result<Vec<Track>, String>),
@@ -242,7 +244,8 @@ pub struct LoginState {
 }
 
 pub enum Screen {
-    Connecting,
+    /// Подключение; `Some` — последняя ошибка сети, идут повторы.
+    Connecting(Option<String>),
     Login(LoginState),
     Main,
 }
@@ -432,7 +435,7 @@ impl App {
             tx,
             paths,
             state,
-            screen: Screen::Connecting,
+            screen: Screen::Connecting(None),
             client: None,
             fetcher: None,
             library,
@@ -537,11 +540,8 @@ impl App {
             self.begin_login(None);
             return;
         };
-        self.screen = Screen::Connecting;
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(Msg::Authed(verify(tok).await));
-        });
+        self.screen = Screen::Connecting(None);
+        tokio::spawn(connect(tok, self.tx.clone()));
     }
 
     fn begin_login(&mut self, error: Option<String>) {
@@ -1617,7 +1617,15 @@ impl App {
                     Err(e) => tracing::warn!("не удалось восстановить сессию: {e}"),
                 }
             }
-            Msg::Authed(Err(e)) => self.begin_login(Some(e)),
+            Msg::Authed(Err(e)) => {
+                tracing::warn!("вход сброшен: {e}");
+                self.begin_login(Some(e));
+            }
+            Msg::ConnectError(e) => {
+                if let Screen::Connecting(err) = &mut self.screen {
+                    *err = Some(e);
+                }
+            }
             Msg::DeviceCode(r) => {
                 let poll = if let Screen::Login(l) = &mut self.screen {
                     match r {
@@ -1640,10 +1648,8 @@ impl App {
                 }
             }
             Msg::LoggedIn(Ok(tok)) => {
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send(Msg::Authed(verify(tok).await));
-                });
+                self.screen = Screen::Connecting(None);
+                tokio::spawn(connect(tok, self.tx.clone()));
             }
             Msg::LoggedIn(Err(e)) => {
                 if let Screen::Login(l) = &mut self.screen {
@@ -2283,11 +2289,12 @@ impl App {
             return;
         }
         match &mut self.screen {
-            Screen::Connecting => {
-                if k.code == KeyCode::Char('q') {
-                    self.quit = true;
-                }
-            }
+            Screen::Connecting(_) => match latin_key(k).code {
+                KeyCode::Char('q') => self.quit = true,
+                // Не ждать сеть, а войти заново (старый токен останется, пока не войдёшь).
+                KeyCode::Char('l') => self.begin_login(None),
+                _ => {}
+            },
             Screen::Login(l) => match k.code {
                 KeyCode::Esc => self.quit = true,
                 KeyCode::Enter => self.submit_pasted_token(),
@@ -2581,7 +2588,7 @@ impl App {
             || self.theme.animating()
             || !self.toasts.is_empty()
             || self.loading_track.is_some()
-            || matches!(self.screen, Screen::Connecting | Screen::Login(_))
+            || matches!(self.screen, Screen::Connecting(_) | Screen::Login(_))
             || matches!(self.page().view, View::Wave)
             || self.stage_mode
             || self.lyrics_moving
@@ -2644,8 +2651,15 @@ pub fn quality_label(q: Quality) -> &'static str {
     }
 }
 
+enum VerifyError {
+    /// Токен отвергнут (401) — нужен вход.
+    Invalid(String),
+    /// Сеть, таймаут, 5xx — токен ни при чём, стоит повторить.
+    Transient(String),
+}
+
 /// Проверка токена (с обновлением, если скоро истекает) и загрузка аккаунта.
-async fn verify(mut tok: StoredToken) -> Result<(Client, AccountStatus, StoredToken), String> {
+async fn verify(mut tok: StoredToken) -> Result<(Client, AccountStatus, StoredToken), VerifyError> {
     if tok.needs_refresh()
         && let Some(r) = tok.refresh_token.clone()
     {
@@ -2657,8 +2671,49 @@ async fn verify(mut tok: StoredToken) -> Result<(Client, AccountStatus, StoredTo
     let mut c = Client::new(tok.access_token.clone());
     match c.account_status().await {
         Ok(s) => Ok((c, s, tok)),
-        Err(ApiError::Unauthorized) => Err("Токен недействителен, нужен вход".into()),
-        Err(e) => Err(format!("Не удалось подключиться: {e}")),
+        Err(ApiError::Unauthorized) => {
+            // 401 — последний шанс: обновить токен по refresh_token и проверить ещё раз.
+            if let Some(r) = tok.refresh_token.clone() {
+                match auth::refresh(&api::http_client(), &r).await {
+                    Ok(t) => {
+                        let mut c = Client::new(t.access_token.clone());
+                        match c.account_status().await {
+                            Ok(s) => return Ok((c, s, t)),
+                            Err(ApiError::Unauthorized) => {}
+                            Err(e) => return Err(VerifyError::Transient(e.to_string())),
+                        }
+                    }
+                    Err(e) => tracing::warn!("refresh после 401: {e}"),
+                }
+            }
+            Err(VerifyError::Invalid("Токен недействителен, нужен вход".into()))
+        }
+        Err(e) => Err(VerifyError::Transient(e.to_string())),
+    }
+}
+
+/// Подключение с повторами: из-за сети/сервера на экран входа не выкидываем.
+async fn connect(tok: StoredToken, tx: UnboundedSender<Msg>) {
+    let mut delay = 2u64;
+    loop {
+        match verify(tok.clone()).await {
+            Ok(r) => {
+                let _ = tx.send(Msg::Authed(Ok(r)));
+                return;
+            }
+            Err(VerifyError::Invalid(e)) => {
+                let _ = tx.send(Msg::Authed(Err(e)));
+                return;
+            }
+            Err(VerifyError::Transient(e)) => {
+                tracing::warn!("подключение: {e}; повтор через {delay} с");
+                if tx.send(Msg::ConnectError(format!("{e} — повтор через {delay} с"))).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                delay = (delay * 2).min(60);
+            }
+        }
     }
 }
 

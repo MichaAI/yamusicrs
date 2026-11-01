@@ -56,7 +56,7 @@ pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         app.images.hide_blob();
     }
     match &app.screen {
-        Screen::Connecting => connecting(f, area, ctx),
+        Screen::Connecting(err) => connecting(f, area, err.as_deref(), ctx),
         Screen::Login(l) => login(f, area, l, ctx),
         Screen::Main => main_screen(f, app, ctx),
     }
@@ -202,13 +202,21 @@ fn card<'a>(ctx: &Ctx, title: impl Into<Line<'a>>) -> Block<'a> {
 
 // ── экраны входа ─────────────────────────────────────────────────────────────
 
-fn connecting(f: &mut Frame, area: Rect, ctx: &Ctx) {
-    let r = centered(area, 44, 3);
-    let line = Line::from(vec![
+fn connecting(f: &mut Frame, area: Rect, err: Option<&str>, ctx: &Ctx) {
+    let mut lines = vec![Line::from(vec![
         Span::styled(format!("{} ", ctx.spinner()), ctx.accent()),
         Span::styled("Подключаюсь к Яндекс Музыке…", ctx.fg()),
-    ]);
-    f.render_widget(Paragraph::new(line).alignment(Alignment::Center), r);
+    ])];
+    if let Some(e) = err {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(e.to_string(), ctx.dim()));
+        lines.push(Line::styled("l — войти заново · q — выход", ctx.dim()));
+    }
+    let r = centered(area, area.width.min(90), lines.len() as u16);
+    f.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }),
+        r,
+    );
 }
 
 fn qr_lines(url: &str) -> Vec<String> {
