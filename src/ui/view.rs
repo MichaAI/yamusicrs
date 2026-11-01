@@ -2260,9 +2260,16 @@ fn draw_lyrics(
                 // но не позже начала следующей; паузу после реплики не заливаем.
                 let frac = if is_cur {
                     let sung: f64 = weights.iter().map(|&w| w as f64).sum();
-                    let next = lines.get(i + 1).map_or(f64::INFINITY, |n| n.at);
-                    let rate = sung_rate(lines, i);
-                    let end = next.min(l.at + (sung * rate * 1.2 + 0.3).max(0.8));
+                    let next = lines.get(i + 1);
+                    let end = match next {
+                        // Пустая метка в LRC — явный конец вокала (так её читает и оф. клиент).
+                        Some(n) if n.text.trim().is_empty() => n.at,
+                        _ => {
+                            let rate = sung_rate(lines, i);
+                            let next = next.map_or(f64::INFINITY, |n| n.at);
+                            next.min(l.at + (sung * rate * 1.2 + 0.3).max(0.8))
+                        }
+                    };
                     ((pos + 0.25 - l.at) / (end - l.at).max(0.1)).clamp(0.0, 1.0) as f32
                 } else {
                     0.0
