@@ -42,8 +42,9 @@
             rust-analyzer
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-          # Как в пакете: без rpath wgpu не найдёт libvulkan.so.1 и блоб уйдёт на CPU.
-          RUSTFLAGS = "-C link-arg=-Wl,-rpath,${yamusicrs.gpuLibs}";
+          # Как в пакете: линковка mold'ом, rpath на Vulkan (без него wgpu не найдёт
+          # libvulkan.so.1 и блоб уйдёт на CPU).
+          RUSTFLAGS = "${yamusicrs.commonArgs.RUSTFLAGS} -C link-arg=-Wl,-rpath,${yamusicrs.gpuLibs}";
         };
 
         checks = {

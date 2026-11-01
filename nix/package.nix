@@ -3,6 +3,7 @@
   craneLib,
   pkg-config,
   patchelf,
+  mold,
   rustPlatform,
   pipewire,
   vulkan-loader,
@@ -32,8 +33,13 @@ let
   commonArgs = {
     inherit src;
     strictDeps = true;
+    # Профиль с LTO из Cargo.toml; `release` оставлен быстрым для разработки.
+    CARGO_PROFILE = "dist";
+    # mold — линковка в разы быстрее обычного ld.
+    RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
     nativeBuildInputs = [
       pkg-config
+      mold
       rustPlatform.bindgenHook
     ];
     buildInputs = [ pipewire ];
