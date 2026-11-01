@@ -214,7 +214,9 @@ fn connecting(f: &mut Frame, area: Rect, err: Option<&str>, ctx: &Ctx) {
     }
     let r = centered(area, area.width.min(90), lines.len() as u16);
     f.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }),
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
         r,
     );
 }
@@ -1078,7 +1080,9 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         None => return,
     };
     if albums.is_empty() {
-        let p = Paragraph::new("Новых релизов нет").style(ctx.dim()).alignment(Alignment::Center);
+        let p = Paragraph::new("Новых релизов нет")
+            .style(ctx.dim())
+            .alignment(Alignment::Center);
         return f.render_widget(p, centered(area, area.width, 1));
     }
     // Поля по 1 колонке, между карточками 2; карточка не уже 16 и не шире 30 колонок.
@@ -1088,7 +1092,9 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         width: area.width.saturating_sub(3),
         ..area
     };
-    let cols = ((area.width + GAP) / (22 + GAP)).max(1).min(((area.width + GAP) / (16 + GAP)).max(1));
+    let cols = ((area.width + GAP) / (22 + GAP))
+        .max(1)
+        .min(((area.width + GAP) / (16 + GAP)).max(1));
     let cw = ((area.width + GAP) / cols).saturating_sub(GAP).min(30);
     // floor — как в fit_square, иначе под квадратом остаётся пустая строка.
     let cover_h = ((cw as f32 / ctx.cell_aspect).floor() as u16).max(1);
@@ -1115,7 +1121,10 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 height: card_h - 1,
             };
             app.grid_hits.push((card, i));
-            let cover = Rect { height: cover_h, ..card };
+            let cover = Rect {
+                height: cover_h,
+                ..card
+            };
             match a.cover_uri() {
                 Some(uri) => {
                     let key = crate::app::thumb_key(uri);
@@ -1366,7 +1375,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate
     app.wave_phase += ctx.dt * app.blob_speed;
     // Блоб — живой фон всей правой части.
     let blob_rect = stage;
-    let colors = draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 });
+    let colors = draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 }, None);
 
     let title = if wave_on {
         app.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
@@ -1540,7 +1549,16 @@ fn contrast_over_blob(f: &mut Frame, images: &super::kitty::Images, blob: Rect, 
 }
 
 /// Блоб/фон: вектором (GPU или CPU) в kitty, иначе полублоками.
-fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, target: Cols, energy: f32) -> Cols {
+/// `hole` — область обложки поверх ореола: там кадр блоба прозрачный.
+fn draw_aura(
+    f: &mut Frame,
+    app: &mut App,
+    ctx: &Ctx,
+    rect: Rect,
+    target: Cols,
+    energy: f32,
+    hole: Option<Rect>,
+) -> Cols {
     // Цвета перетекают к новым плавно (смена пресета, наведение, новый трек).
     let k = (ctx.dt * 2.5).min(1.0);
     for (c, t) in app.blob_colors.iter_mut().zip(target) {
@@ -1568,7 +1586,25 @@ fn draw_aura(f: &mut Frame, app: &mut App, ctx: &Ctx, rect: Rect, target: Cols, 
         return colors;
     }
     let (images, gfx) = (&mut app.images, &mut app.gfx);
-    if !images.blob(rect, pw, ph, || gfx.blob(pw, ph, &params)) {
+    // Дыра в пикселях кадра; на 1 пиксель меньше обложки, чтобы по краю не было щели.
+    let hole = hole.map(|c| {
+        let sx = pw as f32 / rect.width.max(1) as f32;
+        let sy = ph as f32 / rect.height.max(1) as f32;
+        (
+            (c.x.saturating_sub(rect.x)) as f32 * sx + 1.0,
+            (c.y.saturating_sub(rect.y)) as f32 * sy + 1.0,
+            (c.right().saturating_sub(rect.x)) as f32 * sx - 1.0,
+            (c.bottom().saturating_sub(rect.y)) as f32 * sy - 1.0,
+        )
+    });
+    let frame = || {
+        let mut px = gfx.blob(pw, ph, &params);
+        if let Some(h) = hole {
+            crate::ui::kitty::cut_hole(&mut px, pw, ph, h);
+        }
+        px
+    };
+    if !images.blob(rect, pw, ph, frame) {
         blob_halfblocks(f, rect, colors, app.wave_phase);
     }
     colors
@@ -1651,7 +1687,12 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     // Скорость меняется плавно — без рывка при паузе/запуске.
     app.blob_speed += (speed - app.blob_speed) * (ctx.dt * 2.0).min(1.0);
     app.wave_phase += ctx.dt * app.blob_speed;
-    draw_aura(f, app, ctx, glow, colors, if app.player.paused() { 0.0 } else { 1.0 });
+    // Дыра — только когда обложка уже есть (иначе под заглушкой пусть светит).
+    let hole = track
+        .cover_uri()
+        .filter(|k| app.images.contains(k))
+        .map(|_| crate::ui::kitty::fit_square(cover, ctx.cell_aspect));
+    draw_aura(f, app, ctx, glow, colors, if app.player.paused() { 0.0 } else { 1.0 }, hole);
     match track.cover_uri() {
         Some(k) if app.images.contains(k) => {
             app.images.render(k, cover, f.buffer_mut(), ctx.cell_aspect);

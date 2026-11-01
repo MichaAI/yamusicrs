@@ -183,7 +183,8 @@ impl Images {
                     }
                     let id = id.expect("id");
                     transmit(&mut self.out, id, &img.png);
-                    let _ = write!(self.out, "\x1b_Ga=p,U=1,i={id},c={},r={},C=1,q=2\x1b\\", size.0, size.1);
+                    // z=1 — явно выше блоба (z=-1).
+                    let _ = write!(self.out, "\x1b_Ga=p,U=1,i={id},c={},r={},z=1,C=1,q=2\x1b\\", size.0, size.1);
                     img.variants.insert(size, id);
                     id
                 }
@@ -439,6 +440,32 @@ pub fn cell_aspect() -> f32 {
 
 /// Степень супереллипса углов: 2 — обычная дуга, 4–5 — сквиркл.
 const SQUIRCLE_N: f32 = 5.0;
+
+/// Вырезает в RGBA-кадре `w`×`h` прозрачную «дыру» формы обложки: прямоугольник
+/// (x0, y0)–(x1, y1) в пикселях кадра со скруглением сквирклом `radius_frac`.
+/// Под обложкой блобу делать нечего, а если kitty вдруг поставит его выше — обложку он не закроет.
+pub fn cut_hole(px: &mut [u8], w: u32, h: u32, (x0, y0, x1, y1): (f32, f32, f32, f32)) {
+    let (hw, hh) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+    if hw <= 0.0 || hh <= 0.0 {
+        return;
+    }
+    let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let r = CORNER_RADIUS * 2.0 * hw.min(hh);
+    let ys = (y0.floor().max(0.0) as u32)..(y1.ceil().min(h as f32) as u32);
+    for y in ys {
+        for x in (x0.floor().max(0.0) as u32)..(x1.ceil().min(w as f32) as u32) {
+            // Расстояние от центра пикселя до внутреннего прямоугольника скругления.
+            let dx = ((x as f32 + 0.5 - mx).abs() - (hw - r)).max(0.0);
+            let dy = ((y as f32 + 0.5 - my).abs() - (hh - r)).max(0.0);
+            let d = (dx.powf(SQUIRCLE_N) + dy.powf(SQUIRCLE_N)).powf(1.0 / SQUIRCLE_N);
+            let inside = (r - d + 0.5).clamp(0.0, 1.0);
+            if inside > 0.0 {
+                let a = &mut px[((y * w + x) * 4 + 3) as usize];
+                *a = (*a as f32 * (1.0 - inside)).round() as u8;
+            }
+        }
+    }
+}
 
 /// Скругляет углы сквирклом (`|x|ⁿ + |y|ⁿ = rⁿ`) через альфу со сглаживанием по краю.
 fn round_corners(img: &mut image::RgbaImage, radius_frac: f32) {
