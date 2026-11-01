@@ -44,7 +44,8 @@ impl Gfx {
         let gpu = if want_gpu { pollster::block_on(init_gpu()) } else { None };
         match &gpu {
             Some(_) => tracing::info!("рендер блоба: GPU ({} мс)", t.elapsed().as_millis()),
-            None => tracing::info!("рендер блоба: CPU"),
+            None if want_gpu => tracing::warn!("рендер блоба: CPU — GPU не поднялся (см. выше)"),
+            None => tracing::info!("рендер блоба: CPU (GPU выключен или терминал без kitty-графики)"),
         }
         Self { gpu }
     }
@@ -158,12 +159,19 @@ async fn init_gpu() -> Option<Gpu> {
             ..Default::default()
         })
         .await
+        .inspect_err(|e| tracing::warn!("GPU: нет Vulkan-адаптера ({e}); нужен libvulkan.so.1 в rpath — собирай через flake"))
         .ok()?;
+    let info = adapter.get_info();
     // Программный рендер (lavapipe) ничем не лучше своего CPU-пути.
-    if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+    if info.device_type == wgpu::DeviceType::Cpu {
+        tracing::warn!("GPU: доступен только программный {}", info.name);
         return None;
     }
-    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await.ok()?;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default())
+        .await
+        .inspect_err(|e| tracing::warn!("GPU: {}: {e}", info.name))
+        .ok()?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("blob"),
         source: wgpu::ShaderSource::Wgsl(include_str!("blob.wgsl").into()),
