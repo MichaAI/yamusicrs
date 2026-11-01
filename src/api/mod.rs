@@ -337,8 +337,22 @@ impl Client {
             .collect())
     }
 
+    /// Карточка исполнителя; дискография целиком догружается вторым запросом
+    /// (в `brief-info` только десяток альбомов). Её ошибка карточку не роняет.
     pub async fn artist(&self, id: &str) -> Result<ArtistBrief> {
-        self.get(&format!("/artists/{id}/brief-info"), &[]).await
+        let (bp, ap) = (format!("/artists/{id}/brief-info"), format!("/artists/{id}/direct-albums"));
+        let q = [
+            ("page", "0".to_string()),
+            ("page-size", "200".into()),
+            ("sort-by", "year".into()),
+        ];
+        let (brief, albums) = tokio::join!(self.get::<ArtistBrief>(&bp, &[]), self.get::<ArtistAlbums>(&ap, &q));
+        let mut brief = brief?;
+        match albums {
+            Ok(a) => brief.discography = a.albums,
+            Err(e) => tracing::warn!("дискография {id}: {e}"),
+        }
+        Ok(brief)
     }
 
     pub async fn search(&self, text: &str) -> Result<SearchResult> {

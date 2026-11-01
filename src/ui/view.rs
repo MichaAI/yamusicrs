@@ -406,6 +406,7 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         draw_footer(f, footer, app, ctx);
         apply_scramble(f, app, area, body);
         draw_toasts(f, area, app, ctx);
+        draw_popup(f, area, app, ctx);
         return;
     }
     if app.lyrics_mode {
@@ -425,10 +426,133 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     draw_footer(f, footer, app, ctx);
     apply_scramble(f, app, area, main);
     draw_toasts(f, area, app, ctx);
+    draw_popup(f, area, app, ctx);
     if app.show_help {
         app.occluders.push(area);
         draw_help(f, area, ctx);
     }
+}
+
+/// Всплывающее окно: метаданные трека или выбор исполнителя.
+fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
+    app.popup_hits.clear();
+    let Some(popup) = &app.popup else {
+        app.popup_area = Rect::default();
+        return;
+    };
+    let label = |s: &str| Span::styled(format!("{s:>14}  "), ctx.dim());
+    let mut lines: Vec<Line> = vec![Line::raw("")];
+    // Строки, по которым можно кликнуть: (номер строки в `lines`, действие).
+    let mut clickable: Vec<(usize, usize)> = Vec::new();
+    let (title, width) = match popup {
+        crate::app::Popup::Artists { list, sel } => {
+            for (i, a) in list.iter().enumerate() {
+                clickable.push((lines.len(), i));
+                let on = i == *sel;
+                lines.push(Line::from(vec![
+                    Span::styled(if on { "  ▶ " } else { "    " }, ctx.accent()),
+                    Span::styled(
+                        a.name.clone(),
+                        if on { ctx.accent().add_modifier(Modifier::BOLD) } else { ctx.fg() },
+                    ),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  Enter — открыть · Esc — закрыть", ctx.dim()));
+            let w = list.iter().map(|a| a.name.width()).max().unwrap_or(0).max(32) as u16 + 8;
+            (" Исполнители ", w)
+        }
+        crate::app::Popup::TrackInfo { track, file } => {
+            let t = track;
+            let row = |lines: &mut Vec<Line<'static>>, k: &str, v: String, hl: bool| {
+                lines.push(Line::from(vec![
+                    label(k),
+                    Span::styled(v, if hl { ctx.accent() } else { ctx.fg() }),
+                ]));
+            };
+            row(&mut lines, "Название", t.full_title(), false);
+            clickable.push((lines.len(), 0));
+            row(&mut lines, "Исполнители", t.artist_names(), true);
+            if let Some(a) = t.album() {
+                clickable.push((lines.len(), 1));
+                let kind = match a.kind.as_deref() {
+                    Some("single") => " · сингл",
+                    Some("compilation") => " · сборник",
+                    _ => "",
+                };
+                row(&mut lines, "Альбом", format!("{}{kind}", a.full_title()), true);
+                if let Some(d) = a.release_date.as_deref().map(|d| d.get(..10).unwrap_or(d).to_string()) {
+                    row(&mut lines, "Релиз", d, false);
+                } else if let Some(y) = a.year {
+                    row(&mut lines, "Год", y.to_string(), false);
+                }
+                if let Some(p) = a.track_position.filter(|p| p.index > 0) {
+                    let of = a.track_count.map(|n| format!(" из {n}")).unwrap_or_default();
+                    let disc = if p.volume > 1 { format!(", диск {}", p.volume) } else { String::new() };
+                    row(&mut lines, "Трек", format!("{}{of}{disc}", p.index), false);
+                }
+                if let Some(g) = &a.genre {
+                    row(&mut lines, "Жанр", g.clone(), false);
+                }
+            }
+            row(&mut lines, "Длительность", fmt_time(t.duration_secs()), false);
+            if t.explicit() {
+                row(&mut lines, "Содержание", "🅴 explicit".into(), false);
+            }
+            if let Some(n) = app.now.as_ref().filter(|n| n.track.id == t.id) {
+                let bits = n.info.bits.map(|b| format!(" · {b} бит")).unwrap_or_default();
+                row(
+                    &mut lines,
+                    "Поток",
+                    format!("{} · {:.1} кГц{bits}", n.info.codec, n.info.rate as f32 / 1000.0),
+                    false,
+                );
+            }
+            if let Some(r) = &t.r128 {
+                row(&mut lines, "Громкость", format!("{:.1} LUFS · пик {:.1} dBTP", r.i, r.tp), false);
+            }
+            let lyr = if t.has_sync_lyrics() {
+                "синхронный"
+            } else if t.has_text_lyrics() {
+                "обычный"
+            } else {
+                "нет"
+            };
+            row(&mut lines, "Текст", lyr.into(), false);
+            if let Some((p, e)) = file {
+                let mb = e.size as f64 / 1024.0 / 1024.0;
+                row(&mut lines, "Файл", format!("{} · {mb:.1} МБ", e.codec), false);
+                row(&mut lines, "", p.display().to_string(), false);
+            } else {
+                row(&mut lines, "Файл", "ещё не сохранён".into(), false);
+            }
+            row(&mut lines, "ID", t.full_id(), false);
+            clickable.push((lines.len(), 2));
+            row(&mut lines, "Ссылка", App::track_url(t), true);
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  i — исполнитель · o — альбом · y — копировать ссылку · Esc — закрыть",
+                ctx.dim(),
+            ));
+            let w = lines.iter().map(Line::width).max().unwrap_or(40) as u16 + 4;
+            (" О треке ", w)
+        }
+    };
+    let h = lines.len() as u16 + 3;
+    let r = centered(area, width.min(area.width.saturating_sub(4)), h.min(area.height));
+    app.popup_area = r;
+    app.occluders.push(r);
+    f.render_widget(Clear, r);
+    let b = card(ctx, Line::from(gradient_line(title, ctx.p.accent, ctx.p.accent2, ctx.t, true)));
+    let inner = b.inner(r);
+    f.render_widget(b, r);
+    for (li, act) in clickable {
+        let y = inner.y + li as u16;
+        if y < inner.bottom() {
+            app.popup_hits.push((Rect { y, height: 1, ..inner }, act));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
@@ -635,22 +759,42 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 track_list(f, list, app, &t, ctx);
             }
         }
-        View::Artist { brief, .. } => {
+        View::Artist { brief, name, .. } => {
             let Loadable::Ready(b) = brief else {
                 return status(f, inner, brief, ctx, "Загружаю исполнителя");
             };
-            let rows: Vec<RowKind> = artist_rows(b)
+            let b = b.clone();
+            let name = name.clone();
+            let me = b.artist.as_ref().map(|a| a.id.clone()).unwrap_or_default();
+            let rows: Vec<RowKind> = artist_rows(&b)
                 .into_iter()
                 .map(|r| match r {
                     ArtistRow::Header(h) => RowKind::Header(h.to_string()),
+                    ArtistRow::Wave(_) => RowKind::Other("≋ Моя волна по исполнителю".into(), String::new()),
                     ArtistRow::Track(t) => RowKind::Track(t.clone()),
-                    ArtistRow::Album(a) => RowKind::Other(
-                        format!("◉ {}", a.full_title()),
-                        a.year.map(|y| y.to_string()).unwrap_or_default(),
-                    ),
+                    ArtistRow::Album(a) => {
+                        // У чужих релизов (сборники, фиты) показываем, чьи они.
+                        let whose = if a.artists.iter().any(|x| x.id == me) {
+                            String::new()
+                        } else {
+                            format!(" — {}", a.artist_names())
+                        };
+                        let kind = match a.kind.as_deref() {
+                            Some("single") => "сингл",
+                            Some("compilation") => "сборник",
+                            _ => "альбом",
+                        };
+                        let year = a.year.map(|y| format!("{y} · ")).unwrap_or_default();
+                        let n = a.track_count.filter(|n| *n > 1).map(|n| format!(" · {n} тр.")).unwrap_or_default();
+                        RowKind::Other(format!("◉ {}{whose}", a.full_title()), format!("{year}{kind}{n}"))
+                    }
+                    ArtistRow::Artist(a) => RowKind::Other(format!("☺ {}", a.name), String::new()),
                 })
                 .collect();
-            mixed_list(f, inner, app, &rows, ctx);
+            let head_h = 8.min(inner.height / 3);
+            let [head, list] = Layout::vertical([Constraint::Length(head_h), Constraint::Min(1)]).areas(inner);
+            draw_artist_head(f, head, app, ctx, &name, &b);
+            mixed_list(f, list, app, &rows, ctx);
         }
     }
 }
@@ -740,6 +884,111 @@ fn draw_collection_head(
         ctx.dim(),
     ));
     f.render_widget(Paragraph::new(lines), text);
+}
+
+/// Шапка страницы исполнителя: фото, имя, жанры и страны, слушатели и лайки, описание.
+fn draw_artist_head(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx, name: &str, b: &crate::api::ArtistBrief) {
+    if area.height < 3 {
+        return;
+    }
+    let info = b.artist.as_ref();
+    let photo = info.and_then(|a| a.cover_uri());
+    let cover_w = ((area.height as f32) * ctx.cell_aspect) as u16;
+    let [c, text] = Layout::horizontal([Constraint::Length(cover_w + 2), Constraint::Min(10)]).areas(area);
+    let cover_area = Rect {
+        x: c.x + 1,
+        width: cover_w,
+        ..c
+    };
+    match photo {
+        Some(key) if app.images.contains(key) => app.images.render(key, cover_area, f.buffer_mut(), ctx.cell_aspect),
+        _ => cover_placeholder(f, cover_area, ctx, photo.is_some()),
+    }
+    let mut lines = vec![Line::raw("")];
+    let mut t = vec![Span::raw(" ")];
+    t.extend(gradient_line(name, ctx.p.accent, ctx.p.accent2, ctx.t * 0.5, true));
+    lines.push(Line::from(t));
+    if let Some(a) = info {
+        let mut tags: Vec<String> = a.genres.iter().map(|g| genre_name(g)).collect();
+        tags.extend(a.countries.iter().cloned());
+        if !tags.is_empty() {
+            lines.push(Line::styled(format!(" {}", tags.join(" · ")), ctx.fg()));
+        }
+    }
+    let mut stats = Vec::new();
+    if let Some(n) = b.stats.and_then(|s| s.last_month_listeners) {
+        stats.push(format!("{} слушателей за месяц", fmt_count(n)));
+    }
+    if let Some(n) = info.and_then(|a| a.likes_count) {
+        stats.push(format!("♥ {}", fmt_count(n)));
+    }
+    if let Some(c) = info.and_then(|a| a.counts) {
+        stats.push(format!("{} треков · {} релизов", c.tracks, c.direct_albums));
+    }
+    if !stats.is_empty() {
+        lines.push(Line::styled(format!(" {}", stats.join(" · ")), ctx.dim()));
+    }
+    if let Some(d) = info.and_then(|a| a.description.as_ref()).filter(|d| !d.text.is_empty()) {
+        let room = (area.height as usize).saturating_sub(lines.len()).min(3);
+        let w = (text.width as usize).saturating_sub(2).max(10);
+        let wrapped = textwrap::wrap(&d.text, w);
+        let n = wrapped.len();
+        for (i, l) in wrapped.into_iter().take(room).enumerate() {
+            let cut = i + 1 == room && n > room;
+            lines.push(Line::styled(
+                format!(" {}{}", l, if cut { "…" } else { "" }),
+                ctx.dim().add_modifier(Modifier::ITALIC),
+            ));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), text);
+}
+
+/// 6555818 → «6,6 млн».
+fn fmt_count(n: u64) -> String {
+    let f = |v: f64, s: &str| format!("{}{s}", format!("{v:.1}").trim_end_matches(".0").replace('.', ","));
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => f(n as f64 / 1e3, " тыс."),
+        _ => f(n as f64 / 1e6, " млн"),
+    }
+}
+
+/// Коды жанров Яндекса → по-человечески (самые частые; остальное как есть).
+fn genre_name(g: &str) -> String {
+    match g {
+        "pop" => "поп",
+        "ruspop" => "русская поп-музыка",
+        "rusrap" => "русский рэп",
+        "foreignrap" | "rap" => "рэп",
+        "rock" => "рок",
+        "rusrock" => "русский рок",
+        "alternative" => "альтернатива",
+        "indie" => "инди",
+        "electronics" => "электроника",
+        "dance" => "танцевальная",
+        "house" => "хаус",
+        "techno" => "техно",
+        "metal" => "метал",
+        "rnb" => "R&B",
+        "hiphop" => "хип-хоп",
+        "jazz" => "джаз",
+        "classical" | "classicalmusic" => "классика",
+        "soundtrack" => "саундтрек",
+        "folk" => "фолк",
+        "phonkgenre" | "phonk" => "фонк",
+        "estrada" => "эстрада",
+        "shanson" => "шансон",
+        "lounge" => "лаунж",
+        "ambient" => "эмбиент",
+        "dnb" => "драм-н-бейс",
+        "dubstep" => "дабстеп",
+        "kpop" => "K-pop",
+        "anime" => "аниме",
+        "videogame" => "музыка из игр",
+        other => other,
+    }
+    .to_string()
 }
 
 /// Окно прокрутки так, чтобы курсор был виден с запасом в 2 строки.
@@ -1701,8 +1950,21 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         _ => cover_placeholder(f, cover, ctx, true),
     }
 
-    // Подпись под обложкой: название до ×3, артист до ×2 (OSC 66), если влезают; со ссылками.
+    // Подпись под обложкой: название до ×3, артист до ×2 (OSC 66), если влезают.
+    // Клик: название — метаданные, исполнитель — к нему (несколько — выбор), альбом — к альбому.
     let iw = info.width.saturating_sub(4);
+    let row_rect = |y: u16, cols: usize, scale: u8| {
+        let w = ((cols * scale as usize) as u16).min(info.width);
+        Rect {
+            x: info.x + (info.width - w) / 2,
+            y,
+            width: w,
+            height: scale as u16,
+        }
+    };
+    app.areas.stage_title = Rect::default();
+    app.areas.stage_artist = Rect::default();
+    app.areas.stage_album = Rect::default();
     let title = track.full_title();
     let artist = track.artist_names();
     let album = track.album().map(|a| match a.year {
@@ -1727,7 +1989,8 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             })
             .collect();
         let x = info.x + (info.width - (title.width() * s1 as usize) as u16) / 2;
-        put_big(f, app, x, y, s1, runs, Some(App::track_url(&track)));
+        put_big(f, app, x, y, s1, runs, None);
+        app.areas.stage_title = row_rect(y, title.width(), s1);
         y += s1 as u16;
     } else {
         y += 1;
@@ -1743,11 +2006,7 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             Paragraph::new(Line::from(t)).alignment(Alignment::Center),
             Rect { y, height: 1, ..info },
         );
-        if app.kitty_text
-            && let Some(o) = link_cells(f, info.x, y, info.width, App::track_url(&track))
-        {
-            app.overlays.push(o);
-        }
+        app.areas.stage_title = row_rect(y, title.width().min(iw as usize), 1);
         y += 1;
     }
     let s2 = fit_scale(ctx, artist.width(), iw, bottom.saturating_sub(y).saturating_sub(1), 2);
@@ -1758,7 +2017,8 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             curly: None,
         }];
         let x = info.x + (info.width - (artist.width() * s2 as usize) as u16) / 2;
-        put_big(f, app, x, y, s2, runs, artist_url(&track));
+        put_big(f, app, x, y, s2, runs, None);
+        app.areas.stage_artist = row_rect(y, artist.width(), s2);
         y += s2 as u16;
     } else if y < bottom {
         f.render_widget(
@@ -1769,23 +2029,16 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             .alignment(Alignment::Center),
             Rect { y, height: 1, ..info },
         );
-        if app.kitty_text
-            && let Some(o) = artist_url(&track).and_then(|u| link_cells(f, info.x, y, info.width, u))
-        {
-            app.overlays.push(o);
-        }
+        app.areas.stage_artist = row_rect(y, artist.width().min(iw as usize), 1);
         y += 1;
     }
     if y < bottom {
+        let album = album.unwrap_or_default();
+        app.areas.stage_album = row_rect(y, album.width(), 1);
         f.render_widget(
-            Paragraph::new(Line::styled(album.unwrap_or_default(), ctx.dim())).alignment(Alignment::Center),
+            Paragraph::new(Line::styled(album, ctx.dim())).alignment(Alignment::Center),
             Rect { y, height: 1, ..info },
         );
-        if app.kitty_text
-            && let Some(o) = album_url(&track).and_then(|u| link_cells(f, info.x, y, info.width, u))
-        {
-            app.overlays.push(o);
-        }
     }
 
     if ctrl.height >= 3 && ctrl.width >= CONTROLS_W {
@@ -2127,7 +2380,6 @@ fn album_url(t: &Track) -> Option<String> {
         .map(|a| format!("https://music.yandex.ru/album/{}", a.id))
 }
 
-/// Слово вокруг позиции `at` в строке: [начало, конец) в индексах символов.
 /// Примерный «вес» символа во времени пения: гласные тянутся, согласные коротки,
 /// пробелы и знаки — почти мгновенны (запятая/точка дают короткую паузу).
 fn sung_weight(c: char) -> f32 {
@@ -2203,6 +2455,7 @@ fn karaoke_fill(weights: &[f32], frac: f32) -> f32 {
     weights.len() as f32
 }
 
+/// Слово вокруг позиции `at` в строке: [начало, конец) в индексах символов.
 fn current_word(chars: &[char], at: usize) -> Option<(usize, usize)> {
     let at = at.min(chars.len().checked_sub(1)?);
     let mut a = at;
@@ -2692,7 +2945,8 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("l / L", "♥ играющий / выделенный"),
         ("d", "не рекомендовать (волна)"),
         ("a / A", "в конец очереди / следующим"),
-        ("o / i", "альбом / исполнитель"),
+        ("o / i", "альбом / исполнитель (несколько — выбор)"),
+        ("клик по подписи на сцене", "название — о треке, исполнитель, альбом"),
         ("w", "запустить Мою волну"),
         ("/", "поиск"),
         ("Del", "убрать запрос из истории поиска"),

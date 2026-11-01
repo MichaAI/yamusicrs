@@ -358,10 +358,70 @@ pub struct SearchResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtistBrief {
+    #[serde(default)]
+    pub artist: Option<ArtistInfo>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub albums: Vec<Album>,
+    /// Сборники и чужие релизы с участием исполнителя.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub also_albums: Vec<Album>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub popular_tracks: Vec<Track>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub similar_artists: Vec<Artist>,
+    #[serde(default)]
+    pub stats: Option<ArtistStats>,
+    /// Полная дискография (`direct-albums`), догружается отдельным запросом.
+    #[serde(skip)]
+    pub discography: Vec<Album>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistInfo {
+    #[serde(default, deserialize_with = "id_or_empty")]
+    pub id: String,
+    pub cover: Option<Cover>,
+    pub og_image: Option<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub countries: Vec<String>,
+    pub likes_count: Option<u64>,
+    pub description: Option<ArtistDescription>,
+    pub counts: Option<ArtistCounts>,
+}
+
+impl ArtistInfo {
+    pub fn cover_uri(&self) -> Option<&str> {
+        self.cover.as_ref().and_then(|c| c.uri.as_deref()).or(self.og_image.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArtistDescription {
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ArtistCounts {
+    pub tracks: u32,
+    pub direct_albums: u32,
+    pub also_albums: u32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistStats {
+    pub last_month_listeners: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArtistAlbums {
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub albums: Vec<Album>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

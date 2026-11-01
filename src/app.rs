@@ -133,6 +133,19 @@ pub enum SearchItem {
     Query(String),
 }
 
+pub enum Popup {
+    /// Метаданные трека; файл в библиотеке ищется один раз при открытии.
+    TrackInfo {
+        track: Track,
+        file: Option<(std::path::PathBuf, crate::library::Entry)>,
+    },
+    /// У трека несколько исполнителей — к кому перейти.
+    Artists { list: Vec<api::Artist>, sel: usize },
+}
+
+/// Идентификатор уведомления «сейчас играет» (OSC 99): с тем же id kitty обновляет его на месте.
+const NOTIFY_ID: &str = "yamusicrs-now";
+
 /// Сколько запросов помнит история поиска.
 const SEARCH_HISTORY_LEN: usize = 30;
 
@@ -365,6 +378,11 @@ pub struct App {
     pub overlays: Vec<crate::ui::term::Overlay>,
     /// Всплывашки поверх кадра: OSC-оверлеи под ними не рисуются.
     pub occluders: Vec<ratatui::layout::Rect>,
+    /// Всплывающее окно поверх всего (метаданные трека, выбор исполнителя).
+    pub popup: Option<Popup>,
+    /// Кликабельные строки всплывающего окна и его рамка — для мыши.
+    pub popup_hits: Vec<(ratatui::layout::Rect, usize)>,
+    pub popup_area: ratatui::layout::Rect,
     /// Разовые OSC-команды терминалу (курсор, буфер обмена, уведомления).
     pub osc_out: Vec<u8>,
     pointer: bool,
@@ -376,6 +394,10 @@ pub struct App {
 
 #[derive(Default, Clone, Copy)]
 pub struct Areas {
+    /// Подписи под обложкой на сцене: название, исполнители, альбом.
+    pub stage_title: ratatui::layout::Rect,
+    pub stage_artist: ratatui::layout::Rect,
+    pub stage_album: ratatui::layout::Rect,
     pub info: ratatui::layout::Rect,
     /// Обложка «сейчас играет» (боковая панель или сцена).
     pub cover: ratatui::layout::Rect,
@@ -522,6 +544,9 @@ impl App {
             focused: true,
             overlays: Vec::new(),
             occluders: Vec::new(),
+            popup: None,
+            popup_hits: Vec::new(),
+            popup_area: ratatui::layout::Rect::default(),
             osc_out: Vec::new(),
             pointer: false,
             kitty_text,
@@ -1028,7 +1053,7 @@ impl App {
         }
         let p = self.page_mut();
         let mut sel = p.sel as isize + delta;
-        if matches!(p.view, View::Search) {
+        if matches!(p.view, View::Search | View::Artist { .. }) {
             // Заголовки секций пропускаем.
             sel = sel.clamp(0, len as isize - 1);
             p.sel = sel as usize;
@@ -1038,13 +1063,24 @@ impl App {
         p.sel = sel.clamp(0, len as isize - 1) as usize;
     }
 
+    /// Строка `i` текущего вида — заголовок секции (на него курсор не ставим).
+    fn is_header(&self, i: usize) -> bool {
+        match &self.page().view {
+            View::Search => matches!(
+                self.search.as_ref().and_then(Loadable::ready).and_then(|v| v.get(i)),
+                Some(SearchItem::Header(_))
+            ),
+            View::Artist { brief, .. } => brief
+                .ready()
+                .is_some_and(|b| matches!(artist_rows(b).get(i), Some(ArtistRow::Header(_)))),
+            _ => false,
+        }
+    }
+
     fn skip_headers(&mut self, dir: isize) {
-        let Some(Loadable::Ready(items)) = &self.search else {
-            return;
-        };
-        let n = items.len();
+        let n = self.page_len();
         let mut sel = self.page().sel;
-        while matches!(items.get(sel), Some(SearchItem::Header(_))) {
+        while sel < n && self.is_header(sel) {
             let next = sel as isize + if dir == 0 { 1 } else { dir };
             if next < 0 || next as usize >= n {
                 break;
@@ -1169,6 +1205,15 @@ impl App {
                     Some(ArtistRow::Album(a)) => {
                         let a = (*a).clone();
                         self.open_album(a);
+                    }
+                    Some(ArtistRow::Artist(a)) => {
+                        let a = (*a).clone();
+                        self.open_artist(a);
+                    }
+                    Some(ArtistRow::Wave(id)) => {
+                        let (seed, name) = (format!("artist:{id}"), format!("Волна: {name}"));
+                        self.set_tab(Tab::Wave);
+                        self.start_wave(vec![seed], name);
                     }
                     _ => {}
                 }
@@ -1573,9 +1618,10 @@ impl App {
                 icon,
             } => {
                 if self.now.as_ref().is_some_and(|n| n.token == token) {
+                    // Один id на все треки: kitty заменяет показанное уведомление, а не копит стопку.
                     crate::ui::term::notify(
                         &mut self.osc_out,
-                        &format!("yam-{token}"),
+                        NOTIFY_ID,
                         &title,
                         &body,
                         icon.as_deref(),
@@ -1700,10 +1746,21 @@ impl App {
                     if let View::Artist { id, brief, .. } = &mut p.view
                         && *id == view_id
                     {
+                        let photo = result
+                            .as_ref()
+                            .ok()
+                            .and_then(|b| b.artist.as_ref()?.cover_uri().map(str::to_owned));
                         *brief = match result {
                             Ok(b) => Loadable::Ready(b),
                             Err(e) => Loadable::Failed(e),
                         };
+                        if let Some(u) = photo {
+                            self.fetch_cover(&u);
+                        }
+                        if matches!(&self.page().view, View::Artist { id, .. } if *id == view_id) {
+                            self.page_mut().sel = 0;
+                            self.skip_headers(1);
+                        }
                         break;
                     }
                 }
@@ -2066,6 +2123,96 @@ impl App {
 
     // ── клавиатура ───────────────────────────────────────────────────────────
 
+    // ── всплывающие окна ─────────────────────────────────────────────────────
+
+    fn show_track_info(&mut self) {
+        let Some(track) = self.now.as_ref().map(|n| n.track.clone()) else {
+            return;
+        };
+        let file = self.library.lookup(&track.id);
+        self.popup = Some(Popup::TrackInfo { track, file });
+    }
+
+    /// Один исполнитель — сразу к нему, несколько — сперва выбор.
+    fn pick_artist(&mut self, t: &Track) {
+        let list: Vec<api::Artist> = t.artists.iter().filter(|a| !a.id.is_empty()).cloned().collect();
+        match list.len() {
+            0 => self.toast_err("У исполнителя нет страницы".into()),
+            1 => {
+                let a = list.into_iter().next().expect("один");
+                self.go_artist(a);
+            }
+            _ => self.popup = Some(Popup::Artists { list, sel: 0 }),
+        }
+    }
+
+    /// Открыть страницу из сцены/текста: сначала вернуться к обычному виду.
+    fn leave_fullscreen(&mut self) {
+        self.popup = None;
+        if self.stage_mode {
+            self.toggle_stage();
+        }
+        self.lyrics_mode = false;
+    }
+
+    fn go_artist(&mut self, a: api::Artist) {
+        self.leave_fullscreen();
+        self.open_artist(a);
+    }
+
+    fn go_album(&mut self, a: api::Album) {
+        self.leave_fullscreen();
+        self.open_album(a);
+    }
+
+    fn popup_move(&mut self, d: isize) {
+        if let Some(Popup::Artists { list, sel }) = &mut self.popup {
+            *sel = (*sel as isize + d).clamp(0, list.len() as isize - 1) as usize;
+        }
+    }
+
+    /// Строка окна `i`: в выборе — исполнитель; в метаданных 0 — исполнители, 1 — альбом, 2 — ссылка.
+    fn popup_activate(&mut self, i: usize) {
+        match self.popup.take() {
+            Some(Popup::Artists { list, .. }) => {
+                if let Some(a) = list.into_iter().nth(i) {
+                    self.go_artist(a);
+                }
+            }
+            Some(Popup::TrackInfo { track, file }) => match i {
+                0 => self.pick_artist(&track),
+                1 => {
+                    if let Some(a) = track.albums.first().cloned() {
+                        self.go_album(a);
+                    }
+                }
+                2 => {
+                    crate::ui::term::copy_to_clipboard(&mut self.osc_out, &Self::track_url(&track));
+                    self.toast("Ссылка скопирована".into());
+                    self.popup = Some(Popup::TrackInfo { track, file });
+                }
+                _ => self.popup = Some(Popup::TrackInfo { track, file }),
+            },
+            None => {}
+        }
+    }
+
+    fn on_popup_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('q') => self.popup = None,
+            KeyCode::Up | KeyCode::Char('k') => self.popup_move(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.popup_move(1),
+            KeyCode::Enter => match &self.popup {
+                Some(Popup::Artists { sel, .. }) => self.popup_activate(*sel),
+                _ => self.popup = None,
+            },
+            KeyCode::Char('i') if matches!(self.popup, Some(Popup::TrackInfo { .. })) => self.popup_activate(0),
+            KeyCode::Char('o') if matches!(self.popup, Some(Popup::TrackInfo { .. })) => self.popup_activate(1),
+            KeyCode::Char('y') if matches!(self.popup, Some(Popup::TrackInfo { .. })) => self.popup_activate(2),
+            _ => {}
+        }
+    }
+
     fn toggle_stage(&mut self) {
         self.stage_mode = !self.stage_mode;
         self.fx_view = Some(Instant::now());
@@ -2086,7 +2233,18 @@ impl App {
         let on_wave =
             (!stage && matches!(self.page().view, View::Wave) && self.wave.hits.iter().any(|(r, _)| inside(*r)))
                 || self.controls.iter().any(|(r, _)| inside(*r));
+        let on_stage_text = stage
+            && (inside(self.areas.stage_title) || inside(self.areas.stage_artist) || inside(self.areas.stage_album));
+        let on_popup = self.popup.is_some() && self.popup_hits.iter().any(|(r, _)| inside(*r));
+        if self.popup.is_some() {
+            if on_popup != self.pointer {
+                self.pointer = on_popup;
+                crate::ui::term::pointer_shape(&mut self.osc_out, on_popup);
+            }
+            return;
+        }
         let pointer = self.hover.is_some()
+            || on_stage_text
             || on_tab
             || on_lyric
             || on_wave
@@ -2133,10 +2291,8 @@ impl App {
 
     /// Ответ на кнопку уведомления: 1 — следующий, 2 — лайк.
     pub fn on_notify_reply(&mut self, r: crate::ui::term::NotifyReply) {
-        let Some(token) = r.id.strip_prefix("yam-").and_then(|t| t.parse::<Token>().ok()) else {
-            return;
-        };
-        if self.now.as_ref().is_none_or(|n| n.token != token) {
+        // Уведомление одно и всегда про текущий трек.
+        if r.id != NOTIFY_ID || self.now.is_none() {
             return;
         }
         match r.button {
@@ -2159,6 +2315,31 @@ impl App {
         let inside = |r: ratatui::layout::Rect| {
             m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height
         };
+        if self.popup.is_some() {
+            self.update_pointer(m);
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(i) = self.popup_hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1) {
+                        self.popup_activate(i);
+                    } else if !inside(self.popup_area) {
+                        self.popup = None;
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Right) => self.popup = None,
+                MouseEventKind::ScrollUp => self.popup_move(-1),
+                MouseEventKind::ScrollDown => self.popup_move(1),
+                MouseEventKind::Moved => {
+                    if let (Some(i), Some(Popup::Artists { sel, .. })) = (
+                        self.popup_hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1),
+                        self.popup.as_mut(),
+                    ) {
+                        *sel = i;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         // Экран волны: клик по пресету — выбрать (повторный — включить), кнопки ⏮ ▶ ⏭, колесо — по дуге.
         let stage = self.stage_mode && self.now.is_some();
         // В сцене экран волны не виден — его пресеты и кнопки не должны ловить клики.
@@ -2228,6 +2409,16 @@ impl App {
                         0 => self.prev(),
                         1 => self.toggle_pause(),
                         _ => self.next(),
+                    }
+                } else if stage && inside(self.areas.stage_title) {
+                    self.show_track_info();
+                } else if stage && inside(self.areas.stage_artist) {
+                    if let Some(t) = self.now.as_ref().map(|n| n.track.clone()) {
+                        self.pick_artist(&t);
+                    }
+                } else if stage && inside(self.areas.stage_album) {
+                    if let Some(a) = self.now.as_ref().and_then(|n| n.track.albums.first().cloned()) {
+                        self.go_album(a);
                     }
                 } else if inside(self.areas.cover) {
                     // Клик по обложке — «Сцена» и обратно.
@@ -2321,6 +2512,10 @@ impl App {
     fn on_main_key(&mut self, k: KeyEvent) {
         if self.show_help {
             self.show_help = false;
+            return;
+        }
+        if self.popup.is_some() {
+            self.on_popup_key(latin_key(k));
             return;
         }
         if self.page().filter_editing {
@@ -2496,12 +2691,12 @@ impl App {
             }
             KeyCode::Char('o') => {
                 if let Some(a) = self.target_track().and_then(|t| t.albums.first().cloned()) {
-                    self.open_album(a);
+                    self.go_album(a);
                 }
             }
             KeyCode::Char('i') => {
-                if let Some(a) = self.target_track().and_then(|t| t.artists.first().cloned()) {
-                    self.open_artist(a);
+                if let Some(t) = self.target_track() {
+                    self.pick_artist(&t);
                 }
             }
             KeyCode::Char('w') => {
@@ -2757,19 +2952,46 @@ fn search_items(r: SearchResult) -> Vec<SearchItem> {
 
 pub enum ArtistRow<'a> {
     Header(&'static str),
+    /// «Моя волна по исполнителю» (id исполнителя).
+    Wave(&'a str),
     Track(&'a Track),
     Album(&'a api::Album),
+    Artist(&'a api::Artist),
 }
 
 pub fn artist_rows(b: &ArtistBrief) -> Vec<ArtistRow<'_>> {
     let mut v = Vec::new();
+    if let Some(a) = b.artist.as_ref().filter(|a| !a.id.is_empty()) {
+        v.push(ArtistRow::Wave(&a.id));
+    }
     if !b.popular_tracks.is_empty() {
         v.push(ArtistRow::Header("Популярные треки"));
         v.extend(b.popular_tracks.iter().map(ArtistRow::Track));
     }
-    if !b.albums.is_empty() {
+    // Дискография целиком, если догрузилась; иначе — то, что пришло в карточке.
+    let disc: &[api::Album] = if b.discography.is_empty() {
+        &b.albums
+    } else {
+        &b.discography
+    };
+    let single = |a: &api::Album| a.kind.as_deref() == Some("single");
+    let mut albums = disc.iter().filter(|a| !single(a)).peekable();
+    if albums.peek().is_some() {
         v.push(ArtistRow::Header("Альбомы"));
-        v.extend(b.albums.iter().map(ArtistRow::Album));
+        v.extend(albums.map(ArtistRow::Album));
+    }
+    let mut singles = disc.iter().filter(|a| single(a)).peekable();
+    if singles.peek().is_some() {
+        v.push(ArtistRow::Header("Синглы и EP"));
+        v.extend(singles.map(ArtistRow::Album));
+    }
+    if !b.also_albums.is_empty() {
+        v.push(ArtistRow::Header("Участие и сборники"));
+        v.extend(b.also_albums.iter().map(ArtistRow::Album));
+    }
+    if !b.similar_artists.is_empty() {
+        v.push(ArtistRow::Header("Похожие исполнители"));
+        v.extend(b.similar_artists.iter().filter(|a| !a.id.is_empty()).map(ArtistRow::Artist));
     }
     v
 }
