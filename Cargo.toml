@@ -52,8 +52,7 @@ unicode-width = "0.2"
 textwrap = "0.16"
 
 # desktop integration
-# `unstable` — ради `Server::connection()`: на том же соединении живёт расширение MichaAIext.
-mpris-server = { version = "0.11", features = ["unstable"] }
+# MPRIS и расширение шелла — свои интерфейсы прямо на zbus.
 zbus = "6"
 
 # Для разработки: инкрементально и параллельно — правка пересобирает за секунды, а не минуты.

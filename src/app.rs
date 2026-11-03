@@ -2737,7 +2737,6 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.repeat_one = !self.repeat_one;
-                let _ = self.mpris.send(mpris::Update::Repeat(self.repeat_one));
                 self.player.clear_next();
                 self.next_loaded = None;
                 self.schedule_next();

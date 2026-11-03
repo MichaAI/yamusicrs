@@ -1,15 +1,16 @@
-//! MPRIS2: медиаклавиши, playerctl, виджеты окружения.
+//! MPRIS2 на zbus: медиаклавиши, playerctl, виджеты окружения.
+//! Объявляются только поддерживаемые свойства: `Shuffle` и `LoopStatus` по спеке
+//! необязательны, и без них шелл не рисует кнопок, которые ничего не делают.
 //! Плюс расширение `org.mpris.MediaPlayer2.MichaAIext` на том же объекте: две кнопки
 //! (лайк / «не рекомендовать») с SVG-иконками и текст песни в LRC — его читает шелл.
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use mpris_server::zbus::{self, OwnedObjectPath, fdo};
-use mpris_server::{
-    LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property, RootInterface, Server, Signal, Time,
-    TrackId, Volume,
-};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use zbus::object_server::SignalEmitter;
+use zbus::{OwnedVariant as OwnedValue, Variant as Value};
+use zbus::{OwnedObjectPath, fdo, interface};
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -48,7 +49,6 @@ pub enum Update {
     Position(f64),
     Seeked(f64),
     Volume(f64),
-    Repeat(bool),
     /// Лайк текущего трека поменялся (из интерфейса или после загрузки «Мне нравится»).
     Liked(bool),
     /// Текст текущего трека: LRC или просто строки.
@@ -75,159 +75,199 @@ pub fn spawn(commands: UnboundedSender<Command>) -> UnboundedSender<Update> {
 }
 
 const PATH: &str = "/org/mpris/MediaPlayer2";
+const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 
-struct State {
-    status: PlaybackStatus,
-    looping: LoopStatus,
-    metadata: Metadata,
-    volume: Volume,
-    position: Time,
+fn path(p: &str) -> OwnedObjectPath {
+    OwnedObjectPath::try_from(p).unwrap_or_else(|_| OwnedObjectPath::try_from(NO_TRACK).expect("path"))
 }
 
-struct Imp {
+fn micros(s: f64) -> i64 {
+    (s * 1e6) as i64
+}
+
+fn val<'a>(v: impl Into<Value<'a>>) -> OwnedValue {
+    v.into().try_to_owned().expect("без fd")
+}
+
+// ── org.mpris.MediaPlayer2 ──────────────────────────────────────────────────
+
+struct Root;
+
+#[interface(name = "org.mpris.MediaPlayer2")]
+impl Root {
+    fn raise(&self) {}
+
+    fn quit(&self) {}
+
+    #[zbus(property)]
+    fn can_quit(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    fn can_raise(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    fn has_track_list(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    fn identity(&self) -> &str {
+        "Яндекс Музыка (yamusicrs)"
+    }
+
+    #[zbus(property)]
+    fn desktop_entry(&self) -> &str {
+        "yamusicrs"
+    }
+
+    #[zbus(property)]
+    fn supported_uri_schemes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    #[zbus(property)]
+    fn supported_mime_types(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+// ── org.mpris.MediaPlayer2.Player ───────────────────────────────────────────
+
+struct Player {
     cmd: UnboundedSender<Command>,
-    state: Mutex<State>,
+    status: &'static str,
+    metadata: HashMap<String, OwnedValue>,
+    trackid: OwnedObjectPath,
+    volume: f64,
+    /// Позиция меняется постоянно, поэтому без сигнала — её читают по запросу.
+    position: Arc<Mutex<i64>>,
 }
 
-impl Imp {
-    fn send(&self, c: Command) -> fdo::Result<()> {
+impl Player {
+    fn send(&self, c: Command) {
         let _ = self.cmd.send(c);
-        Ok(())
-    }
-
-    fn st(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
-impl RootInterface for Imp {
-    async fn raise(&self) -> fdo::Result<()> {
-        Ok(())
+#[interface(name = "org.mpris.MediaPlayer2.Player")]
+impl Player {
+    fn next(&self) {
+        self.send(Command::Next);
     }
-    async fn quit(&self) -> fdo::Result<()> {
-        Ok(())
-    }
-    async fn can_quit(&self) -> fdo::Result<bool> {
-        Ok(false)
-    }
-    async fn fullscreen(&self) -> fdo::Result<bool> {
-        Ok(false)
-    }
-    async fn set_fullscreen(&self, _: bool) -> zbus::Result<()> {
-        Ok(())
-    }
-    async fn can_set_fullscreen(&self) -> fdo::Result<bool> {
-        Ok(false)
-    }
-    async fn can_raise(&self) -> fdo::Result<bool> {
-        Ok(false)
-    }
-    async fn has_track_list(&self) -> fdo::Result<bool> {
-        Ok(false)
-    }
-    async fn identity(&self) -> fdo::Result<String> {
-        Ok("Яндекс Музыка (yamusicrs)".into())
-    }
-    async fn desktop_entry(&self) -> fdo::Result<String> {
-        Ok("yamusicrs".into())
-    }
-    async fn supported_uri_schemes(&self) -> fdo::Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-    async fn supported_mime_types(&self) -> fdo::Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-}
 
-impl PlayerInterface for Imp {
-    async fn next(&self) -> fdo::Result<()> {
-        self.send(Command::Next)
+    fn previous(&self) {
+        self.send(Command::Previous);
     }
-    async fn previous(&self) -> fdo::Result<()> {
-        self.send(Command::Previous)
+
+    fn pause(&self) {
+        self.send(Command::Pause);
     }
-    async fn pause(&self) -> fdo::Result<()> {
-        self.send(Command::Pause)
+
+    fn play_pause(&self) {
+        self.send(Command::PlayPause);
     }
-    async fn play_pause(&self) -> fdo::Result<()> {
-        self.send(Command::PlayPause)
+
+    fn stop(&self) {
+        self.send(Command::Stop);
     }
-    async fn stop(&self) -> fdo::Result<()> {
-        self.send(Command::Stop)
+
+    fn play(&self) {
+        self.send(Command::Play);
     }
-    async fn play(&self) -> fdo::Result<()> {
-        self.send(Command::Play)
+
+    fn seek(&self, offset: i64) {
+        self.send(Command::Seek(offset as f64 / 1e6));
     }
-    async fn seek(&self, offset: Time) -> fdo::Result<()> {
-        self.send(Command::Seek(offset.as_micros() as f64 / 1e6))
-    }
-    async fn set_position(&self, track_id: TrackId, position: Time) -> fdo::Result<()> {
+
+    fn set_position(&self, track_id: OwnedObjectPath, position: i64) {
         // По спеке устаревший trackid игнорируется.
-        if self.st().metadata.trackid().is_some_and(|t| t != track_id) {
-            return Ok(());
+        if track_id == self.trackid && position >= 0 {
+            self.send(Command::SetPosition(position as f64 / 1e6));
         }
-        self.send(Command::SetPosition(position.as_micros() as f64 / 1e6))
     }
-    async fn open_uri(&self, _: String) -> fdo::Result<()> {
+
+    fn open_uri(&self, _uri: String) -> fdo::Result<()> {
         Err(fdo::Error::NotSupported("OpenUri".into()))
     }
-    async fn playback_status(&self) -> fdo::Result<PlaybackStatus> {
-        Ok(self.st().status)
+
+    #[zbus(signal)]
+    async fn seeked(emitter: &SignalEmitter<'_>, position: i64) -> zbus::Result<()>;
+
+    #[zbus(property)]
+    fn playback_status(&self) -> &str {
+        self.status
     }
-    async fn loop_status(&self) -> fdo::Result<LoopStatus> {
-        Ok(self.st().looping)
+
+    #[zbus(property)]
+    fn rate(&self) -> f64 {
+        1.0
     }
-    async fn set_loop_status(&self, _: LoopStatus) -> zbus::Result<()> {
-        Ok(())
+
+    #[zbus(property)]
+    fn set_rate(&mut self, _rate: f64) {}
+
+    #[zbus(property)]
+    fn metadata(&self) -> HashMap<String, OwnedValue> {
+        self.metadata.clone()
     }
-    async fn rate(&self) -> fdo::Result<PlaybackRate> {
-        Ok(1.0)
+
+    #[zbus(property)]
+    fn volume(&self) -> f64 {
+        self.volume
     }
-    async fn set_rate(&self, _: PlaybackRate) -> zbus::Result<()> {
-        Ok(())
+
+    #[zbus(property)]
+    fn set_volume(&mut self, v: f64) {
+        self.send(Command::Volume(v.clamp(0.0, 1.0)));
     }
-    async fn shuffle(&self) -> fdo::Result<bool> {
-        Ok(false)
+
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn position(&self) -> i64 {
+        *self.position.lock().unwrap_or_else(|e| e.into_inner())
     }
-    async fn set_shuffle(&self, _: bool) -> zbus::Result<()> {
-        Ok(())
+
+    #[zbus(property)]
+    fn minimum_rate(&self) -> f64 {
+        1.0
     }
-    async fn metadata(&self) -> fdo::Result<Metadata> {
-        Ok(self.st().metadata.clone())
+
+    #[zbus(property)]
+    fn maximum_rate(&self) -> f64 {
+        1.0
     }
-    async fn volume(&self) -> fdo::Result<Volume> {
-        Ok(self.st().volume)
+
+    #[zbus(property)]
+    fn can_go_next(&self) -> bool {
+        true
     }
-    async fn set_volume(&self, volume: Volume) -> zbus::Result<()> {
-        let _ = self.cmd.send(Command::Volume(volume));
-        Ok(())
+
+    #[zbus(property)]
+    fn can_go_previous(&self) -> bool {
+        true
     }
-    async fn position(&self) -> fdo::Result<Time> {
-        Ok(self.st().position)
+
+    #[zbus(property)]
+    fn can_play(&self) -> bool {
+        true
     }
-    async fn minimum_rate(&self) -> fdo::Result<PlaybackRate> {
-        Ok(1.0)
+
+    #[zbus(property)]
+    fn can_pause(&self) -> bool {
+        true
     }
-    async fn maximum_rate(&self) -> fdo::Result<PlaybackRate> {
-        Ok(1.0)
+
+    #[zbus(property)]
+    fn can_seek(&self) -> bool {
+        true
     }
-    async fn can_go_next(&self) -> fdo::Result<bool> {
-        Ok(true)
-    }
-    async fn can_go_previous(&self) -> fdo::Result<bool> {
-        Ok(true)
-    }
-    async fn can_play(&self) -> fdo::Result<bool> {
-        Ok(true)
-    }
-    async fn can_pause(&self) -> fdo::Result<bool> {
-        Ok(true)
-    }
-    async fn can_seek(&self) -> fdo::Result<bool> {
-        Ok(true)
-    }
-    async fn can_control(&self) -> fdo::Result<bool> {
-        Ok(true)
+
+    #[zbus(property(emits_changed_signal = "const"))]
+    fn can_control(&self) -> bool {
+        true
     }
 }
 
@@ -245,7 +285,7 @@ struct Ext {
     lyrics: (OwnedObjectPath, String),
 }
 
-#[zbus::interface(name = "org.mpris.MediaPlayer2.MichaAIext")]
+#[interface(name = "org.mpris.MediaPlayer2.MichaAIext")]
 impl Ext {
     fn left(&self) {
         let _ = self.cmd.send(Command::Like);
@@ -271,45 +311,43 @@ impl Ext {
     }
 }
 
-fn no_track() -> OwnedObjectPath {
-    OwnedObjectPath::try_from("/org/mpris/MediaPlayer2/TrackList/NoTrack").expect("path")
-}
-
-fn micros(s: f64) -> Time {
-    Time::from_micros((s * 1e6) as i64)
-}
+// ── цикл обновлений ─────────────────────────────────────────────────────────
 
 async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -> zbus::Result<()> {
     // `org.mpris.MediaPlayer2.<имя>`; переопределяется для второго экземпляра или тестов.
     let name = std::env::var("YAMUSICRS_MPRIS_NAME").unwrap_or_else(|_| "yamusicrs".into());
-    let server = Server::new(
-        &name,
-        Imp {
-            cmd: cmd.clone(),
-            state: Mutex::new(State {
-                status: PlaybackStatus::Stopped,
-                looping: LoopStatus::None,
-                metadata: Metadata::new(),
+    let position = Arc::new(Mutex::new(0i64));
+    let conn = zbus::connection::Builder::session()
+        .name(format!("org.mpris.MediaPlayer2.{name}"))
+        .serve_at(PATH, Root)
+        .serve_at(
+            PATH,
+            Player {
+                cmd: cmd.clone(),
+                status: "Stopped",
+                metadata: HashMap::from([("mpris:trackid".to_string(), val(path(NO_TRACK)))]),
+                trackid: path(NO_TRACK),
                 volume: 1.0,
-                position: Time::ZERO,
-            }),
-        },
-    )
-    .await?;
-    let objects = server.connection().object_server();
-    objects
-        .at(
+                position: position.clone(),
+            },
+        )
+        .serve_at(
             PATH,
             Ext {
                 cmd,
                 left_icon: String::new(),
                 right_icon: String::new(),
-                lyrics: (no_track(), String::new()),
+                lyrics: (path(NO_TRACK), String::new()),
             },
         )
+        .build()
         .await?;
+    let objects = conn.object_server();
+    let player = objects.interface::<_, Player>(PATH).await?;
     let ext = objects.interface::<_, Ext>(PATH).await?;
-    let imp = server.imp();
+    let pe = player.signal_emitter();
+    let ee = ext.signal_emitter();
+    let set_pos = |s: f64| *position.lock().unwrap_or_else(|e| e.into_inner()) = micros(s);
 
     while let Some(u) = rx.recv().await {
         let r: zbus::Result<()> = async {
@@ -324,79 +362,67 @@ async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -
                     pos,
                     liked,
                 } => {
-                    let path = format!("/ru/yandex/music/track/t{}", id.replace(':', "_"));
-                    let tid = TrackId::try_from(path.as_str()).unwrap_or(TrackId::NO_TRACK);
-                    let mut m = Metadata::builder()
-                        .trackid(tid)
-                        .title(title)
-                        .artist(artists)
-                        .album(album)
-                        .length(micros(length))
-                        .url(format!(
-                            "https://music.yandex.ru/track/{}",
-                            id.split(':').next().unwrap_or(&id)
-                        ))
-                        .build();
+                    let tid = path(&format!("/ru/yandex/music/track/t{}", id.replace(':', "_")));
+                    let mut m = HashMap::from([
+                        ("mpris:trackid".to_string(), val(tid.clone())),
+                        ("xesam:title".into(), val(title)),
+                        ("xesam:artist".into(), val(artists)),
+                        ("xesam:album".into(), val(album)),
+                        ("mpris:length".into(), val(micros(length))),
+                        (
+                            "xesam:url".into(),
+                            val(format!(
+                                "https://music.yandex.ru/track/{}",
+                                id.split(':').next().unwrap_or(&id)
+                            )),
+                        ),
+                    ]);
                     if let Some(a) = art {
-                        m.set_art_url(Some(a));
-                    }
-                    // Клиенты перечитывают Position при смене Metadata, поэтому позиция — до неё,
-                    // а Seeked после — для тех, кто только экстраполирует.
-                    let t = micros(pos);
-                    {
-                        let mut s = imp.st();
-                        s.position = t;
-                        s.metadata = m.clone();
+                        m.insert("mpris:artUrl".into(), val(a));
                     }
                     // Текст старого трека снимаем до новых Metadata: шелл не должен принять его за новый.
                     {
                         let mut e = ext.get_mut().await;
-                        e.lyrics = (
-                            OwnedObjectPath::try_from(path).unwrap_or_else(|_| no_track()),
-                            String::new(),
-                        );
+                        e.lyrics = (tid.clone(), String::new());
                         e.left_icon = (if liked { HEART_FULL } else { HEART }).into();
                         e.right_icon = DISLIKE.into();
+                        e.lyrics_changed(ee).await?;
+                        e.left_icon_changed(ee).await?;
+                        e.right_icon_changed(ee).await?;
                     }
+                    // Клиенты перечитывают Position при смене Metadata, поэтому позиция — до неё,
+                    // а Seeked после — для тех, кто только экстраполирует.
+                    set_pos(pos);
                     {
-                        let e = ext.get().await;
-                        let em = ext.signal_emitter();
-                        e.lyrics_changed(em).await?;
-                        e.left_icon_changed(em).await?;
-                        e.right_icon_changed(em).await?;
+                        let mut p = player.get_mut().await;
+                        p.trackid = tid;
+                        p.metadata = m;
+                        p.metadata_changed(pe).await?;
                     }
-                    server.properties_changed([Property::Metadata(m)]).await?;
-                    server.emit(Signal::Seeked { position: t }).await
+                    Player::seeked(pe, micros(pos)).await
                 }
                 Update::Status { playing, pos } => {
-                    let status = if playing {
-                        PlaybackStatus::Playing
-                    } else {
-                        PlaybackStatus::Paused
-                    };
-                    {
-                        let mut s = imp.st();
-                        s.position = micros(pos);
-                        s.status = status;
+                    set_pos(pos);
+                    let mut p = player.get_mut().await;
+                    let s = if playing { "Playing" } else { "Paused" };
+                    if p.status == s {
+                        return Ok(());
                     }
-                    server.properties_changed([Property::PlaybackStatus(status)]).await
+                    p.status = s;
+                    p.playback_status_changed(pe).await
                 }
                 Update::Position(p) => {
-                    imp.st().position = micros(p);
+                    set_pos(p);
                     Ok(())
                 }
                 Update::Seeked(p) => {
-                    imp.st().position = micros(p);
-                    server.emit(Signal::Seeked { position: micros(p) }).await
+                    set_pos(p);
+                    Player::seeked(pe, micros(p)).await
                 }
                 Update::Volume(v) => {
-                    imp.st().volume = v;
-                    server.properties_changed([Property::Volume(v)]).await
-                }
-                Update::Repeat(r) => {
-                    let l = if r { LoopStatus::Track } else { LoopStatus::None };
-                    imp.st().looping = l;
-                    server.properties_changed([Property::LoopStatus(l)]).await
+                    let mut p = player.get_mut().await;
+                    p.volume = v;
+                    p.volume_changed(pe).await
                 }
                 Update::Liked(liked) => {
                     let icon = if liked { HEART_FULL } else { HEART };
@@ -405,12 +431,12 @@ async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -
                         return Ok(());
                     }
                     e.left_icon = icon.into();
-                    e.left_icon_changed(ext.signal_emitter()).await
+                    e.left_icon_changed(ee).await
                 }
                 Update::Lyrics(text) => {
                     let mut e = ext.get_mut().await;
                     e.lyrics.1 = text;
-                    e.lyrics_changed(ext.signal_emitter()).await
+                    e.lyrics_changed(ee).await
                 }
             }
         }
