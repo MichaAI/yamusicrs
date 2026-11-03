@@ -68,6 +68,8 @@ pub struct Paths {
     pub index_file: PathBuf,
     pub state_file: PathBuf,
     pub log_dir: PathBuf,
+    /// Кеш картинок (обложки, фото) — читается и без сети.
+    pub cache_dir: PathBuf,
 }
 
 impl Paths {
@@ -80,6 +82,7 @@ impl Paths {
             index_file: pd.data_dir().join("library.json"),
             state_file: state.join("state.json"),
             log_dir: state,
+            cache_dir: pd.cache_dir().to_path_buf(),
         }
     }
 }

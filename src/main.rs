@@ -3,6 +3,7 @@ mod app;
 mod audio;
 mod config;
 mod fetch;
+mod imgcache;
 mod library;
 mod lyrics;
 mod mpris;
@@ -300,6 +301,7 @@ fn print_paths(paths: &config::Paths) {
         ("токен", paths.token_file.clone()),
         ("состояние", paths.state_file.clone()),
         ("лог", paths.log_dir.join("yamusicrs.log")),
+        ("кеш картинок", paths.cache_dir.join("img")),
     ];
     for (k, v) in rows {
         let mark = if v.exists() { " " } else { "·" };

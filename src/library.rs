@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use color_eyre::eyre::{Result, bail, eyre};
@@ -110,6 +110,13 @@ impl Library {
             e.checked_rank = rank;
         }
         self.save_index();
+    }
+
+    /// Путь к файлу трека без отметки «играли» (для обложек и текстов из тегов).
+    pub fn file(&self, track_id: &str) -> Option<PathBuf> {
+        let id = track_id.split(':').next().unwrap_or(track_id);
+        let p = self.root.join(&self.index.lock().tracks.get(id)?.path);
+        p.is_file().then_some(p)
     }
 
     pub fn contains(&self, track_id: &str) -> bool {
@@ -339,6 +346,26 @@ fn build_tag(t: &Track, tt: TagType, cover: Option<Vec<u8>>, lyrics: Option<Stri
         );
     }
     tag
+}
+
+/// Обложка, вшитая в файл библиотеки.
+pub fn embedded_cover(path: &Path) -> Option<Vec<u8>> {
+    use lofty::file::TaggedFileExt;
+    let f = lofty::read_from_path(path).ok()?;
+    let tag = f.primary_tag().or(f.first_tag())?;
+    let pics = tag.pictures();
+    pics.iter()
+        .find(|p| p.pic_type() == PictureType::CoverFront)
+        .or(pics.first())
+        .map(|p| p.data().to_vec())
+}
+
+/// Текст песни из тегов (LRC или просто строки — как его отдал сервер).
+pub fn embedded_lyrics(path: &Path) -> Option<String> {
+    use lofty::file::TaggedFileExt;
+    let f = lofty::read_from_path(path).ok()?;
+    let tag = f.primary_tag().or(f.first_tag())?;
+    tag.get_string(ItemKey::Lyrics).map(str::to_owned).filter(|s| !s.trim().is_empty())
 }
 
 /// Интервал точек SEEKTABLE, секунды (так же делает референсный `flac`).

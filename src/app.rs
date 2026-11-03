@@ -18,6 +18,7 @@ use crate::lyrics::Lyrics;
 use crate::mpris;
 use crate::offline::{self, Snapshot};
 use crate::offline_wave;
+use crate::imgcache;
 use crate::tinyml::EventKind;
 use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
@@ -490,6 +491,10 @@ pub struct App {
     /// Ручная прокрутка текста без таймингов (строки).
     pub plain_scroll: u16,
     covers_loading: HashSet<String>,
+    /// Не нашлись ни в кеше, ни в файлах, а сети нет — не дёргаем каждый кадр.
+    covers_failed: HashSet<String>,
+    /// Обложка → скачанный трек с ней (картинка вшита в файл); строится по запросу.
+    cover_files: Option<HashMap<String, String>>,
     /// Палитры уже загруженных обложек: тема должна меняться и на треках из кеша.
     palettes: HashMap<String, Palette>,
     pub lyrics: Option<(String, Lyrics)>,
@@ -581,6 +586,8 @@ fn err_str(e: impl std::fmt::Display) -> String {
 impl App {
     pub fn new(tx: UnboundedSender<Msg>, cfg: Config, paths: Paths, offline: bool) -> color_eyre::Result<Self> {
         let state = State::load(&paths);
+        let cache = paths.cache_dir.clone();
+        tokio::task::spawn_blocking(move || imgcache::prune(&cache));
         let data_dir = paths.index_file.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
         let snapshot_path = Snapshot::path(&data_dir);
         let volume = state.volume.unwrap_or(cfg.volume);
@@ -682,6 +689,8 @@ impl App {
             fx_track: None,
             plain_scroll: 0,
             covers_loading: HashSet::new(),
+            covers_failed: HashSet::new(),
+            cover_files: None,
             palettes: HashMap::new(),
             lyrics: None,
             lyrics_scroll: 0.0,
@@ -803,6 +812,7 @@ impl App {
         self.stored_token = Some(tok);
         if self.offline {
             self.offline = false;
+            self.covers_failed.clear();
             self.toast("Сеть вернулась — снова онлайн".into());
         }
         let fetcher = Fetcher::new(client.clone(), self.library.clone(), self.cfg.quality);
@@ -1120,14 +1130,48 @@ impl App {
         self.fetch_image(thumb_key(uri), uri, 300, false);
     }
 
+    /// Файл библиотеки, в который вшита обложка `uri`.
+    fn cover_file(&mut self, uri: &str) -> Option<std::path::PathBuf> {
+        if self.cover_files.is_none() {
+            let mut m = HashMap::new();
+            for id in self.library.ids() {
+                if let Some(u) = self.snapshot.find(&id).and_then(|t| t.cover_uri()) {
+                    m.entry(u.to_string()).or_insert(id);
+                }
+            }
+            self.cover_files = Some(m);
+        }
+        let id = self.cover_files.as_ref()?.get(uri)?.clone();
+        self.library.file(&id)
+    }
+
+    /// Картинка: дисковый кеш → обложка из тегов скачанного трека → сеть (и в кеш).
     fn fetch_image(&mut self, key: String, uri: &str, size: u32, palette: bool) {
-        if self.images.contains(&key) || !self.covers_loading.insert(key.clone()) {
+        if self.images.contains(&key) || self.covers_failed.contains(&key) || !self.covers_loading.insert(key.clone())
+        {
             return;
         }
         let url = api::cover_url(uri, size);
-        self.spawn(move |c, tx| async move {
+        let cache = self.paths.cache_dir.clone();
+        let file = self.cover_file(uri);
+        let (client, tx) = (self.client.clone(), self.tx.clone());
+        tokio::spawn(async move {
             let r = async {
-                let bytes = crate::fetch::fetch_bytes(&c, &url).await?;
+                let (c2, u2) = (cache.clone(), url.clone());
+                let cached = tokio::task::spawn_blocking(move || {
+                    imgcache::read(&c2, &u2).or_else(|| file.and_then(|p| crate::library::embedded_cover(&p)))
+                })
+                .await?;
+                let bytes = match cached {
+                    Some(b) => b,
+                    None => {
+                        let c = client.ok_or_else(|| color_eyre::eyre::eyre!("нет сети, а в кеше нет"))?;
+                        let b = crate::fetch::fetch_bytes(&c, &url).await?;
+                        let b2 = b.clone();
+                        tokio::task::spawn_blocking(move || imgcache::write(&cache, &url, &b2));
+                        b
+                    }
+                };
                 let img = tokio::task::spawn_blocking(move || -> color_eyre::Result<_> {
                     let img = image::load_from_memory(&bytes)?.to_rgba8();
                     let pal = if palette {
@@ -1157,8 +1201,24 @@ impl App {
             return;
         }
         let id = t.id.clone();
-        self.spawn(move |c, tx| async move {
-            let raw = c.lyrics(&id, sync).await.ok();
+        // Скачанный трек несёт текст в тегах — без сети и без лишнего запроса.
+        let file = self.library.file(&id);
+        let (client, tx) = (self.client.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let embedded = match file {
+                Some(p) => tokio::task::spawn_blocking(move || crate::library::embedded_lyrics(&p))
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            // Старые файлы несут только обычный текст: при сети синхронный берём с сервера.
+            let lrc = |s: &str| matches!(Lyrics::parse_lrc(s), Lyrics::Synced(_));
+            let raw = match (embedded, client) {
+                (Some(s), c) if !sync || c.is_none() || lrc(&s) => Some(s),
+                (_, Some(c)) => c.lyrics(&id, sync).await.ok(),
+                (e, None) => e,
+            };
             let lyrics = raw
                 .as_deref()
                 .map(|s| if sync { Lyrics::parse_lrc(s) } else { Lyrics::plain(s) });
@@ -2463,6 +2523,7 @@ impl App {
                 }
             }
             Msg::LibraryMeta(ts) => {
+                self.cover_files = None;
                 for t in ts {
                     self.snapshot.library_tracks.insert(t.id.clone(), t);
                 }
@@ -2596,6 +2657,9 @@ impl App {
             } => self.on_opened(token, next, start, result),
             Msg::Cover { key, result } => {
                 self.covers_loading.remove(&key);
+                if result.is_err() && self.client.is_none() {
+                    self.covers_failed.insert(key.clone());
+                }
                 match result {
                     Ok((img, pal)) => {
                         self.images.insert(key.clone(), img);

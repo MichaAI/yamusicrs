@@ -177,7 +177,10 @@ impl Fetcher {
             Some(u) => fetch_bytes(&self.client, &cover_url(u, 1000)).await.ok(),
             None => None,
         };
-        let lyrics = if track.has_text_lyrics() {
+        // В теги — синхронный LRC, если есть (его понимают многие плееры), иначе просто текст.
+        let lyrics = if track.has_sync_lyrics() {
+            self.client.lyrics(&track.id, true).await.ok()
+        } else if track.has_text_lyrics() {
             self.client.lyrics(&track.id, false).await.ok()
         } else {
             None
