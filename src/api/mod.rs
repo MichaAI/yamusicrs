@@ -508,6 +508,21 @@ impl Client {
             .collect())
     }
 
+    /// Программа офлайн-волны под скачанные треки (как в мобильном клиенте).
+    pub async fn offline_recommender(&self, liked: &[String], recommender: &[String]) -> Result<Vec<i32>> {
+        let v: Value = self
+            .post_json(
+                "/rotor/get-offline-recommender",
+                &json!({
+                    "autoCachedLikedTracks": liked,
+                    "autoCachedRecommenderTracks": recommender,
+                    "userCachedTracks": [],
+                }),
+            )
+            .await?;
+        Ok(serde_json::from_value(v["offlineRecommenderSource"].clone())?)
+    }
+
     pub async fn rotor_new(&self, seeds: &[String]) -> Result<RotorSession> {
         self.post_json(
             "/rotor/session/new",

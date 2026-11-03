@@ -17,6 +17,8 @@ use crate::library::Library;
 use crate::lyrics::Lyrics;
 use crate::mpris;
 use crate::offline::{self, Snapshot};
+use crate::offline_wave;
+use crate::tinyml::EventKind;
 use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
 
@@ -40,6 +42,10 @@ pub enum Msg {
     LoggedIn(Result<StoredToken, String>),
     Likes(Result<Vec<Track>, String>),
     Playlists(Result<Vec<Playlist>, String>),
+    /// Программа офлайн-волны и треки, под которые она собрана.
+    OfflineProgram(Result<(Vec<i32>, Vec<i32>), String>),
+    /// Метаданные скачанных треков для офлайн-снимка.
+    LibraryMeta(Vec<Track>),
     /// Треки плейлистов для офлайн-снимка: (`uid:kind`, ревизия, треки).
     PlaylistSnapshots(Vec<(String, u32, Vec<Track>)>),
     /// Правка плейлиста выполнена: тост; `kind` — что перечитать при ошибке.
@@ -360,6 +366,8 @@ pub fn filter_tracks(tracks: &[Track], query: &str) -> Vec<usize> {
 pub enum QueueKind {
     List,
     Wave { session: String, batch: Option<String> },
+    /// Моя волна без сети: следующий трек выбирает TinyMl из скачанного.
+    OfflineWave,
 }
 
 pub struct Queue {
@@ -427,6 +435,12 @@ pub struct App {
     pub offline: bool,
     snapshot: Snapshot,
     snapshot_path: std::path::PathBuf,
+    /// Офлайн-волна: программа, идущая сессия и треки, из которых она выбирает.
+    owave_store: Option<offline_wave::Store>,
+    owave: Option<offline_wave::Session>,
+    owave_tracks: HashMap<i32, Track>,
+    owave_fetching: bool,
+    data_dir: std::path::PathBuf,
     pub library: Arc<Library>,
     pub player: Player,
     pub account: Option<AccountStatus>,
@@ -567,7 +581,8 @@ fn err_str(e: impl std::fmt::Display) -> String {
 impl App {
     pub fn new(tx: UnboundedSender<Msg>, cfg: Config, paths: Paths) -> color_eyre::Result<Self> {
         let state = State::load(&paths);
-        let snapshot_path = Snapshot::path(paths.index_file.parent().unwrap_or(std::path::Path::new(".")));
+        let data_dir = paths.index_file.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let snapshot_path = Snapshot::path(&data_dir);
         let volume = state.volume.unwrap_or(cfg.volume);
         let audio_tx = tx.clone();
         let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel();
@@ -607,6 +622,11 @@ impl App {
             offline: false,
             snapshot: Snapshot::load(&snapshot_path),
             snapshot_path,
+            owave_store: offline_wave::Store::load(&data_dir),
+            owave: None,
+            owave_tracks: HashMap::new(),
+            owave_fetching: false,
+            data_dir,
             library,
             player,
             account: None,
@@ -843,7 +863,7 @@ impl App {
             secs: self.now.as_ref().map_or(0.0, |n| n.pos),
             wave: match &self.queue.kind {
                 QueueKind::Wave { session, batch } => Some((session.clone(), batch.clone())),
-                QueueKind::List => None,
+                QueueKind::List | QueueKind::OfflineWave => None,
             },
         });
     }
@@ -1342,6 +1362,7 @@ impl App {
         let sel = self.page().sel;
         let orig = self.sel_index();
         match &self.page().view {
+            View::Wave if self.offline => self.start_offline_wave(),
             View::Wave => {
                 let Some(item) = self.wave.items.ready().and_then(|v| v.get(sel)).cloned() else {
                     return;
@@ -1463,6 +1484,9 @@ impl App {
     }
 
     fn replace_queue(&mut self, items: Vec<Track>, kind: QueueKind, title: String) {
+        if !matches!(kind, QueueKind::OfflineWave) {
+            self.owave = None;
+        }
         self.queue = Queue {
             items,
             pos: None,
@@ -1595,6 +1619,134 @@ impl App {
 
     // ── офлайн ───────────────────────────────────────────────────────────────
 
+    /// Подсказка рекомендателю из ответа ротора — для следующего старта офлайн-волны.
+    fn keep_server_data(&mut self, data: Option<Vec<i32>>) {
+        if let (Some(d), Some(store)) = (data.filter(|d| !d.is_empty()), self.owave_store.as_mut()) {
+            store.server_data = d;
+            store.save(&self.data_dir);
+        }
+    }
+
+    /// Программа офлайн-волны под текущую библиотеку: перезапрос, если библиотека заметно
+    /// изменилась или программа старая. Лайкнутые и остальные — разными списками, как в клиенте.
+    fn refresh_offline_program(&mut self) {
+        if self.offline || self.owave_fetching {
+            return;
+        }
+        let lib: Vec<String> = self.library.ids();
+        let ids: HashSet<i32> = lib.iter().filter_map(|i| i.parse().ok()).collect();
+        if ids.len() < 3 || self.owave_store.as_ref().is_some_and(|s| !s.stale(&ids)) {
+            return;
+        }
+        let (liked, rest): (Vec<String>, Vec<String>) = lib.into_iter().partition(|i| self.liked.contains(i));
+        self.owave_fetching = true;
+        let ids: Vec<i32> = ids.into_iter().collect();
+        self.spawn(move |c, tx| async move {
+            let r = c
+                .offline_recommender(&liked, &rest)
+                .await
+                .map(|p| (p, ids))
+                .map_err(err_str);
+            let _ = tx.send(Msg::OfflineProgram(r));
+        });
+    }
+
+    /// Метаданные скачанных треков, которых нет в снимке, — пачками, пока есть сеть.
+    fn backfill_library_meta(&mut self) {
+        let lib: HashSet<String> = self.library.ids().into_iter().collect();
+        self.snapshot.library_tracks.retain(|id, _| lib.contains(id));
+        let missing: Vec<String> = lib.into_iter().filter(|id| self.snapshot.find(id).is_none()).collect();
+        if missing.is_empty() {
+            return;
+        }
+        self.spawn(move |c, tx| async move {
+            let mut out = Vec::new();
+            for chunk in missing.chunks(200) {
+                match c.tracks(chunk).await {
+                    Ok(ts) => out.extend(ts),
+                    Err(e) => {
+                        tracing::warn!("метаданные библиотеки: {e}");
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send(Msg::LibraryMeta(out));
+        });
+    }
+
+    /// Моя волна без сети: TinyMl выбирает из скачанного.
+    fn start_offline_wave(&mut self) {
+        let Some(store) = self.owave_store.as_ref() else {
+            self.toast("Офлайн-волна ещё не готова: программа скачивается, когда есть сеть".into());
+            return;
+        };
+        let mut pool: HashMap<i32, Track> = HashMap::new();
+        for id in self.library.ids() {
+            if let (Ok(n), Some(t)) = (id.parse::<i32>(), self.snapshot.find(&id)) {
+                pool.insert(n, t.clone());
+            }
+        }
+        if pool.len() < 3 {
+            self.toast("Для офлайн-волны нужно хотя бы 3 скачанных трека".into());
+            return;
+        }
+        let available: Vec<i32> = pool.keys().copied().collect();
+        let context: Vec<(i32, Option<i32>)> = self
+            .queue
+            .items
+            .iter()
+            .rev()
+            .take(20)
+            .rev()
+            .filter_map(|t| {
+                let album = t.full_id().split_once(':').and_then(|(_, a)| a.parse().ok());
+                Some((t.id.parse().ok()?, album))
+            })
+            .collect();
+        match offline_wave::Session::start(store, &self.data_dir, &available, &context) {
+            Ok((session, first)) => {
+                let tracks: Vec<Track> = first.iter().filter_map(|id| pool.get(id).cloned()).collect();
+                if tracks.is_empty() {
+                    self.toast_err("Офлайн-волна ничего не выбрала".into());
+                    return;
+                }
+                self.owave_tracks = pool;
+                self.replace_queue(tracks, QueueKind::OfflineWave, "Моя волна · офлайн".into());
+                self.owave = Some(session);
+                self.play_index(0);
+            }
+            Err(e) => self.toast_err(format!("Офлайн-волна: {e}")),
+        }
+    }
+
+    /// Держит в очереди один трек после играющего: его выбирает TinyMl.
+    fn extend_offline_wave(&mut self) {
+        if !matches!(self.queue.kind, QueueKind::OfflineWave) {
+            return;
+        }
+        let Some(pos) = self.queue.pos else { return };
+        if pos + 2 < self.queue.items.len() {
+            return;
+        }
+        let id = |t: &Track| t.id.parse::<i32>().unwrap_or(0);
+        let last = self.queue.items.get(pos).map_or(0, id);
+        let queued = self.queue.items.last().map_or(last, id);
+        let Some(session) = self.owave.as_mut() else { return };
+        match session.next(last, queued) {
+            Ok(n) => match self.owave_tracks.get(&n).cloned() {
+                Some(t) => {
+                    let was_at_end = self.next_loaded.is_none();
+                    self.queue.items.push(t);
+                    if was_at_end {
+                        self.schedule_next();
+                    }
+                }
+                None => tracing::warn!("офлайн-волна выбрала трек {n}, которого нет в библиотеке"),
+            },
+            Err(e) => self.toast_err(format!("Офлайн-волна: {e}")),
+        }
+    }
+
     /// Без сети играет только скачанное: остальное помечается недоступным.
     fn offline_tracks(&self, mut ts: Vec<Track>) -> Vec<Track> {
         for t in &mut ts {
@@ -1612,7 +1764,11 @@ impl App {
         self.liked = likes.iter().map(|t| t.id.clone()).collect();
         self.likes = Loadable::Ready(likes);
         self.playlists = Loadable::Ready(self.snapshot.playlists.clone());
-        self.wave.items = Loadable::Failed("нет сети".into());
+        self.wave.items = Loadable::Failed(if self.owave_store.is_some() {
+            "нет сети — Enter или w: офлайн-волна по скачанному".into()
+        } else {
+            "нет сети, а программа офлайн-волны ещё не скачана".into()
+        });
         if self.queue.items.is_empty()
             && let Some(r) = self.state.resume.clone()
         {
@@ -1707,6 +1863,11 @@ impl App {
                 if matches!(self.queue.kind, QueueKind::Wave { .. }) {
                     self.toast("Волна подгружается…".into());
                     self.maybe_extend_wave(cur);
+                } else if matches!(self.queue.kind, QueueKind::OfflineWave) {
+                    self.extend_offline_wave();
+                    if cur + 1 < self.queue.items.len() {
+                        self.play_index(cur + 1);
+                    }
                 }
             }
         }
@@ -1854,10 +2015,28 @@ impl App {
         });
     }
 
-    fn wave_feedback(&self, kind: &'static str, t: &Track, played: Option<f64>) {
+    fn wave_feedback(&mut self, kind: &'static str, t: &Track, played: Option<f64>) {
+        if matches!(self.queue.kind, QueueKind::OfflineWave) {
+            let ev = match kind {
+                "trackStarted" => EventKind::Started,
+                "trackFinished" => EventKind::Finished,
+                "skip" => EventKind::Skip,
+                "like" => EventKind::Like,
+                "unlike" => EventKind::Unlike,
+                "dislike" => EventKind::Dislike,
+                _ => return,
+            };
+            if let (Some(s), Ok(id)) = (self.owave.as_mut(), t.id.parse()) {
+                s.event(id, ev, played.unwrap_or(0.0) as f32);
+            }
+            return;
+        }
         let QueueKind::Wave { session, batch } = &self.queue.kind else {
             return;
         };
+        if kind == "unlike" {
+            return;
+        }
         let (session, batch, id) = (session.clone(), batch.clone(), t.full_id());
         self.spawn(move |c, _| async move {
             if let Err(e) = c
@@ -1870,12 +2049,12 @@ impl App {
     }
 
     /// Отчёт о прослушивании: история Яндекса + обратная связь волны.
-    fn report_end(&self, token: Token, played: f64, skipped: bool) {
-        let Some((_, _, t)) = self.tokens.get(&token) else {
+    fn report_end(&mut self, token: Token, played: f64, skipped: bool) {
+        let Some((_, _, t)) = self.tokens.get(&token).cloned() else {
             return;
         };
         let full = played >= t.duration_secs() - 2.0;
-        self.wave_feedback(if skipped && !full { "skip" } else { "trackFinished" }, t, Some(played));
+        self.wave_feedback(if skipped && !full { "skip" } else { "trackFinished" }, &t, Some(played));
         if self.cfg.report_plays && played > 1.0 {
             let t = t.clone();
             self.spawn(move |c, _| async move {
@@ -2079,6 +2258,7 @@ impl App {
             if let Loadable::Ready(v) = &mut self.likes {
                 v.retain(|x| x.id != t.id);
             }
+            self.wave_feedback("unlike", &t, None);
             self.toast(format!("♡ {}", t.full_title()));
         }
         self.refilter_keep();
@@ -2238,6 +2418,8 @@ impl App {
                     self.snapshot.likes = ts.clone();
                     self.snapshot.save(self.snapshot_path.clone());
                     self.likes = Loadable::Ready(ts);
+                    self.backfill_library_meta();
+                    self.refresh_offline_program();
                     self.refilter_keep();
                     self.mpris_liked();
                 }
@@ -2258,6 +2440,29 @@ impl App {
                     }
                     Err(e) => Loadable::Failed(e),
                 }
+            }
+            Msg::OfflineProgram(r) => {
+                self.owave_fetching = false;
+                match r {
+                    Ok((program, ids)) => {
+                        let store = offline_wave::Store {
+                            program,
+                            ids,
+                            fetched_at: chrono::Utc::now().timestamp(),
+                            server_data: self.owave_store.take().map(|s| s.server_data).unwrap_or_default(),
+                        };
+                        store.save(&self.data_dir);
+                        tracing::info!("офлайн-волна: программа {} слов под {} треков", store.program.len(), store.ids.len());
+                        self.owave_store = Some(store);
+                    }
+                    Err(e) => tracing::warn!("программа офлайн-волны: {e}"),
+                }
+            }
+            Msg::LibraryMeta(ts) => {
+                for t in ts {
+                    self.snapshot.library_tracks.insert(t.id.clone(), t);
+                }
+                self.snapshot.save(self.snapshot_path.clone());
             }
             Msg::PlaylistSnapshots(v) => {
                 for (k, rev, ts) in v {
@@ -2337,6 +2542,7 @@ impl App {
                 self.wave.loading = false;
                 match r {
                     Ok(s) => {
+                        self.keep_server_data(s.offline_recommender_data.clone());
                         let tracks: Vec<Track> = s.sequence.into_iter().filter_map(|i| i.track).collect();
                         if tracks.is_empty() {
                             self.toast_err("Волна пустая — попробуй другие настройки".into());
@@ -2359,6 +2565,7 @@ impl App {
                 self.wave.loading = false;
                 match r {
                     Ok(more) => {
+                        self.keep_server_data(more.offline_recommender_data.clone());
                         let have: HashSet<String> = self.queue.items.iter().map(|t| t.id.clone()).collect();
                         if let QueueKind::Wave { batch, .. } = &mut self.queue.kind {
                             *batch = more.batch_id.or(batch.take());
@@ -2672,6 +2879,10 @@ impl App {
         self.apply_theme_for(&track);
         self.fetch_lyrics(&track);
         self.wave_feedback("trackStarted", &track, None);
+        if self.library.contains(&track.id) {
+            self.snapshot.library_tracks.insert(track.id.clone(), track.clone());
+        }
+        self.extend_offline_wave();
         self.notify_track(pos.token, &track);
         self.persist_session();
         let _ = self.mpris.send(mpris::Update::Track {
@@ -3322,7 +3533,11 @@ impl App {
             }
             KeyCode::Char('w') => {
                 self.set_tab(Tab::Wave);
-                self.start_wave(vec![MY_WAVE.into()], "Моя волна".into());
+                if self.offline {
+                    self.start_offline_wave();
+                } else {
+                    self.start_wave(vec![MY_WAVE.into()], "Моя волна".into());
+                }
             }
             KeyCode::Char('t') => self.lyrics_mode = !self.lyrics_mode,
             KeyCode::Char('v') => self.toggle_stage(),

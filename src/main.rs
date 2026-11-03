@@ -7,6 +7,8 @@ mod library;
 mod lyrics;
 mod mpris;
 mod offline;
+mod offline_wave;
+mod tinyml;
 mod render;
 mod ui;
 
@@ -25,6 +27,9 @@ struct Cli {
     /// Диагностика аудио: проиграть локальные файлы подряд (gapless) через PipeWire и выйти.
     #[arg(long, value_name = "FILE", num_args = 1.., hide = true)]
     play: Vec<std::path::PathBuf>,
+    /// Отладка офлайн-волны: прогнать программу TinyMl (json ответа) на треках из json запроса.
+    #[arg(long, value_names = ["PROGRAM", "REQUEST"], num_args = 2, hide = true)]
+    tinyml_bench: Vec<std::path::PathBuf>,
     /// Для --play: кроссфейд между файлами, сек.
     #[arg(long, value_name = "SECS", default_value_t = 0.0, hide = true)]
     crossfade: f32,
@@ -109,6 +114,9 @@ async fn run() -> color_eyre::Result<()> {
         .save(&paths.token_file)?;
     }
 
+    if let [program, request] = cli.tinyml_bench.as_slice() {
+        return tinyml_bench(program, request);
+    }
     if !cli.play.is_empty() {
         return play_files(cli.play, cli.crossfade).await;
     }
@@ -155,5 +163,53 @@ async fn play_files(files: Vec<std::path::PathBuf>, crossfade: f32) -> color_eyr
             }
         }
     }
+    Ok(())
+}
+
+fn tinyml_bench(program: &std::path::Path, request: &std::path::Path) -> color_eyre::Result<()> {
+    use tinyml::{Event, EventKind, Vm};
+    let p: serde_json::Value = serde_json::from_slice(&std::fs::read(program)?)?;
+    let prog: Vec<i32> = serde_json::from_value(p["result"]["offlineRecommenderSource"].clone())?;
+    let r: serde_json::Value = serde_json::from_slice(&std::fs::read(request)?)?;
+    let mut avail: Vec<i32> = Vec::new();
+    for k in ["autoCachedLikedTracks", "autoCachedRecommenderTracks", "userCachedTracks"] {
+        for v in r[k].as_array().into_iter().flatten() {
+            if let Some(id) = v.as_str().and_then(|s| s.parse().ok()) {
+                avail.push(id);
+            }
+        }
+    }
+    let level = std::env::var("TINYML_LOG").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let t = std::time::Instant::now();
+    let mut vm = Vm::new(prog.clone(), None, level)?;
+    println!("init: {:?}, {} шагов, программа {} слов, доступно {}", t.elapsed(), vm.steps, prog.len(), avail.len());
+    let t = std::time::Instant::now();
+    let s = vm.start_wave(&[], &[], &["user:onyourwave".into()], &avail)?;
+    println!("startWave: {:?}, {} шагов → {:?}", t.elapsed(), vm.steps, s);
+    let mut events = Vec::new();
+    let (mut last, mut queued) = (s.tracks[0], s.tracks[1]);
+    events.push(Event::now(last, EventKind::Started, 0.0));
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..30 {
+        let kind = if i % 3 == 2 { EventKind::Skip } else { EventKind::Finished };
+        events.push(Event::now(last, kind, if kind == EventKind::Skip { 12.0 } else { 180.0 }));
+        let t = std::time::Instant::now();
+        let n = vm.next_track(&events, last, queued)?;
+        println!(
+            "nextTrack #{i}: {:?}, {} шагов → {} ({}){}",
+            t.elapsed(),
+            vm.steps,
+            n.track,
+            n.batch,
+            if seen.insert(n.track) { "" } else { " ПОВТОР" }
+        );
+        last = queued;
+        queued = n.track;
+        events.push(Event::now(last, EventKind::Started, 0.0));
+    }
+    let t = std::time::Instant::now();
+    let state = vm.state().to_vec();
+    let vm2 = Vm::new(prog, Some(state), level)?;
+    println!("восстановление из состояния: {:?}, init {} шагов", t.elapsed(), vm2.steps);
     Ok(())
 }

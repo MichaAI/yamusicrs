@@ -16,6 +16,8 @@ pub struct Snapshot {
     pub playlists: Vec<Playlist>,
     /// `uid:kind` → (ревизия, треки).
     pub playlist_tracks: HashMap<String, (u32, Vec<Track>)>,
+    /// Метаданные скачанных треков, которых нет ни в лайках, ни в плейлистах (для офлайн-волны).
+    pub library_tracks: HashMap<String, Track>,
 }
 
 pub fn key(pl: &Playlist) -> String {
@@ -54,10 +56,12 @@ impl Snapshot {
     /// Трек по id среди всего сохранённого — для восстановления очереди без сети.
     pub fn find(&self, id: &str) -> Option<&Track> {
         let id = id.split(':').next().unwrap_or(id);
-        self.likes
-            .iter()
-            .chain(self.playlist_tracks.values().flat_map(|(_, t)| t))
-            .find(|t| t.id == id)
+        self.library_tracks.get(id).or_else(|| {
+            self.likes
+                .iter()
+                .chain(self.playlist_tracks.values().flat_map(|(_, t)| t))
+                .find(|t| t.id == id)
+        })
     }
 
     /// Запись в фоне и атомарно: снимок бывает в несколько мегабайт.

@@ -117,6 +117,11 @@ impl Library {
         self.index.lock().tracks.contains_key(id)
     }
 
+    /// id всех скачанных треков.
+    pub fn ids(&self) -> Vec<String> {
+        self.index.lock().tracks.keys().cloned().collect()
+    }
+
     pub fn stats(&self) -> (usize, u64) {
         let idx = self.index.lock();
         (idx.tracks.len(), idx.tracks.values().map(|e| e.size).sum())

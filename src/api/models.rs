@@ -476,6 +476,9 @@ pub struct RotorSession {
     pub batch_id: Option<String>,
     #[serde(default)]
     pub sequence: Vec<SequenceItem>,
+    /// Подсказка офлайн-рекомендателю (TinyMl) — если сервер её дал.
+    #[serde(default)]
+    pub offline_recommender_data: Option<Vec<i32>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -484,6 +487,8 @@ pub struct RotorTracks {
     pub batch_id: Option<String>,
     #[serde(default)]
     pub sequence: Vec<SequenceItem>,
+    #[serde(default)]
+    pub offline_recommender_data: Option<Vec<i32>>,
 }
 
 /// «Колесо» Моей волны (`POST api.music.yandex.ru/wheel/new`) — персональные пресеты.
