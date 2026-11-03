@@ -12,26 +12,131 @@ mod tinyml;
 mod render;
 mod ui;
 
-use clap::Parser;
+use std::path::PathBuf;
+
+use clap::{ArgAction, Args, Parser, Subcommand};
+
+const HELP_TEMPLATE: &str = "\
+{before-help}{name} {version} — {about-with-newline}
+Использование: {usage}
+
+{all-args}{after-help}";
+
+const SUB_TEMPLATE: &str = "\
+{about-with-newline}
+Использование: {usage}
+
+{all-args}{after-help}";
+
+const AFTER_HELP: &str = "\
+Горячие клавиши — ? внутри приложения. Коротко:
+  Space  пауза        n / p  дальше / назад     w  Моя волна (без сети — офлайн)
+  l      ♥ играющий    d      не рекомендовать    P  в плейлист      / поиск     q выход
+
+Файлы (подробно — yamusicrs paths):
+  ~/.config/yamusicrs/config.toml    настройки (качество, библиотека, нормализация, кроссфейд…)
+  ~/Music/YandexMusic/               библиотека: скачанные треки с тегами и обложками
+  ~/.local/state/yamusicrs/          состояние между запусками и лог
+
+Переменные окружения:
+  YAMUSICRS_LOG=yamusicrs=debug      подробность лога (синтаксис tracing EnvFilter)
+  YAMUSICRS_MPRIS_NAME=имя           суффикс org.mpris.MediaPlayer2.<имя> (второй экземпляр, тесты)
+
+Примеры:
+  yamusicrs                          запустить плеер
+  yamusicrs login --token 'https://…#access_token=…'
+  yamusicrs --offline                без сети: Коллекция, плейлисты и офлайн-волна из скачанного";
 
 /// TUI-клиент Яндекс Музыки: lossless через PipeWire, Моя волна, синхронные тексты.
 #[derive(Parser)]
-#[command(version)]
+#[command(
+    name = "yamusicrs",
+    version,
+    help_template = HELP_TEMPLATE,
+    after_help = AFTER_HELP,
+    disable_help_flag = true,
+    disable_version_flag = true,
+    disable_help_subcommand = true,
+    subcommand_help_heading = "Команды",
+    subcommand_value_name = "КОМАНДА",
+    override_usage = "yamusicrs [ПАРАМЕТРЫ] [КОМАНДА]",
+    next_help_heading = "Параметры"
+)]
 struct Cli {
-    /// Забыть сохранённый токен и войти заново.
+    #[command(subcommand)]
+    command: Option<Command>,
+    /// Запуститься сразу без сети: по сохранённому снимку библиотеки, играет только скачанное.
     #[arg(long)]
+    offline: bool,
+    /// Показать справку.
+    #[arg(short = 'h', long, action = ArgAction::Help, global = true)]
+    help: Option<bool>,
+    /// Показать версию.
+    #[arg(short = 'V', long, action = ArgAction::Version)]
+    version: Option<bool>,
+    // Старые флаги — работают как раньше, но в справке их место заняли команды.
+    #[arg(long, hide = true)]
     logout: bool,
-    /// Войти по готовому OAuth-токену (или ссылке с access_token).
-    #[arg(long, value_name = "TOKEN")]
+    #[arg(long, value_name = "TOKEN", hide = true)]
     token: Option<String>,
-    /// Диагностика аудио: проиграть локальные файлы подряд (gapless) через PipeWire и выйти.
-    #[arg(long, value_name = "FILE", num_args = 1.., hide = true)]
-    play: Vec<std::path::PathBuf>,
-    /// Отладка офлайн-волны: прогнать программу TinyMl (json ответа) на треках из json запроса.
-    #[arg(long, value_names = ["PROGRAM", "REQUEST"], num_args = 2, hide = true)]
-    tinyml_bench: Vec<std::path::PathBuf>,
-    /// Для --play: кроссфейд между файлами, сек.
-    #[arg(long, value_name = "SECS", default_value_t = 0.0, hide = true)]
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Войти заново: по коду с QR на экране или готовым токеном.
+    #[command(help_template = SUB_TEMPLATE, override_usage = "yamusicrs login [--token ТОКЕН]")]
+    Login {
+        /// OAuth-токен или ссылка с `#access_token=…` (например, из адресной строки после входа).
+        #[arg(long, value_name = "ТОКЕН", help_heading = "Параметры")]
+        token: Option<String>,
+    },
+    /// Забыть сохранённый токен и выйти; при следующем запуске — вход заново.
+    #[command(help_template = SUB_TEMPLATE, override_usage = "yamusicrs logout")]
+    Logout,
+    /// Где лежат конфиг, библиотека, состояние и лог.
+    #[command(help_template = SUB_TEMPLATE, override_usage = "yamusicrs paths")]
+    Paths,
+    /// Диагностика: звук без интерфейса и программы офлайн-волны.
+    #[command(
+        help_template = SUB_TEMPLATE,
+        subcommand_help_heading = "Команды",
+        subcommand_value_name = "КОМАНДА",
+        override_usage = "yamusicrs debug КОМАНДА"
+    )]
+    Debug {
+        #[command(subcommand)]
+        what: Debug,
+    },
+}
+
+#[derive(Subcommand)]
+enum Debug {
+    /// Проиграть локальные файлы подряд через PipeWire (gapless или с кроссфейдом) и выйти.
+    #[command(help_template = SUB_TEMPLATE, override_usage = "yamusicrs debug play [--crossfade СЕК] ФАЙЛ…")]
+    Play(PlayArgs),
+    /// Прогнать программу TinyMl: ответ get-offline-recommender на треках из json запроса.
+    #[command(
+        help_template = SUB_TEMPLATE,
+        override_usage = "yamusicrs debug tinyml ПРОГРАММА ЗАПРОС",
+        after_help = "TINYML_LOG=4 — печатать логи самой программы (1 ошибки … 5 отладка)."
+    )]
+    Tinyml {
+        /// JSON-ответ сервера с `offlineRecommenderSource`.
+        #[arg(value_name = "ПРОГРАММА", help_heading = "Аргументы")]
+        program: PathBuf,
+        /// JSON-запрос: списки доступных треков.
+        #[arg(value_name = "ЗАПРОС", help_heading = "Аргументы")]
+        request: PathBuf,
+    },
+}
+
+#[derive(Args)]
+struct PlayArgs {
+    /// Аудиофайлы (FLAC, M4A, MP3).
+    #[arg(value_name = "ФАЙЛ", required = true, help_heading = "Аргументы")]
+    files: Vec<PathBuf>,
+    /// Длина кроссфейда между файлами, сек; по умолчанию 0 — встык.
+    #[arg(long, value_name = "СЕК", default_value_t = 0.0, hide_default_value = true, help_heading = "Параметры")]
     crossfade: f32,
 }
 
@@ -87,7 +192,7 @@ fn vulkan_drivers() -> Option<String> {
 
 async fn run() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| cli_error(e));
     let paths = config::Paths::new();
 
     std::fs::create_dir_all(&paths.log_dir)?;
@@ -101,30 +206,106 @@ async fn run() -> color_eyre::Result<()> {
         )
         .init();
 
+    match cli.command {
+        Some(Command::Debug { what: Debug::Play(p) }) => return play_files(p.files, p.crossfade).await,
+        Some(Command::Debug {
+            what: Debug::Tinyml { program, request },
+        }) => return tinyml_bench(&program, &request),
+        Some(Command::Paths) => {
+            print_paths(&paths);
+            return Ok(());
+        }
+        Some(Command::Logout) => {
+            forget_token(&paths);
+            println!("Токен забыт — при следующем запуске войдёшь заново.");
+            return Ok(());
+        }
+        Some(Command::Login { token: Some(t) }) => save_token(&paths, &t)?,
+        Some(Command::Login { token: None }) => forget_token(&paths),
+        None => {}
+    }
     if cli.logout {
-        let _ = std::fs::remove_file(&paths.token_file);
+        forget_token(&paths);
     }
     if let Some(t) = cli.token {
-        let tok = api::auth::parse_pasted_token(&t).ok_or_else(|| color_eyre::eyre::eyre!("это не похоже на токен"))?;
-        api::auth::StoredToken {
-            access_token: tok,
-            refresh_token: None,
-            expires_at: None,
-        }
-        .save(&paths.token_file)?;
-    }
-
-    if let [program, request] = cli.tinyml_bench.as_slice() {
-        return tinyml_bench(program, request);
-    }
-    if !cli.play.is_empty() {
-        return play_files(cli.play, cli.crossfade).await;
+        save_token(&paths, &t)?;
     }
 
     let cfg = config::Config::load(&paths);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let app = app::App::new(tx, cfg, paths)?;
+    let app = app::App::new(tx, cfg, paths, cli.offline)?;
     ui::run(app, rx).await
+}
+
+/// Ошибки разбора по-русски; справку и версию clap печатает сам.
+fn cli_error(e: clap::Error) -> ! {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let ctx = |k: ContextKind| match e.get(k) {
+        Some(ContextValue::String(s)) => s.clone(),
+        Some(ContextValue::Strings(v)) => v.join(", "),
+        _ => String::new(),
+    };
+    let msg = match e.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => e.exit(),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => e.exit(),
+        ErrorKind::UnknownArgument => format!("неизвестный параметр «{}»", ctx(ContextKind::InvalidArg)),
+        ErrorKind::InvalidSubcommand => format!("нет такой команды: «{}»", ctx(ContextKind::InvalidSubcommand)),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => format!(
+            "неверное значение «{}» для {}",
+            ctx(ContextKind::InvalidValue),
+            ctx(ContextKind::InvalidArg)
+        ),
+        ErrorKind::MissingRequiredArgument => format!("не хватает аргумента: {}", ctx(ContextKind::InvalidArg)),
+        ErrorKind::MissingSubcommand => "нужна команда".into(),
+        ErrorKind::TooManyValues | ErrorKind::ArgumentConflict => {
+            format!("лишнее или несовместимое: {}", ctx(ContextKind::InvalidArg))
+        }
+        _ => e.to_string().trim_start_matches("error: ").lines().next().unwrap_or("").to_string(),
+    };
+    let hint = match ctx(ContextKind::SuggestedSubcommand) {
+        s if !s.is_empty() => format!("\n  может, имелось в виду: {s}"),
+        _ => match ctx(ContextKind::SuggestedArg) {
+            s if !s.is_empty() && s != "--logout" => format!("\n  может, имелось в виду: {s}"),
+            _ => String::new(),
+        },
+    };
+    eprintln!("ошибка: {msg}{hint}\n\nСправка: yamusicrs --help");
+    std::process::exit(2);
+}
+
+fn forget_token(paths: &config::Paths) {
+    let _ = std::fs::remove_file(&paths.token_file);
+}
+
+fn save_token(paths: &config::Paths, raw: &str) -> color_eyre::Result<()> {
+    let tok = api::auth::parse_pasted_token(raw).ok_or_else(|| color_eyre::eyre::eyre!("это не похоже на токен"))?;
+    api::auth::StoredToken {
+        access_token: tok,
+        refresh_token: None,
+        expires_at: None,
+    }
+    .save(&paths.token_file)?;
+    Ok(())
+}
+
+fn print_paths(paths: &config::Paths) {
+    let cfg = config::Config::load(paths);
+    let data = paths.index_file.parent().unwrap_or(std::path::Path::new("."));
+    let rows = [
+        ("конфиг", paths.config_file.clone()),
+        ("библиотека", cfg.library_dir.clone()),
+        ("индекс библиотеки", paths.index_file.clone()),
+        ("офлайн-снимок", data.join("offline.json")),
+        ("офлайн-волна", data.join("tinyml.json")),
+        ("токен", paths.token_file.clone()),
+        ("состояние", paths.state_file.clone()),
+        ("лог", paths.log_dir.join("yamusicrs.log")),
+    ];
+    for (k, v) in rows {
+        let mark = if v.exists() { " " } else { "·" };
+        println!("{mark} {k:<18} {}", v.display());
+    }
+    println!("\n· — ещё не создан");
 }
 
 async fn play_files(files: Vec<std::path::PathBuf>, crossfade: f32) -> color_eyre::Result<()> {

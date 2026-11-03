@@ -579,7 +579,7 @@ fn err_str(e: impl std::fmt::Display) -> String {
 }
 
 impl App {
-    pub fn new(tx: UnboundedSender<Msg>, cfg: Config, paths: Paths) -> color_eyre::Result<Self> {
+    pub fn new(tx: UnboundedSender<Msg>, cfg: Config, paths: Paths, offline: bool) -> color_eyre::Result<Self> {
         let state = State::load(&paths);
         let data_dir = paths.index_file.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
         let snapshot_path = Snapshot::path(&data_dir);
@@ -722,7 +722,11 @@ impl App {
             stored_token: None,
             cfg,
         };
-        app.start_auth();
+        if offline {
+            app.enter_offline();
+        } else {
+            app.start_auth();
+        }
         Ok(app)
     }
 

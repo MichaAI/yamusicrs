@@ -50,7 +50,17 @@ derivation, `nix build` после правки кода пересобирае�
 В devshell и пакете путь к `libvulkan` вшит в rpath — иначе wgpu его не найдёт и
 блоб молча уйдёт на CPU (в логе будет написано почему).
 
-Флаги: `--logout` — забыть токен, `--token <TOKEN|URL>` — войти готовым токеном.
+Запуск и команды (`yamusicrs --help` — подробно):
+
+```
+yamusicrs                      плеер
+yamusicrs --offline            сразу без сети: снимок библиотеки и офлайн-волна из скачанного
+yamusicrs login [--token Т]    войти заново: по коду с QR или готовым токеном/ссылкой
+yamusicrs logout               забыть токен
+yamusicrs paths                где конфиг, библиотека, состояние и лог
+yamusicrs debug play ФАЙЛ…     проиграть файлы без интерфейса (--crossfade СЕК)
+yamusicrs debug tinyml П З     прогнать программу офлайн-волны
+```
 
 ## Вход
 
