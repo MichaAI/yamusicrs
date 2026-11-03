@@ -68,6 +68,8 @@ pub enum Msg {
     Lyrics {
         track_id: String,
         lyrics: Option<Lyrics>,
+        /// Исходный текст (LRC или строки) — для MPRIS-расширения шелла.
+        raw: Option<String>,
     },
     Audio(audio::Event),
     Mpris(mpris::Command),
@@ -915,12 +917,15 @@ impl App {
         }
         let id = t.id.clone();
         self.spawn(move |c, tx| async move {
-            let lyrics = if sync {
-                c.lyrics(&id, true).await.ok().map(|s| Lyrics::parse_lrc(&s))
-            } else {
-                c.lyrics(&id, false).await.ok().map(|s| Lyrics::plain(&s))
-            };
-            let _ = tx.send(Msg::Lyrics { track_id: id, lyrics });
+            let raw = c.lyrics(&id, sync).await.ok();
+            let lyrics = raw
+                .as_deref()
+                .map(|s| if sync { Lyrics::parse_lrc(s) } else { Lyrics::plain(s) });
+            let _ = tx.send(Msg::Lyrics {
+                track_id: id,
+                lyrics,
+                raw,
+            });
         });
     }
 
@@ -1569,12 +1574,20 @@ impl App {
             self.toast(format!("♡ {}", t.full_title()));
         }
         self.refilter_keep();
+        self.mpris_liked();
         let id = t.full_id();
         self.spawn(move |c, tx| async move {
             if let Err(e) = c.set_like(&id, like).await {
                 let _ = tx.send(Msg::Toast(format!("лайк не сохранился: {e}")));
             }
         });
+    }
+
+    /// Иконка лайка в MPRIS-расширении шелла.
+    fn mpris_liked(&self) {
+        if let Some(n) = &self.now {
+            let _ = self.mpris.send(mpris::Update::Liked(self.is_liked(&n.track)));
+        }
     }
 
     fn dislike_current(&mut self) {
@@ -1713,6 +1726,7 @@ impl App {
                     self.liked = ts.iter().map(|t| t.id.clone()).collect();
                     self.likes = Loadable::Ready(ts);
                     self.refilter_keep();
+                    self.mpris_liked();
                 }
                 Err(e) => self.likes = Loadable::Failed(e),
             },
@@ -1848,11 +1862,14 @@ impl App {
                     Err(e) => tracing::debug!("обложка {key}: {e}"),
                 }
             }
-            Msg::Lyrics { track_id, lyrics } => {
+            Msg::Lyrics { track_id, lyrics, raw } => {
                 if self.now.as_ref().is_some_and(|n| n.track.id == track_id)
                     && let Some(l) = lyrics
                 {
                     self.lyrics = Some((track_id, l));
+                    if let Some(r) = raw {
+                        let _ = self.mpris.send(mpris::Update::Lyrics(r));
+                    }
                 }
             }
             Msg::Audio(ev) => self.on_audio(ev),
@@ -1877,6 +1894,12 @@ impl App {
                 mpris::Command::Seek(d) => self.seek_by(d),
                 mpris::Command::SetPosition(p) => self.seek_to(p),
                 mpris::Command::Volume(v) => self.set_volume(v as f32),
+                mpris::Command::Like => {
+                    if let Some(t) = self.now.as_ref().map(|n| n.track.clone()) {
+                        self.toggle_like(t);
+                    }
+                }
+                mpris::Command::Dislike => self.dislike_current(),
             },
             Msg::Toast(t) => self.toast_err(t),
         }
@@ -2112,6 +2135,7 @@ impl App {
             length: track.duration_secs(),
             art: track.cover_uri().map(|u| api::cover_url(u, 400)),
             pos: pos.secs,
+            liked: self.is_liked(&track),
         });
         let _ = self.mpris.send(mpris::Update::Status {
             playing: !self.player.paused(),

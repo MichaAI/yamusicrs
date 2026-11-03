@@ -52,7 +52,9 @@ unicode-width = "0.2"
 textwrap = "0.16"
 
 # desktop integration
-mpris-server = "0.11"
+# `unstable` — ради `Server::connection()`: на том же соединении живёт расширение MichaAIext.
+mpris-server = { version = "0.11", features = ["unstable"] }
+zbus = "6"
 
 # Для разработки: инкрементально и параллельно — правка пересобирает за секунды, а не минуты.
 [profile.release]
