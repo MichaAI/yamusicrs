@@ -1,6 +1,6 @@
 //! Модели ответов API. Описаны только поля, которые реально используются клиентом.
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Яндекс отдаёт идентификаторы то строкой, то числом — принимаем оба варианта.
 pub fn id_str<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -63,7 +63,7 @@ pub fn cover_url(uri: &str, size: u32) -> String {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Artist {
     /// У исполнителей загруженных пользователем треков id нет — только имя.
@@ -72,7 +72,7 @@ pub struct Artist {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cover {
     pub uri: Option<String>,
@@ -80,7 +80,7 @@ pub struct Cover {
     pub items_uri: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default)]
 pub struct TrackPosition {
     #[serde(default)]
     pub volume: u32,
@@ -88,7 +88,7 @@ pub struct TrackPosition {
     pub index: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Album {
     #[serde(default, deserialize_with = "id_or_empty")]
@@ -146,14 +146,14 @@ impl Album {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewReleases {
     #[serde(default)]
     pub new_releases: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LyricsInfo {
     #[serde(default)]
@@ -162,7 +162,7 @@ pub struct LyricsInfo {
     pub has_available_text_lyrics: bool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct R128 {
     /// Интегральная громкость, LUFS.
     pub i: f32,
@@ -170,7 +170,7 @@ pub struct R128 {
     pub tp: f32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
     #[serde(deserialize_with = "id_str")]
@@ -253,14 +253,14 @@ pub fn join_artists(artists: &[Artist]) -> String {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Owner {
     pub login: Option<String>,
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackShort {
     #[serde(deserialize_with = "id_str")]
@@ -279,7 +279,7 @@ impl TrackShort {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Playlist {
     #[serde(deserialize_with = "id_str")]
@@ -307,7 +307,7 @@ impl Playlist {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     #[serde(default, deserialize_with = "opt_id_str")]
@@ -316,37 +316,37 @@ pub struct Account {
     pub display_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plus {
     #[serde(default)]
     pub has_plus: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AccountStatus {
     pub account: Account,
     pub plus: Option<Plus>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LikesLibrary {
     pub library: LikesTracks,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LikesTracks {
     #[serde(default)]
     pub tracks: Vec<TrackShort>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SearchBlock<T: serde::de::DeserializeOwned> {
     #[serde(default = "Vec::new", deserialize_with = "lenient_vec")]
     pub results: Vec<T>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SearchResult {
     #[serde(default)]
     pub tracks: Option<SearchBlock<Track>>,
@@ -358,7 +358,7 @@ pub struct SearchResult {
     pub playlists: Option<SearchBlock<Playlist>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtistBrief {
     #[serde(default)]
@@ -379,7 +379,7 @@ pub struct ArtistBrief {
     pub discography: Vec<Album>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtistInfo {
     #[serde(default, deserialize_with = "id_or_empty")]
@@ -401,13 +401,13 @@ impl ArtistInfo {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ArtistDescription {
     #[serde(default)]
     pub text: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ArtistCounts {
     pub tracks: u32,
@@ -415,25 +415,25 @@ pub struct ArtistCounts {
     pub also_albums: u32,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtistStats {
     pub last_month_listeners: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ArtistAlbums {
     #[serde(default, deserialize_with = "lenient_vec")]
     pub albums: Vec<Album>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileInfo {
     pub download_info: DownloadInfo,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadInfo {
     pub codec: String,
@@ -457,19 +457,19 @@ impl DownloadInfo {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LyricsDownload {
     pub download_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SequenceItem {
     pub track: Option<Track>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RotorSession {
     pub radio_session_id: String,
@@ -478,7 +478,7 @@ pub struct RotorSession {
     pub sequence: Vec<SequenceItem>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RotorTracks {
     pub batch_id: Option<String>,
@@ -487,13 +487,13 @@ pub struct RotorTracks {
 }
 
 /// «Колесо» Моей волны (`POST api.music.yandex.ru/wheel/new`) — персональные пресеты.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Wheel {
     #[serde(default, deserialize_with = "lenient_vec")]
     pub items: Vec<WheelItem>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WheelItem {
     /// `DEFAULT` или `CONTROL_ACCENT` (служебные: «Назад к привычному», «Встряхнуть»).
     #[serde(default)]
@@ -501,13 +501,13 @@ pub struct WheelItem {
     pub data: WheelData,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WheelData {
     pub wave: Option<WheelWave>,
     pub agent: Option<WheelAgent>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WheelWave {
     pub name: String,
     pub description: Option<String>,
@@ -515,12 +515,12 @@ pub struct WheelWave {
     pub seeds: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WheelAgent {
     pub cover: Option<AgentCover>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentCover {
     pub uri: Option<String>,
     /// Фирменный цвет агента, `#RRGGBB`.

@@ -16,6 +16,7 @@ use crate::fetch::{Fetcher, Origin};
 use crate::library::Library;
 use crate::lyrics::Lyrics;
 use crate::mpris;
+use crate::offline::{self, Snapshot};
 use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
 
@@ -39,6 +40,8 @@ pub enum Msg {
     LoggedIn(Result<StoredToken, String>),
     Likes(Result<Vec<Track>, String>),
     Playlists(Result<Vec<Playlist>, String>),
+    /// Треки плейлистов для офлайн-снимка: (`uid:kind`, ревизия, треки).
+    PlaylistSnapshots(Vec<(String, u32, Vec<Track>)>),
     /// Правка плейлиста выполнена: тост; `kind` — что перечитать при ошибке.
     PlaylistOp {
         result: Result<String, String>,
@@ -420,6 +423,10 @@ pub struct App {
     pub screen: Screen,
     client: Option<Client>,
     fetcher: Option<Fetcher>,
+    /// Нет сети: играем только из локальной библиотеки по снимку.
+    pub offline: bool,
+    snapshot: Snapshot,
+    snapshot_path: std::path::PathBuf,
     pub library: Arc<Library>,
     pub player: Player,
     pub account: Option<AccountStatus>,
@@ -560,6 +567,7 @@ fn err_str(e: impl std::fmt::Display) -> String {
 impl App {
     pub fn new(tx: UnboundedSender<Msg>, cfg: Config, paths: Paths) -> color_eyre::Result<Self> {
         let state = State::load(&paths);
+        let snapshot_path = Snapshot::path(paths.index_file.parent().unwrap_or(std::path::Path::new(".")));
         let volume = state.volume.unwrap_or(cfg.volume);
         let audio_tx = tx.clone();
         let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel();
@@ -596,6 +604,9 @@ impl App {
             screen: Screen::Connecting(None),
             client: None,
             fetcher: None,
+            offline: false,
+            snapshot: Snapshot::load(&snapshot_path),
+            snapshot_path,
             library,
             player,
             account: None,
@@ -766,6 +777,10 @@ impl App {
             self.toast_err(format!("не удалось сохранить токен: {e}"));
         }
         self.stored_token = Some(tok);
+        if self.offline {
+            self.offline = false;
+            self.toast("Сеть вернулась — снова онлайн".into());
+        }
         let fetcher = Fetcher::new(client.clone(), self.library.clone(), self.cfg.quality);
         if let Some(q) = self.state.quality {
             fetcher.set_quality(q);
@@ -903,6 +918,15 @@ impl App {
         if let Some(c) = pl.cover_uri() {
             let c = c.to_string();
             self.fetch_cover(&c);
+        }
+        if self.offline {
+            let r = self
+                .snapshot
+                .tracks_of(&pl)
+                .map(|ts| self.offline_tracks(ts.clone()))
+                .ok_or_else(|| "этот плейлист не успел сохраниться для офлайна".to_string());
+            let _ = self.tx.send(Msg::Tracks { view_id: id, result: r });
+            return;
         }
         self.spawn(move |c, tx| async move {
             let r = async {
@@ -1428,7 +1452,7 @@ impl App {
         let Some(token) = self.alloc_token(idx) else {
             return;
         };
-        let Some(fetcher) = self.fetcher.clone() else {
+        let Some(fetcher) = self.opener() else {
             return;
         };
         if let Some(now) = &self.now {
@@ -1455,6 +1479,15 @@ impl App {
                 result: r,
             });
         });
+    }
+
+    /// Чем открывать треки: загрузчик, а без сети — только локальная библиотека.
+    fn opener(&self) -> Option<Opener> {
+        match &self.fetcher {
+            Some(f) => Some(Opener::Online(f.clone())),
+            None if self.offline => Some(Opener::Offline(self.library.clone())),
+            None => None,
+        }
     }
 
     fn normalize(&self) -> bool {
@@ -1519,7 +1552,69 @@ impl App {
         if self.repeat_one {
             return Some(from);
         }
-        (from + 1 < self.queue.items.len()).then_some(from + 1)
+        // Недоступные (а без сети — и не скачанные) пропускаем, а не спотыкаемся о них.
+        (from + 1..self.queue.items.len()).find(|&i| self.queue.items[i].available)
+    }
+
+    // ── офлайн ───────────────────────────────────────────────────────────────
+
+    /// Без сети играет только скачанное: остальное помечается недоступным.
+    fn offline_tracks(&self, mut ts: Vec<Track>) -> Vec<Track> {
+        for t in &mut ts {
+            t.available &= self.library.contains(&t.id);
+        }
+        ts
+    }
+
+    /// Сети нет, но есть снимок — открываем библиотеку и играем скачанное.
+    /// Подключение тем временем повторяется; когда пройдёт, приложение станет онлайн.
+    fn enter_offline(&mut self) {
+        self.offline = true;
+        self.screen = Screen::Main;
+        let likes = self.offline_tracks(self.snapshot.likes.clone());
+        self.liked = likes.iter().map(|t| t.id.clone()).collect();
+        self.likes = Loadable::Ready(likes);
+        self.playlists = Loadable::Ready(self.snapshot.playlists.clone());
+        self.wave.items = Loadable::Failed("нет сети".into());
+        if self.queue.items.is_empty()
+            && let Some(r) = self.state.resume.clone()
+        {
+            let ts: Vec<Track> = r.ids.iter().filter_map(|id| self.snapshot.find(id).cloned()).collect();
+            let ts = self.offline_tracks(ts);
+            if let Some(pos) = ts.iter().position(|t| t.available) {
+                self.replace_queue(ts, QueueKind::List, r.title);
+                self.play_index_at(pos, 0.0, true);
+            }
+        }
+        let (n, _) = self.library.stats();
+        self.toast(format!("Нет сети — офлайн: играет скачанное ({n} треков)"));
+    }
+
+    /// Треки плейлистов для снимка: только те, у кого сменилась ревизия, по одному запросу.
+    fn sync_snapshot_playlists(&mut self, pls: &[Playlist]) {
+        let keep: HashSet<String> = pls.iter().map(offline::key).collect();
+        self.snapshot.playlist_tracks.retain(|k, _| keep.contains(k));
+        let stale: Vec<Playlist> = pls.iter().filter(|p| self.snapshot.stale(p)).cloned().collect();
+        if stale.is_empty() {
+            self.snapshot.save(self.snapshot_path.clone());
+            return;
+        }
+        self.spawn(move |c, tx| async move {
+            let mut out = Vec::new();
+            for pl in stale {
+                let r = async {
+                    let full = c.playlist(&pl.uid, &pl.kind).await?;
+                    let rev = full.revision;
+                    Ok::<_, ApiError>((rev, c.playlist_tracks(&full).await?))
+                }
+                .await;
+                match r {
+                    Ok((rev, ts)) => out.push((offline::key(&pl), rev, ts)),
+                    Err(e) => tracing::warn!("офлайн-снимок «{}»: {e}", pl.title),
+                }
+            }
+            let _ = tx.send(Msg::PlaylistSnapshots(out));
+        });
     }
 
     /// Заранее открывает следующий трек (старт загрузки) и отдаёт его декодеру для gapless.
@@ -1545,7 +1640,7 @@ impl App {
         let Some(token) = self.alloc_token(idx) else {
             return;
         };
-        let Some(fetcher) = self.fetcher.clone() else {
+        let Some(fetcher) = self.opener() else {
             return;
         };
         self.next_loaded = Some(token);
@@ -2065,6 +2160,9 @@ impl App {
             Msg::ConnectError(e) => {
                 if let Screen::Connecting(err) = &mut self.screen {
                     *err = Some(e);
+                    if !self.snapshot.is_empty() {
+                        self.enter_offline();
+                    }
                 }
             }
             Msg::DeviceCode(r) => {
@@ -2100,6 +2198,8 @@ impl App {
             Msg::Likes(r) => match r {
                 Ok(ts) => {
                     self.liked = ts.iter().map(|t| t.id.clone()).collect();
+                    self.snapshot.likes = ts.clone();
+                    self.snapshot.save(self.snapshot_path.clone());
                     self.likes = Loadable::Ready(ts);
                     self.refilter_keep();
                     self.mpris_liked();
@@ -2114,9 +2214,19 @@ impl App {
             }
             Msg::Playlists(r) => {
                 self.playlists = match r {
-                    Ok(p) => Loadable::Ready(p),
+                    Ok(p) => {
+                        self.snapshot.playlists = p.clone();
+                        self.sync_snapshot_playlists(&p);
+                        Loadable::Ready(p)
+                    }
                     Err(e) => Loadable::Failed(e),
                 }
+            }
+            Msg::PlaylistSnapshots(v) => {
+                for (k, rev, ts) in v {
+                    self.snapshot.playlist_tracks.insert(k, (rev, ts));
+                }
+                self.snapshot.save(self.snapshot_path.clone());
             }
             Msg::PlaylistOp {
                 result,
@@ -2351,7 +2461,7 @@ impl App {
         let Some(track) = self.tokens.get(&token).map(|t| t.2.clone()) else {
             return;
         };
-        let Some(fetcher) = self.fetcher.clone() else {
+        let Some(fetcher) = self.opener() else {
             return;
         };
         self.requested = Some(token);
@@ -3512,5 +3622,23 @@ mod tests {
         assert_eq!(super::qwerty('n'), 'n');
         assert_eq!(super::qwerty('?'), '?');
         assert_eq!(super::qwerty('+'), '+');
+    }
+}
+
+#[derive(Clone)]
+enum Opener {
+    Online(Fetcher),
+    Offline(Arc<Library>),
+}
+
+impl Opener {
+    async fn open(&self, t: &Track) -> color_eyre::Result<(audio::Source, Origin)> {
+        match self {
+            Opener::Online(f) => f.open(t).await,
+            Opener::Offline(lib) => lib
+                .lookup(&t.id)
+                .map(|(p, _)| (audio::Source::File(p), Origin::Library))
+                .ok_or_else(|| color_eyre::eyre::eyre!("нет в библиотеке, а сети нет")),
+        }
     }
 }

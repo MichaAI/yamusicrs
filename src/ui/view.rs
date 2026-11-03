@@ -618,6 +618,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let left_w: usize = spans.iter().map(|s| s.content.width()).sum();
 
     let mut right = Vec::new();
+    if app.offline {
+        right.push(Span::styled("⊘ офлайн  ", Style::new().fg(ctx.p.accent2.color()).add_modifier(Modifier::BOLD)));
+    }
     if let Some(acc) = &app.account {
         let name = acc
             .account

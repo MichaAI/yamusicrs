@@ -6,6 +6,7 @@ mod fetch;
 mod library;
 mod lyrics;
 mod mpris;
+mod offline;
 mod render;
 mod ui;
 
