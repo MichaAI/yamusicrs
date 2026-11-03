@@ -39,6 +39,12 @@ pub enum Msg {
     LoggedIn(Result<StoredToken, String>),
     Likes(Result<Vec<Track>, String>),
     Playlists(Result<Vec<Playlist>, String>),
+    /// Правка плейлиста выполнена: тост; `kind` — что перечитать при ошибке.
+    PlaylistOp {
+        result: Result<String, String>,
+        kind: Option<String>,
+        reload_list: bool,
+    },
     Releases(Result<Vec<api::Album>, String>),
     Tracks {
         view_id: u64,
@@ -121,6 +127,13 @@ impl<T> Loadable<T> {
             _ => None,
         }
     }
+
+    pub fn ready_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Loadable::Ready(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 /// Строка в результатах поиска.
@@ -143,6 +156,122 @@ pub enum Popup {
     },
     /// У трека несколько исполнителей — к кому перейти.
     Artists { list: Vec<api::Artist>, sel: usize },
+    /// В какой из своих плейлистов добавить трек; последняя строка — новый плейлист.
+    AddToPlaylist {
+        track: Track,
+        /// (kind, название) своих плейлистов.
+        list: Vec<(String, String)>,
+        sel: usize,
+    },
+    /// Ввод строки (название плейлиста).
+    Input {
+        title: &'static str,
+        text: String,
+        action: InputAction,
+    },
+    /// Подтверждение необратимого: y/Enter — да.
+    Confirm { text: String, action: ConfirmAction },
+}
+
+pub enum InputAction {
+    /// Новый плейлист; трек, который сразу в него добавить.
+    Create(Option<Track>),
+    Rename(String),
+}
+
+pub enum ConfirmAction {
+    DeletePlaylist(String, String),
+    RemoveTrack { kind: String, at: usize, track: Track },
+}
+
+/// Правки плейлистов исполняются по одной: каждой нужна свежая ревизия.
+pub enum PlOp {
+    Create { title: String, add: Option<String> },
+    Rename { kind: String, title: String },
+    Delete { kind: String, title: String },
+    Append { kind: String, title: String, track: String },
+    /// `at` — позиция в показанном списке (подсказка: настоящую ищем по id в заголовке).
+    Remove { kind: String, at: usize, track: String },
+    /// Поставить `track` на место `neighbor` (соседа сверху или снизу).
+    Move { kind: String, at: usize, track: String, neighbor: String },
+}
+
+/// Позиция трека `id` в плейлисте, ближайшая к подсказке `hint` (трек может повторяться).
+fn find_pos(pl: &Playlist, full_id: &str, hint: usize) -> Option<usize> {
+    let id = full_id.split(':').next().unwrap_or(full_id);
+    pl.tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.id == id)
+        .min_by_key(|(i, _)| i.abs_diff(hint))
+        .map(|(i, _)| i)
+}
+
+async fn run_pl_op(c: &Client, op: PlOp) -> (Result<String, String>, Option<String>, bool) {
+    let (kind, reload) = match &op {
+        PlOp::Create { .. } => (None, true),
+        PlOp::Rename { kind, .. } | PlOp::Delete { kind, .. } | PlOp::Append { kind, .. } => (Some(kind.clone()), true),
+        PlOp::Remove { kind, .. } | PlOp::Move { kind, .. } => (Some(kind.clone()), false),
+    };
+    let r: api::Result<String> = async {
+        match op {
+            PlOp::Create { title, add } => {
+                let pl = c.playlist_create(&title).await?;
+                if let Some(t) = add {
+                    c.playlist_insert(&pl.kind, pl.revision, 0, &t).await?;
+                    return Ok(format!("Создан «{title}», трек добавлен"));
+                }
+                Ok(format!("Создан плейлист «{title}»"))
+            }
+            PlOp::Rename { kind, title } => {
+                c.playlist_rename(&kind, &title).await?;
+                Ok(format!("Плейлист переименован: «{title}»"))
+            }
+            PlOp::Delete { kind, title } => {
+                c.playlist_delete(&kind).await?;
+                Ok(format!("Плейлист «{title}» удалён"))
+            }
+            PlOp::Append { kind, title, track } => {
+                let h = c.playlist_header(&kind).await?;
+                let at = h.track_count.map(|n| n as usize).unwrap_or(h.tracks.len());
+                c.playlist_insert(&kind, h.revision, at, &track).await?;
+                Ok(format!("Добавлено в «{title}»"))
+            }
+            PlOp::Remove { kind, at, track } => {
+                let h = c.playlist_header(&kind).await?;
+                let pos = find_pos(&h, &track, at).ok_or_else(|| api::ApiError::Api {
+                    status: 0,
+                    name: "not-found".into(),
+                    message: "трека уже нет в плейлисте".into(),
+                })?;
+                let id = h.tracks[pos].full_id();
+                c.playlist_remove(&kind, h.revision, pos, &id).await?;
+                Ok("Убрано из плейлиста".into())
+            }
+            PlOp::Move {
+                kind,
+                at,
+                track,
+                neighbor,
+            } => {
+                let h = c.playlist_header(&kind).await?;
+                let from = find_pos(&h, &track, at);
+                let to = find_pos(&h, &neighbor, at);
+                let (Some(from), Some(to)) = (from, to) else {
+                    return Err(api::ApiError::Api {
+                        status: 0,
+                        name: "not-found".into(),
+                        message: "плейлист изменился".into(),
+                    });
+                };
+                let id = h.tracks[from].full_id();
+                c.playlist_move(&kind, h.revision, from, to, &id).await?;
+                Ok(String::new())
+            }
+        }
+    }
+    .await;
+    (r.map_err(err_str), kind, reload)
 }
 
 /// Идентификатор уведомления «сейчас играет» (OSC 99): с тем же id kitty обновляет его на месте.
@@ -165,6 +294,8 @@ pub enum View {
         subtitle: String,
         cover: Option<String>,
         tracks: Loadable<Vec<Track>>,
+        /// `kind` своего плейлиста — тогда треки можно убирать и переставлять.
+        playlist: Option<String>,
     },
     Artist {
         id: u64,
@@ -357,6 +488,8 @@ pub struct App {
     pub repeat_one: bool,
     pub shuffle: bool,
     mpris: UnboundedSender<mpris::Update>,
+    /// Очередь правок плейлистов (исполняются по одной).
+    pl_ops: Option<UnboundedSender<PlOp>>,
     pub quit: bool,
     /// Пользователь сам переключил трек — смена токена не «естественный» конец.
     user_switch: bool,
@@ -532,6 +665,7 @@ impl App {
             repeat_one: false,
             shuffle: false,
             mpris,
+            pl_ops: None,
             quit: false,
             user_switch: false,
             error_streak: 0,
@@ -637,6 +771,24 @@ impl App {
             fetcher.set_quality(q);
         }
         self.fetcher = Some(fetcher);
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<PlOp>();
+        let (pc, mtx) = (client.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            while let Some(op) = prx.recv().await {
+                let (result, kind, reload_list) = run_pl_op(&pc, op).await;
+                if mtx
+                    .send(Msg::PlaylistOp {
+                        result,
+                        kind,
+                        reload_list,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.pl_ops = Some(ptx);
         self.client = Some(client);
         if status.plus.as_ref().is_some_and(|p| !p.has_plus) {
             self.toast_err("Без Плюса будут только 30-секундные превью".into());
@@ -731,6 +883,7 @@ impl App {
 
     fn open_playlist(&mut self, pl: Playlist) {
         let id = self.new_view_id();
+        let own = self.is_own(&pl);
         let subtitle = format!(
             "{} · {} треков",
             pl.owner
@@ -745,6 +898,7 @@ impl App {
             subtitle,
             cover: pl.cover_uri().map(str::to_owned),
             tracks: Loadable::Loading,
+            playlist: own.then(|| pl.kind.clone()),
         });
         if let Some(c) = pl.cover_uri() {
             let c = c.to_string();
@@ -773,6 +927,7 @@ impl App {
             subtitle,
             cover: album.cover_uri().map(str::to_owned),
             tracks: Loadable::Loading,
+            playlist: None,
         });
         if let Some(c) = album.cover_uri() {
             let c = c.to_string();
@@ -1597,6 +1752,181 @@ impl App {
         }
     }
 
+    // ── правка плейлистов ────────────────────────────────────────────────────
+
+    fn is_own(&self, pl: &Playlist) -> bool {
+        self.client.as_ref().is_some_and(|c| c.uid == pl.uid)
+    }
+
+    fn pl_op(&self, op: PlOp) {
+        if let Some(tx) = &self.pl_ops {
+            let _ = tx.send(op);
+        }
+    }
+
+    /// P: выбрать свой плейлист для выделенного (или играющего) трека.
+    fn add_to_playlist(&mut self) {
+        let Some(track) = self.target_track() else { return };
+        let list: Vec<(String, String)> = self
+            .playlists
+            .ready()
+            .map(|v| {
+                v.iter()
+                    .filter(|p| self.is_own(p))
+                    .map(|p| (p.kind.clone(), p.title.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.popup = Some(Popup::AddToPlaylist { track, list, sel: 0 });
+    }
+
+    /// Плейлист под курсором на вкладке «Плейлисты», если он свой.
+    fn selected_own_playlist(&self) -> Option<Playlist> {
+        if !matches!(self.page().view, View::Playlists) {
+            return None;
+        }
+        let pl = self.playlists.ready()?.get(self.page().sel)?;
+        self.is_own(pl).then(|| pl.clone())
+    }
+
+    /// Свой плейлист, открытый на текущей странице: (kind, позиция трека, трек).
+    fn playlist_track_at_cursor(&self) -> Option<(String, usize, Track)> {
+        let View::Tracks {
+            playlist: Some(kind),
+            tracks,
+            ..
+        } = &self.page().view
+        else {
+            return None;
+        };
+        let at = self.sel_index();
+        Some((kind.clone(), at, tracks.ready()?.get(at)?.clone()))
+    }
+
+    fn confirm_remove_track(&mut self) {
+        let Some((kind, at, track)) = self.playlist_track_at_cursor() else {
+            return;
+        };
+        self.popup = Some(Popup::Confirm {
+            text: format!("Убрать «{}» из плейлиста?", track.full_title()),
+            action: ConfirmAction::RemoveTrack { kind, at, track },
+        });
+    }
+
+    /// Shift+↑/↓ (K/J) в своём плейлисте: сдвинуть трек на одну позицию.
+    fn move_track(&mut self, d: isize) {
+        if self.page().filtered.is_some() {
+            self.toast("Сначала сними фильтр — переставлять можно только в полном списке".into());
+            return;
+        }
+        let Some((kind, at, track)) = self.playlist_track_at_cursor() else {
+            return;
+        };
+        let to = at as isize + d;
+        let View::Tracks { tracks, .. } = &mut self.page_mut().view else {
+            return;
+        };
+        let Some(ts) = tracks.ready_mut() else { return };
+        if to < 0 || to as usize >= ts.len() {
+            return;
+        }
+        let to = to as usize;
+        let neighbor = ts[to].full_id();
+        ts.swap(at, to);
+        self.page_mut().sel = to;
+        self.pl_op(PlOp::Move {
+            kind,
+            at,
+            track: track.full_id(),
+            neighbor,
+        });
+    }
+
+    /// Перечитать открытые страницы плейлиста `kind` (после неудачной правки).
+    fn reload_playlist_views(&mut self, kind: &str) {
+        let Some(pl) = self
+            .playlists
+            .ready()
+            .and_then(|v| v.iter().find(|p| p.kind == kind && self.is_own(p)))
+            .cloned()
+        else {
+            return;
+        };
+        let ids: Vec<u64> = self
+            .stack
+            .iter()
+            .filter_map(|p| match &p.view {
+                View::Tracks {
+                    id,
+                    playlist: Some(k),
+                    ..
+                } if k == kind => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in ids {
+            let pl = pl.clone();
+            self.spawn(move |c, tx| async move {
+                let r = async {
+                    let full = c.playlist(&pl.uid, &pl.kind).await?;
+                    c.playlist_tracks(&full).await
+                }
+                .await
+                .map_err(err_str);
+                let _ = tx.send(Msg::Tracks { view_id: id, result: r });
+            });
+        }
+    }
+
+    fn input_submit(&mut self, text: String, action: InputAction) {
+        let title = text.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        match action {
+            InputAction::Create(track) => self.pl_op(PlOp::Create {
+                title,
+                add: track.map(|t| t.full_id()),
+            }),
+            InputAction::Rename(kind) => {
+                if let Loadable::Ready(v) = &mut self.playlists
+                    && let Some(p) = v.iter_mut().find(|p| p.kind == kind)
+                {
+                    p.title = title.clone();
+                }
+                self.pl_op(PlOp::Rename { kind, title });
+            }
+        }
+    }
+
+    fn confirm(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::DeletePlaylist(kind, title) => {
+                if let Loadable::Ready(v) = &mut self.playlists {
+                    v.retain(|p| p.kind != kind || p.uid != self.client.as_ref().map_or("", |c| c.uid.as_str()));
+                }
+                self.pl_op(PlOp::Delete { kind, title });
+            }
+            ConfirmAction::RemoveTrack { kind, at, track } => {
+                if let View::Tracks { tracks, .. } = &mut self.page_mut().view
+                    && let Some(ts) = tracks.ready_mut()
+                    && ts.get(at).is_some_and(|t| t.id == track.id)
+                {
+                    ts.remove(at);
+                }
+                self.refilter_keep();
+                let n = self.page_len();
+                let p = self.page_mut();
+                p.sel = p.sel.min(n.saturating_sub(1));
+                self.pl_op(PlOp::Remove {
+                    kind,
+                    at,
+                    track: track.full_id(),
+                });
+            }
+        }
+    }
+
     // ── лайки ────────────────────────────────────────────────────────────────
 
     pub fn is_liked(&self, t: &Track) -> bool {
@@ -1786,6 +2116,25 @@ impl App {
                 self.playlists = match r {
                     Ok(p) => Loadable::Ready(p),
                     Err(e) => Loadable::Failed(e),
+                }
+            }
+            Msg::PlaylistOp {
+                result,
+                kind,
+                reload_list,
+            } => {
+                match result {
+                    Ok(t) if !t.is_empty() => self.toast(t),
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.toast_err(format!("плейлист не изменился: {e}"));
+                        if let Some(k) = &kind {
+                            self.reload_playlist_views(k);
+                        }
+                    }
+                }
+                if reload_list {
+                    self.load_playlists();
                 }
             }
             Msg::Tracks { view_id, result } => {
@@ -2241,8 +2590,15 @@ impl App {
     }
 
     fn popup_move(&mut self, d: isize) {
-        if let Some(Popup::Artists { list, sel }) = &mut self.popup {
-            *sel = (*sel as isize + d).clamp(0, list.len() as isize - 1) as usize;
+        match &mut self.popup {
+            Some(Popup::Artists { list, sel }) => {
+                *sel = (*sel as isize + d).clamp(0, list.len() as isize - 1) as usize;
+            }
+            // Последняя строка — «новый плейлист».
+            Some(Popup::AddToPlaylist { list, sel, .. }) => {
+                *sel = (*sel as isize + d).clamp(0, list.len() as isize) as usize;
+            }
+            _ => {}
         }
     }
 
@@ -2268,17 +2624,58 @@ impl App {
                 }
                 _ => self.popup = Some(Popup::TrackInfo { track, file }),
             },
+            Some(Popup::AddToPlaylist { track, list, .. }) => match list.into_iter().nth(i) {
+                Some((kind, title)) => self.pl_op(PlOp::Append {
+                    kind,
+                    title,
+                    track: track.full_id(),
+                }),
+                None => {
+                    self.popup = Some(Popup::Input {
+                        title: " Новый плейлист ",
+                        text: String::new(),
+                        action: InputAction::Create(Some(track)),
+                    })
+                }
+            },
+            Some(Popup::Confirm { action, .. }) => self.confirm(action),
+            Some(p @ Popup::Input { .. }) => self.popup = Some(p),
             None => {}
         }
     }
 
-    fn on_popup_key(&mut self, k: KeyEvent) {
+    fn on_popup_key(&mut self, raw: KeyEvent) {
+        // Ввод названия — сырые клавиши (кириллица), остальное — по латинской раскладке.
+        if let Some(Popup::Input { text, .. }) = &mut self.popup {
+            match raw.code {
+                KeyCode::Esc => self.popup = None,
+                KeyCode::Enter => {
+                    if let Some(Popup::Input { text, action, .. }) = self.popup.take() {
+                        self.input_submit(text, action);
+                    }
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) if !raw.modifiers.contains(KeyModifiers::CONTROL) => text.push(c),
+                _ => {}
+            }
+            return;
+        }
+        let k = latin_key(raw);
+        if matches!(self.popup, Some(Popup::Confirm { .. })) {
+            match k.code {
+                KeyCode::Enter | KeyCode::Char('y') => self.popup_activate(0),
+                _ => self.popup = None,
+            }
+            return;
+        }
         match k.code {
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('q') => self.popup = None,
             KeyCode::Up | KeyCode::Char('k') => self.popup_move(-1),
             KeyCode::Down | KeyCode::Char('j') => self.popup_move(1),
             KeyCode::Enter => match &self.popup {
-                Some(Popup::Artists { sel, .. }) => self.popup_activate(*sel),
+                Some(Popup::Artists { sel, .. }) | Some(Popup::AddToPlaylist { sel, .. }) => self.popup_activate(*sel),
                 _ => self.popup = None,
             },
             KeyCode::Char('i') if matches!(self.popup, Some(Popup::TrackInfo { .. })) => self.popup_activate(0),
@@ -2590,7 +2987,7 @@ impl App {
             return;
         }
         if self.popup.is_some() {
-            self.on_popup_key(latin_key(k));
+            self.on_popup_key(k);
             return;
         }
         if self.page().filter_editing {
@@ -2723,6 +3120,8 @@ impl App {
                     self.forget_search(&q);
                 }
             }
+            KeyCode::Up if k.modifiers.contains(KeyModifiers::SHIFT) => self.move_track(-1),
+            KeyCode::Down if k.modifiers.contains(KeyModifiers::SHIFT) => self.move_track(1),
             KeyCode::Up | KeyCode::Char('k') => {
                 if matches!(self.page().view, View::Search) && self.page().sel <= 1 {
                     self.search_editing = true;
@@ -2813,6 +3212,34 @@ impl App {
             }
             KeyCode::Char('Q') => self.cycle_quality(),
             KeyCode::Char('N') => self.toggle_normalize(),
+            KeyCode::Char('P') => self.add_to_playlist(),
+            KeyCode::Char('c') if matches!(self.page().view, View::Playlists) => {
+                self.popup = Some(Popup::Input {
+                    title: " Новый плейлист ",
+                    text: String::new(),
+                    action: InputAction::Create(None),
+                });
+            }
+            KeyCode::Char('e') => {
+                if let Some(pl) = self.selected_own_playlist() {
+                    self.popup = Some(Popup::Input {
+                        title: " Переименовать плейлист ",
+                        text: pl.title.clone(),
+                        action: InputAction::Rename(pl.kind.clone()),
+                    });
+                }
+            }
+            KeyCode::Delete if matches!(self.page().view, View::Playlists) => {
+                if let Some(pl) = self.selected_own_playlist() {
+                    self.popup = Some(Popup::Confirm {
+                        text: format!("Удалить плейлист «{}»?", pl.title),
+                        action: ConfirmAction::DeletePlaylist(pl.kind.clone(), pl.title.clone()),
+                    });
+                }
+            }
+            KeyCode::Delete => self.confirm_remove_track(),
+            KeyCode::Char('K') => self.move_track(-1),
+            KeyCode::Char('J') => self.move_track(1),
             KeyCode::Char('x') => self.cycle_crossfade(),
             KeyCode::Char('R') => {
                 self.load_likes();

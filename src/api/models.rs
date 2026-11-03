@@ -288,6 +288,9 @@ pub struct Playlist {
     pub kind: String,
     pub title: String,
     pub track_count: Option<u32>,
+    /// Версия плейлиста: каждое изменение (`change-relative`) должно знать текущую.
+    #[serde(default)]
+    pub revision: u32,
     pub owner: Option<Owner>,
     pub cover: Option<Cover>,
     pub og_image: Option<String>,

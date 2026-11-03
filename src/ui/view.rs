@@ -537,6 +537,44 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             let w = lines.iter().map(Line::width).max().unwrap_or(40) as u16 + 4;
             (" О треке ", w)
         }
+        crate::app::Popup::AddToPlaylist { track, list, sel } => {
+            lines.push(Line::styled(format!("  {}", track.full_title()), ctx.dim()));
+            lines.push(Line::raw(""));
+            let names = list.iter().map(|(_, t)| t.as_str()).chain(std::iter::once("＋ Новый плейлист…"));
+            for (i, name) in names.enumerate() {
+                clickable.push((lines.len(), i));
+                let on = i == *sel;
+                lines.push(Line::from(vec![
+                    Span::styled(if on { "  ▶ " } else { "    " }, ctx.accent()),
+                    Span::styled(
+                        name.to_string(),
+                        if on { ctx.accent().add_modifier(Modifier::BOLD) } else { ctx.fg() },
+                    ),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  Enter — добавить · Esc — закрыть", ctx.dim()));
+            let w = lines.iter().map(Line::width).max().unwrap_or(0).max(36) as u16 + 4;
+            (" В плейлист ", w)
+        }
+        crate::app::Popup::Input { title, text, .. } => {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(text.clone(), ctx.fg().add_modifier(Modifier::BOLD)),
+                Span::styled("▏", ctx.accent()),
+            ]));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  Enter — готово · Esc — отмена", ctx.dim()));
+            let w = (text.width() as u16 + 8).max(44);
+            (*title, w)
+        }
+        crate::app::Popup::Confirm { text, .. } => {
+            lines.push(Line::styled(format!("  {text}"), ctx.fg()));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  y / Enter — да · любая клавиша — нет", ctx.dim()));
+            let w = lines.iter().map(Line::width).max().unwrap_or(0).max(36) as u16 + 4;
+            (" Точно? ", w)
+        }
     };
     let h = lines.len() as u16 + 3;
     let r = centered(area, width.min(area.width.saturating_sub(4)), h.min(area.height));
@@ -2945,6 +2983,9 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("l / L", "♥ играющий / выделенный"),
         ("d", "не рекомендовать (волна)"),
         ("a / A", "в конец очереди / следующим"),
+        ("P", "добавить трек в плейлист"),
+        ("c / e / Del", "плейлисты: новый / переименовать / удалить"),
+        ("Del, K / J", "свой плейлист: убрать трек, сдвинуть вверх / вниз"),
         ("o / i", "альбом / исполнитель (несколько — выбор)"),
         ("клик по подписи на сцене", "название — о треке, исполнитель, альбом"),
         ("w", "запустить Мою волну"),

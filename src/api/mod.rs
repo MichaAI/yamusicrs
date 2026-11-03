@@ -282,6 +282,87 @@ impl Client {
         Ok(())
     }
 
+    // ── правка плейлистов (пути и параметры — как в мобильном клиенте) ───────
+
+    pub async fn playlist_create(&self, title: &str) -> Result<Playlist> {
+        let q = [("title", title.to_string()), ("visibility", "private".into())];
+        self.send(
+            self.req(reqwest::Method::POST, &format!("/users/{}/playlists/create", self.uid))
+                .query(&q),
+        )
+        .await
+    }
+
+    pub async fn playlist_rename(&self, kind: &str, title: &str) -> Result<Playlist> {
+        self.send(
+            self.req(
+                reqwest::Method::POST,
+                &format!("/users/{}/playlists/{kind}/name", self.uid),
+            )
+            .query(&[("value", title)]),
+        )
+        .await
+    }
+
+    pub async fn playlist_delete(&self, kind: &str) -> Result<()> {
+        let _: Value = self
+            .send(self.req(
+                reqwest::Method::POST,
+                &format!("/users/{}/playlists/{kind}/delete", self.uid),
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// Правка состава: `diff` — массив операций insert/delete над позициями.
+    async fn playlist_change(&self, kind: &str, revision: u32, diff: Value) -> Result<Playlist> {
+        self.send(
+            self.req(
+                reqwest::Method::POST,
+                &format!("/users/{}/playlists/{kind}/change-relative", self.uid),
+            )
+            .query(&[("revision", revision.to_string())])
+            .form(&[("diff", diff.to_string())]),
+        )
+        .await
+    }
+
+    pub async fn playlist_insert(&self, kind: &str, revision: u32, at: usize, track_id: &str) -> Result<Playlist> {
+        let diff = json!([{ "op": "insert", "at": at, "tracks": [diff_track(track_id)] }]);
+        self.playlist_change(kind, revision, diff).await
+    }
+
+    pub async fn playlist_remove(&self, kind: &str, revision: u32, at: usize, track_id: &str) -> Result<Playlist> {
+        let diff = json!([{ "op": "delete", "from": at, "to": at + 1, "tracks": [diff_track(track_id)] }]);
+        self.playlist_change(kind, revision, diff).await
+    }
+
+    /// Перестановка — удаление и вставка одной правкой.
+    pub async fn playlist_move(
+        &self,
+        kind: &str,
+        revision: u32,
+        from: usize,
+        to: usize,
+        track_id: &str,
+    ) -> Result<Playlist> {
+        let t = diff_track(track_id);
+        let diff = json!([
+            { "op": "delete", "from": from, "to": from + 1, "tracks": [t.clone()] },
+            { "op": "insert", "at": to, "tracks": [t] },
+        ]);
+        self.playlist_change(kind, revision, diff).await
+    }
+
+    /// Заголовок плейлиста без объектов треков: ревизия и порядок id — для правки.
+    pub async fn playlist_header(&self, kind: &str) -> Result<Playlist> {
+        self.get(
+            &format!("/users/{}/playlists/{kind}", self.uid),
+            &[("rich-tracks", "false".into())],
+        )
+        .await
+    }
+
     pub async fn playlists(&self) -> Result<Vec<Playlist>> {
         self.get(&format!("/users/{}/playlists/list", self.uid), &[]).await
     }
@@ -425,5 +506,13 @@ impl Client {
             .post_json(&format!("/rotor/session/{session}/feedback"), &body)
             .await?;
         Ok(())
+    }
+}
+
+/// `trackId:albumId` → `{"id", "albumId"}` для diff плейлиста.
+fn diff_track(full_id: &str) -> Value {
+    match full_id.split_once(':') {
+        Some((id, album)) => json!({ "id": id, "albumId": album }),
+        None => json!({ "id": full_id }),
     }
 }
