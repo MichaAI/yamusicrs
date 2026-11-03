@@ -396,6 +396,47 @@ impl Client {
             .collect())
     }
 
+    /// «Вы недавно слушали»: треки всех контекстов подряд, свежие первыми, без повторов.
+    /// Полные модели сервер даёт только для первых; остальные догружаются пачкой.
+    pub async fn history(&self) -> Result<Vec<Track>> {
+        let v: Value = self.get("/music-history", &[("fullModelsCount", "50".into())]).await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut slots: Vec<(String, Option<Track>)> = Vec::new();
+        let tabs = v["historyTabs"].as_array().cloned().unwrap_or_default();
+        for item in tabs.iter().flat_map(|t| t["items"].as_array().cloned().unwrap_or_default()) {
+            for t in item["tracks"].as_array().cloned().unwrap_or_default() {
+                let d = &t["data"];
+                let Some(id) = d["itemId"]["trackId"].as_str() else { continue };
+                if !seen.insert(id.to_string()) {
+                    continue;
+                }
+                let full_id = match d["itemId"]["albumId"].as_str() {
+                    Some(a) => format!("{id}:{a}"),
+                    None => id.to_string(),
+                };
+                let track = serde_json::from_value::<Track>(d["fullModel"].clone()).ok();
+                slots.push((full_id, track));
+            }
+        }
+        let missing: Vec<String> = slots.iter().filter(|s| s.1.is_none()).map(|s| s.0.clone()).collect();
+        let mut fetched: std::collections::HashMap<String, Track> = std::collections::HashMap::new();
+        for chunk in missing.chunks(200) {
+            for t in self.tracks(chunk).await? {
+                fetched.insert(t.id.clone(), t);
+            }
+        }
+        Ok(slots
+            .into_iter()
+            .filter_map(|(id, t)| t.or_else(|| fetched.remove(id.split(':').next().unwrap_or(&id))))
+            .collect())
+    }
+
+    /// Чарт «Яндекс Музыки» — обычный плейлист внутри ответа лендинга.
+    pub async fn chart(&self) -> Result<Playlist> {
+        let v: Value = self.get("/landing3/chart", &[]).await?;
+        Ok(serde_json::from_value(v["chart"].clone())?)
+    }
+
     pub async fn album(&self, id: &str) -> Result<Album> {
         self.get(&format!("/albums/{id}/with-tracks"), &[]).await
     }

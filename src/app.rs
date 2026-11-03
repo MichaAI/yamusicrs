@@ -939,6 +939,43 @@ impl App {
         });
     }
 
+    fn open_history(&mut self) {
+        let id = self.new_view_id();
+        self.push(View::Tracks {
+            id,
+            title: "История".into(),
+            subtitle: "недавно слушали, свежие сверху".into(),
+            cover: None,
+            tracks: Loadable::Loading,
+            playlist: None,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = c.history().await.map_err(err_str);
+            let _ = tx.send(Msg::Tracks { view_id: id, result: r });
+        });
+    }
+
+    fn open_chart(&mut self) {
+        let id = self.new_view_id();
+        self.push(View::Tracks {
+            id,
+            title: "Чарт".into(),
+            subtitle: "популярное на Яндекс Музыке прямо сейчас".into(),
+            cover: None,
+            tracks: Loadable::Loading,
+            playlist: None,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = async {
+                let pl = c.chart().await?;
+                c.playlist_tracks(&pl).await
+            }
+            .await
+            .map_err(err_str);
+            let _ = tx.send(Msg::Tracks { view_id: id, result: r });
+        });
+    }
+
     fn open_album(&mut self, album: api::Album) {
         let id = self.new_view_id();
         let subtitle = match album.year {
@@ -3323,6 +3360,8 @@ impl App {
             KeyCode::Char('Q') => self.cycle_quality(),
             KeyCode::Char('N') => self.toggle_normalize(),
             KeyCode::Char('P') => self.add_to_playlist(),
+            KeyCode::Char('h') => self.open_history(),
+            KeyCode::Char('C') => self.open_chart(),
             KeyCode::Char('c') if matches!(self.page().view, View::Playlists) => {
                 self.popup = Some(Popup::Input {
                     title: " Новый плейлист ",
