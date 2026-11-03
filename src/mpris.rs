@@ -2,7 +2,7 @@
 //! Объявляются только поддерживаемые свойства: `Shuffle` и `LoopStatus` по спеке
 //! необязательны, и без них шелл не рисует кнопок, которые ничего не делают.
 //! Плюс расширение `org.mpris.MediaPlayer2.MichaAIext` на том же объекте: две кнопки
-//! (лайк / «не рекомендовать») с SVG-иконками и текст песни в LRC — его читает шелл.
+//! («не рекомендовать» / лайк) с SVG-иконками и текст песни в LRC — его читает шелл.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,9 +23,9 @@ pub enum Command {
     Seek(f64),
     SetPosition(f64),
     Volume(f64),
-    /// Левая кнопка расширения: лайк текущего трека (переключение).
+    /// Правая кнопка расширения: лайк текущего трека (переключение).
     Like,
-    /// Правая кнопка расширения: «не рекомендовать» и дальше.
+    /// Левая кнопка расширения: «не рекомендовать» и дальше.
     Dislike,
 }
 
@@ -273,10 +273,18 @@ impl Player {
 
 // ── расширение MichaAIext ───────────────────────────────────────────────────
 
-/// Иконки рисуются цветом темы шелла (`currentColor`), ~18px.
-const HEART: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 20.5s-7.6-4.7-9.3-9.5C1.5 7.6 3.8 4.3 7.3 4.3c2 0 3.6 1.1 4.7 2.9 1.1-1.8 2.7-2.9 4.7-2.9 3.5 0 5.8 3.3 4.6 6.7-1.7 4.8-9.3 9.5-9.3 9.5z"/></svg>"#;
-const HEART_FULL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 20.5s-7.6-4.7-9.3-9.5C1.5 7.6 3.8 4.3 7.3 4.3c2 0 3.6 1.1 4.7 2.9 1.1-1.8 2.7-2.9 4.7-2.9 3.5 0 5.8 3.3 4.6 6.7-1.7 4.8-9.3 9.5-9.3 9.5z"/></svg>"#;
-const DISLIKE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12"/></svg>"#;
+/// Иконки рисуются цветом темы шелла (`currentColor`), ~18px. Контуры — Tabler Icons (MIT):
+/// только штрихи, без масок — их понимает и QtSvg.
+const SVG_OPEN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#;
+const HEART_PATH: &str = "M19.5 12.572l-7.5 7.428l-7.5 -7.428a5 5 0 1 1 7.5 -6.566a5 5 0 1 1 7.5 6.572";
+
+fn heart(full: bool) -> String {
+    let fill = if full { r#" fill="currentColor""# } else { "" };
+    format!(r#"{SVG_OPEN}<path{fill} d="{HEART_PATH}"/></svg>"#)
+}
+
+/// Зачёркнутое сердце (tabler heart-off).
+const DISLIKE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M19.5 12.572l-1.5 1.428m-2 2l-4 4l-7.5 -7.428a5 5 0 0 1 -1.288 -5.068a4.976 4.976 0 0 1 1.788 -2.504m3 -1c1.56 0 3.05 .727 4 2a5 5 0 1 1 7.5 6.572"/></svg>"#;
 
 struct Ext {
     cmd: UnboundedSender<Command>,
@@ -288,11 +296,11 @@ struct Ext {
 #[interface(name = "org.mpris.MediaPlayer2.MichaAIext")]
 impl Ext {
     fn left(&self) {
-        let _ = self.cmd.send(Command::Like);
+        let _ = self.cmd.send(Command::Dislike);
     }
 
     fn right(&self) {
-        let _ = self.cmd.send(Command::Dislike);
+        let _ = self.cmd.send(Command::Like);
     }
 
     #[zbus(property)]
@@ -384,8 +392,8 @@ async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -
                     {
                         let mut e = ext.get_mut().await;
                         e.lyrics = (tid.clone(), String::new());
-                        e.left_icon = (if liked { HEART_FULL } else { HEART }).into();
-                        e.right_icon = DISLIKE.into();
+                        e.left_icon = DISLIKE.into();
+                        e.right_icon = heart(liked);
                         e.lyrics_changed(ee).await?;
                         e.left_icon_changed(ee).await?;
                         e.right_icon_changed(ee).await?;
@@ -425,13 +433,13 @@ async fn run(cmd: UnboundedSender<Command>, mut rx: UnboundedReceiver<Update>) -
                     p.volume_changed(pe).await
                 }
                 Update::Liked(liked) => {
-                    let icon = if liked { HEART_FULL } else { HEART };
+                    let icon = heart(liked);
                     let mut e = ext.get_mut().await;
-                    if e.left_icon.is_empty() || e.left_icon == icon {
+                    if e.right_icon.is_empty() || e.right_icon == icon {
                         return Ok(());
                     }
-                    e.left_icon = icon.into();
-                    e.left_icon_changed(ee).await
+                    e.right_icon = icon;
+                    e.right_icon_changed(ee).await
                 }
                 Update::Lyrics(text) => {
                     let mut e = ext.get_mut().await;
