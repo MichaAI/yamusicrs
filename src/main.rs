@@ -24,6 +24,9 @@ struct Cli {
     /// Диагностика аудио: проиграть локальные файлы подряд (gapless) через PipeWire и выйти.
     #[arg(long, value_name = "FILE", num_args = 1.., hide = true)]
     play: Vec<std::path::PathBuf>,
+    /// Для --play: кроссфейд между файлами, сек.
+    #[arg(long, value_name = "SECS", default_value_t = 0.0, hide = true)]
+    crossfade: f32,
 }
 
 fn main() -> color_eyre::Result<()> {
@@ -106,7 +109,7 @@ async fn run() -> color_eyre::Result<()> {
     }
 
     if !cli.play.is_empty() {
-        return play_files(cli.play).await;
+        return play_files(cli.play, cli.crossfade).await;
     }
 
     let cfg = config::Config::load(&paths);
@@ -115,27 +118,36 @@ async fn run() -> color_eyre::Result<()> {
     ui::run(app, rx).await
 }
 
-async fn play_files(files: Vec<std::path::PathBuf>) -> color_eyre::Result<()> {
+async fn play_files(files: Vec<std::path::PathBuf>, crossfade: f32) -> color_eyre::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let player = audio::Player::new(tx, 1.0)?;
+    player.set_crossfade(crossfade);
     let mut files = files.into_iter().enumerate();
     let (t, first) = files.next().expect("file");
     player.load(t as u64, audio::Source::File(first), 1.0, 0.0);
+    // Следующий файл ставится заранее (как в приложении), иначе кроссфейду не с чем сводить.
+    let mut queued = t as u64;
+    let mut enqueue = |player: &audio::Player, queued: &mut u64| {
+        if let Some((t, f)) = files.next() {
+            player.enqueue_next(t as u64, audio::Source::File(f), 1.0, true);
+            *queued = t as u64;
+        }
+    };
+    enqueue(&player, &mut queued);
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
                 Some(audio::Event::Drained) | None => break,
-                Some(audio::Event::NeedNext) => {
-                    if let Some((t, f)) = files.next() {
-                        player.enqueue_next(t as u64, audio::Source::File(f), 1.0);
-                    }
-                }
+                Some(audio::Event::NeedNext) => enqueue(&player, &mut queued),
                 Some(audio::Event::SeekMiss(..)) => {}
                 Some(audio::Event::Error(_, e)) => color_eyre::eyre::bail!(e),
             },
             _ = tick.tick() => {
                 if let Some(p) = player.position() {
+                    if p.token == queued {
+                        enqueue(&player, &mut queued);
+                    }
                     let i = p.info;
                     println!("#{} {:6.2}s  {} {:?}bit {}Hz", p.token, p.secs, i.codec, i.bits, i.rate);
                 }

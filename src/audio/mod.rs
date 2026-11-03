@@ -52,6 +52,8 @@ pub(crate) struct Shared {
     /// Сэмплов записано декодером.
     written: AtomicU64,
     volume: AtomicU32,
+    /// Длина кроссфейда, сек (f32 в битах); 0 — встык.
+    crossfade: AtomicU32,
     paused: AtomicBool,
     segments: Mutex<VecDeque<Segment>>,
     /// Читающая сторона кольца. Под мьютексом, чтобы декодер мог сделать flush,
@@ -70,6 +72,10 @@ impl Shared {
 
     fn volume(&self) -> f32 {
         f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    fn crossfade_secs(&self) -> f32 {
+        f32::from_bits(self.crossfade.load(Ordering::Relaxed))
     }
 
     /// Выбрасывает всё недоигранное; выброшенное считается «отданным», чтобы шкалы сошлись.
@@ -106,8 +112,14 @@ pub(crate) enum Cmd {
         token: Token,
         source: Source,
         gain: f32,
+        /// Можно ли сводить с текущим (нельзя, например, при повторе трека).
+        crossfade: bool,
     },
     ClearNext,
+    SetGain {
+        token: Token,
+        gain: f32,
+    },
     Seek {
         token: Token,
         secs: f64,
@@ -137,6 +149,7 @@ impl Player {
             played: AtomicU64::new(0),
             written: AtomicU64::new(0),
             volume: AtomicU32::new(volume.to_bits()),
+            crossfade: AtomicU32::new(0f32.to_bits()),
             paused: AtomicBool::new(false),
             segments: Mutex::new(VecDeque::new()),
             cons: Mutex::new(cons),
@@ -179,9 +192,24 @@ impl Player {
     }
 
     /// Следующий трек для бесшовного перехода.
-    pub fn enqueue_next(&self, token: Token, source: Source, gain: f32) {
+    pub fn enqueue_next(&self, token: Token, source: Source, gain: f32, crossfade: bool) {
         self.track(&source);
-        let _ = self.cmd.send(Cmd::Next { token, source, gain });
+        let _ = self.cmd.send(Cmd::Next {
+            token,
+            source,
+            gain,
+            crossfade,
+        });
+    }
+
+    /// Новое усиление (нормализация) для трека `token`; действует на ещё не декодированное.
+    pub fn set_gain(&self, token: Token, gain: f32) {
+        let _ = self.cmd.send(Cmd::SetGain { token, gain });
+    }
+
+    /// Длина кроссфейда в секундах, 0 — встык (gapless).
+    pub fn set_crossfade(&self, secs: f32) {
+        self.shared.crossfade.store(secs.max(0.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn clear_next(&self) {

@@ -16,9 +16,12 @@ pub struct Config {
     /// Громкость при старте, 0..=1.
     pub volume: f32,
     /// Нормализация громкости по R128 из метаданных Яндекса (ломает bit-perfect).
+    /// Переключается клавишей N — выбор запоминается в state.json и перекрывает конфиг.
     pub normalize: bool,
     /// Целевая громкость нормализации, LUFS.
     pub normalize_target_lufs: f32,
+    /// Кроссфейд между треками разных альбомов, сек; 0 — встык. Клавиша x перебирает 0/3/6/10.
+    pub crossfade_secs: f32,
     /// Рисовать обложки через kitty graphics protocol (auto определяется по $TERM).
     pub kitty_images: Option<bool>,
     /// Рисовать блоб на видеокарте (иначе — CPU).
@@ -41,8 +44,9 @@ impl Default for Config {
             library_dir: music.join("YandexMusic"),
             library_max_gb: 0.0,
             volume: 0.8,
-            normalize: false,
+            normalize: true,
             normalize_target_lufs: -14.0,
+            crossfade_secs: 0.0,
             kitty_images: None,
             gpu: true,
             blob_dither: 1,
@@ -128,6 +132,9 @@ pub struct State {
     pub volume: Option<f32>,
     /// Качество, выбранное в интерфейсе (перекрывает конфиг).
     pub quality: Option<Quality>,
+    /// Нормализация и кроссфейд, выбранные клавишами (перекрывают конфиг).
+    pub normalize: Option<bool>,
+    pub crossfade: Option<f32>,
     /// Что играло при выходе — восстанавливается на паузе при следующем запуске.
     pub resume: Option<Resume>,
     /// Недавние поисковые запросы, свежие первыми.

@@ -438,6 +438,7 @@ impl App {
             }
         });
         let player = Player::new(atx, volume)?;
+        player.set_crossfade(state.crossfade.unwrap_or(cfg.crossfade_secs));
         let library = Library::open(cfg.library_dir.clone(), paths.index_file.clone(), cfg.library_max_gb);
 
         let (mtx, mut mrx) = tokio::sync::mpsc::unbounded_channel();
@@ -1301,8 +1302,53 @@ impl App {
         });
     }
 
+    fn normalize(&self) -> bool {
+        self.state.normalize.unwrap_or(self.cfg.normalize)
+    }
+
+    fn crossfade(&self) -> f32 {
+        self.state.crossfade.unwrap_or(self.cfg.crossfade_secs)
+    }
+
+    fn toggle_normalize(&mut self) {
+        let on = !self.normalize();
+        self.state.normalize = Some(on);
+        // Играющий трек: новое усиление и перемотка на текущее место — в кольце звук
+        // уже с прежним усилением. Следующий открываем заново.
+        if let Some(n) = &self.now {
+            let (token, pos) = (n.token, n.pos);
+            let g = self.gain_for(&n.track.clone());
+            self.player.set_gain(token, g);
+            self.seek_to(pos);
+        }
+        self.player.clear_next();
+        self.next_loaded = None;
+        self.schedule_next();
+        self.toast(
+            if on {
+                "Выравнивание громкости: вкл"
+            } else {
+                "Выравнивание громкости: выкл (bit-perfect)"
+            }
+            .into(),
+        );
+    }
+
+    fn cycle_crossfade(&mut self) {
+        const STEPS: [f32; 4] = [0.0, 3.0, 6.0, 10.0];
+        let cur = self.crossfade();
+        let next = STEPS.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(0.0);
+        self.state.crossfade = Some(next);
+        self.player.set_crossfade(next);
+        self.toast(if next > 0.0 {
+            format!("Плавный переход: {next:.0} с (кроме треков одного альбома)")
+        } else {
+            "Плавный переход: выкл (встык)".into()
+        });
+    }
+
     fn gain_for(&self, t: &Track) -> f32 {
-        if !self.cfg.normalize {
+        if !self.normalize() {
             return 1.0;
         }
         match t.r128 {
@@ -1913,7 +1959,12 @@ impl App {
                 if next {
                     if self.next_loaded == Some(token) {
                         self.origins_insert(token, origin);
-                        self.player.enqueue_next(token, src, gain);
+                        // Треки одного альбома подряд (концерт, сюита) сводить нельзя — только встык.
+                        let album = |t: &Track| t.full_id().split_once(':').map(|(_, a)| a.to_string());
+                        let cur = self.now.as_ref().and_then(|n| album(&n.track));
+                        let crossfade = !self.repeat_one
+                            && track.as_ref().map(album).is_none_or(|a| a.is_none() || a != cur);
+                        self.player.enqueue_next(token, src, gain, crossfade);
                     } else {
                         src.cancel();
                     }
@@ -2761,6 +2812,8 @@ impl App {
                 );
             }
             KeyCode::Char('Q') => self.cycle_quality(),
+            KeyCode::Char('N') => self.toggle_normalize(),
+            KeyCode::Char('x') => self.cycle_crossfade(),
             KeyCode::Char('R') => {
                 self.load_likes();
                 self.load_playlists();

@@ -12,7 +12,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::units::{Time, TimeBase};
+use symphonia::core::units::{Time, TimeBase, Timestamp};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::output::Handle;
@@ -28,6 +28,25 @@ struct Active {
     format: Format,
     info: SourceInfo,
     gain: f32,
+    /// Конец трека, сек (если контейнер знает длительность) — для кроссфейда.
+    end_secs: Option<f64>,
+    /// Решение о кроссфейде в следующий трек уже принято.
+    fade_checked: bool,
+}
+
+/// Уходящий трек во время кроссфейда: доигрывает поверх начала следующего.
+struct Fade {
+    from: Active,
+    buf: Vec<f32>,
+    pos: usize,
+    /// Сколько кадров уже смешано и сколько всего длится переход.
+    done: u64,
+    len: u64,
+    ended: bool,
+}
+
+fn secs(tb: Option<TimeBase>, ts: Timestamp) -> Option<f64> {
+    tb.map(|tb| tb.calc_time_saturating(ts).as_secs_f64())
 }
 
 struct Dec {
@@ -36,7 +55,10 @@ struct Dec {
     events: UnboundedSender<Event>,
     out: Handle,
     cur: Option<Active>,
-    next: Option<(Token, Source, f32)>,
+    next: Option<(Token, Source, f32, bool)>,
+    /// Следующий трек, открытый ради кроссфейда, но другого формата: начнётся встык.
+    next_open: Option<Active>,
+    fade: Option<Fade>,
     /// Открытый следующий трек другого формата: ждёт, пока доиграет кольцо.
     pending: Option<Active>,
     /// Последний трек дочитан, ждём `Next` от приложения.
@@ -64,6 +86,8 @@ pub(super) fn spawn(
                 out,
                 cur: None,
                 next: None,
+                next_open: None,
+                fade: None,
                 pending: None,
                 awaiting_next: false,
                 drained_sent: true,
@@ -98,6 +122,9 @@ fn open(token: Token, source: Source, gain: f32) -> Result<Active, String> {
     let decoder = symphonia::default::get_codecs()
         .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|e| format!("декодер: {e}"))?;
+    let end_secs = track
+        .duration
+        .and_then(|d| secs(track.time_base, track.start_ts.saturating_add(d)));
     let rate = params.sample_rate.ok_or("неизвестна частота")?;
     let channels = params.channels.as_ref().map(|c| c.count() as u16).unwrap_or(2);
     let codec = match params.codec {
@@ -126,6 +153,8 @@ fn open(token: Token, source: Source, gain: f32) -> Result<Active, String> {
             bits,
         },
         gain,
+        end_secs,
+        fade_checked: false,
     })
 }
 
@@ -198,20 +227,25 @@ impl Dec {
                     }
                 }
             }
-            Cmd::Next { token, source, gain } => {
+            Cmd::Next {
+                token,
+                source,
+                gain,
+                crossfade,
+            } => {
                 self.drained_sent = false;
                 if self.cur.is_none() && self.pending.is_none() && self.awaiting_next {
                     self.awaiting_next = false;
                     self.start_following(token, source, gain);
                 } else {
-                    if let Some((_, old, _)) = self.next.replace((token, source, gain)) {
-                        old.cancel();
-                    }
+                    self.drop_next();
+                    self.next = Some((token, source, gain, crossfade));
                 }
             }
-            Cmd::ClearNext => {
-                if let Some((_, s, _)) = self.next.take() {
-                    s.cancel();
+            Cmd::ClearNext => self.drop_next(),
+            Cmd::SetGain { token, gain } => {
+                if let Some(a) = self.cur.as_mut().filter(|a| a.token == token) {
+                    a.gain = gain;
                 }
             }
             Cmd::Seek { token, secs } => {
@@ -236,9 +270,8 @@ impl Dec {
         if let Some(a) = self.pending.take() {
             a.source.cancel();
         }
-        if let Some((_, s, _)) = self.next.take() {
-            s.cancel();
-        }
+        self.drop_next();
+        self.fade = None;
         self.leftover.clear();
         self.leftover_pos = 0;
         self.awaiting_next = false;
@@ -267,13 +300,133 @@ impl Dec {
         self.cur = Some(a);
     }
 
+    fn drop_next(&mut self) {
+        if let Some((_, s, _, _)) = self.next.take() {
+            s.cancel();
+        }
+        if let Some(a) = self.next_open.take() {
+            a.source.cancel();
+        }
+    }
+
     fn start_following(&mut self, token: Token, source: Source, gain: f32) {
         match open(token, source, gain) {
-            Ok(a) if Some(a.format) == self.out.current() => self.begin(a, 0.0),
-            Ok(a) => self.pending = Some(a),
+            Ok(a) => self.follow(a),
             Err(e) => {
                 let _ = self.events.send(Event::Error(token, e));
             }
+        }
+    }
+
+    fn follow(&mut self, a: Active) {
+        if Some(a.format) == self.out.current() {
+            self.begin(a, 0.0);
+        } else {
+            self.pending = Some(a);
+        }
+    }
+
+    /// До конца текущего трека осталось не больше длины кроссфейда — начинаем переход:
+    /// следующий трек становится текущим (с него идёт отсчёт позиции), а уходящий
+    /// доигрывает поверх, затухая.
+    fn maybe_crossfade(&mut self, pts_end: Timestamp) {
+        let fade_secs = self.shared.crossfade_secs();
+        let Some(a) = self.cur.as_mut() else { return };
+        if a.fade_checked || fade_secs <= 0.0 || self.fade.is_some() {
+            return;
+        }
+        let (Some(end), Some(now)) = (a.end_secs, secs(a.time_base, pts_end)) else {
+            return;
+        };
+        let remaining = end - now;
+        if remaining > fade_secs as f64 || !self.next.as_ref().is_some_and(|n| n.3) {
+            return;
+        }
+        a.fade_checked = true;
+        // Хвост короче полсекунды — переход не успеет прозвучать, обычный gapless.
+        if remaining < 0.5 {
+            return;
+        }
+        let (token, source, gain, _) = self.next.take().expect("next");
+        let next = match open(token, source, gain) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = self.events.send(Event::Error(token, e));
+                return;
+            }
+        };
+        if next.format != a.format {
+            self.next_open = Some(next);
+            return;
+        }
+        let len = (remaining * a.format.rate as f64) as u64;
+        let from = self.cur.take().expect("cur");
+        self.fade = Some(Fade {
+            from,
+            buf: Vec::new(),
+            pos: 0,
+            done: 0,
+            len,
+            ended: false,
+        });
+        self.begin(next, 0.0);
+    }
+
+    /// Следующий сэмпл уходящего трека; декодирует пакеты по мере надобности.
+    fn fade_sample(f: &mut Fade, scratch: &mut Vec<f32>) -> f32 {
+        while f.pos >= f.buf.len() && !f.ended {
+            let a = &mut f.from;
+            let packet = match a.reader.next_packet() {
+                Ok(Some(p)) => p,
+                _ => {
+                    f.ended = true;
+                    break;
+                }
+            };
+            if packet.track_id != a.track_id {
+                continue;
+            }
+            match a.decoder.decode(&packet) {
+                Ok(buf) => {
+                    let n = buf.samples_interleaved();
+                    scratch.resize(n, 0.0);
+                    buf.copy_to_slice_interleaved(&mut scratch[..]);
+                    let g = a.gain;
+                    f.buf.clear();
+                    f.buf.extend(scratch.iter().map(|s| s * g));
+                    f.pos = 0;
+                }
+                Err(SymError::DecodeError(_)) => {}
+                Err(_) => f.ended = true,
+            }
+        }
+        if f.pos < f.buf.len() {
+            f.pos += 1;
+            f.buf[f.pos - 1]
+        } else {
+            0.0
+        }
+    }
+
+    /// Подмешивает уходящий трек к только что декодированному началу нового.
+    fn mix_fade(&mut self) {
+        let Some(f) = self.fade.as_mut() else { return };
+        let ch = f.from.format.channels.max(1) as usize;
+        let mut tmp = Vec::new();
+        for (i, frame) in self.scratch.chunks_mut(ch).enumerate() {
+            let t = ((f.done + i as u64) as f32 / f.len.max(1) as f32).min(1.0);
+            let (gin, gout) = (
+                (t * std::f32::consts::FRAC_PI_2).sin(),
+                (t * std::f32::consts::FRAC_PI_2).cos(),
+            );
+            for s in frame {
+                let o = if t < 1.0 { Self::fade_sample(f, &mut tmp) } else { 0.0 };
+                *s = *s * gin + o * gout;
+            }
+        }
+        f.done += (self.scratch.len() / ch) as u64;
+        if f.done >= f.len || (f.ended && f.pos >= f.buf.len()) {
+            self.fade = None;
         }
     }
 
@@ -295,7 +448,10 @@ impl Dec {
                     .time_base
                     .map(|tb| tb.calc_time_saturating(to.actual_ts).as_secs_f64())
                     .unwrap_or(secs);
-                let a = self.cur.take().expect("cur");
+                let mut a = self.cur.take().expect("cur");
+                a.fade_checked = false;
+                // Перемотка во время перехода: уходящий трек больше не нужен.
+                self.fade = None;
                 self.leftover.clear();
                 self.leftover_pos = 0;
                 self.shared.flush();
@@ -332,6 +488,7 @@ impl Dec {
         if packet.track_id != a.track_id {
             return;
         }
+        let pts_end = packet.pts.saturating_add(packet.dur);
         match a.decoder.decode(&packet) {
             Ok(buf) => {
                 let n = buf.samples_interleaved();
@@ -341,9 +498,11 @@ impl Dec {
                     let g = a.gain;
                     self.scratch.iter_mut().for_each(|s| *s *= g);
                 }
+                self.mix_fade();
                 std::mem::swap(&mut self.leftover, &mut self.scratch);
                 self.leftover_pos = 0;
                 self.push_leftover();
+                self.maybe_crossfade(pts_end);
             }
             Err(SymError::DecodeError(e)) => tracing::debug!("битый пакет: {e}"),
             Err(e) => {
@@ -377,8 +536,11 @@ impl Dec {
         if self.cur.take().is_none() {
             return;
         }
+        if let Some(a) = self.next_open.take() {
+            return self.follow(a);
+        }
         match self.next.take() {
-            Some((token, source, gain)) => self.start_following(token, source, gain),
+            Some((token, source, gain, _)) => self.start_following(token, source, gain),
             None => {
                 self.awaiting_next = true;
                 let _ = self.events.send(Event::NeedNext);
