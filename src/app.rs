@@ -44,7 +44,12 @@ pub enum Msg {
     Likes(Result<Vec<Track>, String>),
     LibraryIds(Result<api::LibraryIds, String>),
     LikedAlbums { view_id: u64, result: Result<Vec<api::Album>, String> },
-    LikedArtists { view_id: u64, result: Result<Vec<api::Artist>, String> },
+    ArtistList {
+        view_id: u64,
+        /// Это лайкнутые — пополнить множество лайков.
+        liked: bool,
+        result: Result<Vec<(api::Artist, String)>, String>,
+    },
     Metatags { view_id: u64, result: Result<Vec<api::MetaTree>, String> },
     Metatag { view_id: u64, result: Result<api::Metatag, String> },
     /// Лайк/дизлайк альбома или исполнителя не сохранился — откатить.
@@ -422,8 +427,12 @@ pub enum View {
     },
     /// Лайкнутые альбомы.
     Albums { id: u64, albums: Loadable<Vec<api::Album>> },
-    /// Лайкнутые исполнители.
-    Artists { id: u64, artists: Loadable<Vec<api::Artist>> },
+    /// Список исполнителей (в коллекции, топ месяца): исполнитель и пояснение справа.
+    Artists {
+        id: u64,
+        title: String,
+        artists: Loadable<Vec<(api::Artist, String)>>,
+    },
     /// «Жанры и настроения»: деревья тегов.
     Metatags { id: u64, trees: Loadable<Vec<api::MetaTree>> },
     /// Страница одного тега.
@@ -603,6 +612,7 @@ pub enum PlaylistRow<'a> {
     Own(&'a Playlist),
     LikedAlbums,
     LikedArtists,
+    TopArtists,
 }
 
 pub struct App {
@@ -1270,6 +1280,7 @@ impl App {
         if !self.offline {
             v.push(PlaylistRow::LikedAlbums);
             v.push(PlaylistRow::LikedArtists);
+            v.push(PlaylistRow::TopArtists);
         }
         v
     }
@@ -1858,6 +1869,7 @@ impl App {
                 }
                 Some(PlaylistRow::LikedAlbums) => self.open_liked_albums(),
                 Some(PlaylistRow::LikedArtists) => self.open_liked_artists(),
+                Some(PlaylistRow::TopArtists) => self.open_top_artists(),
                 None => {}
             },
             View::Albums { albums, .. } => {
@@ -1866,7 +1878,7 @@ impl App {
                 }
             }
             View::Artists { artists, .. } => {
-                if let Some(a) = artists.ready().and_then(|v| v.get(sel)).cloned() {
+                if let Some((a, _)) = artists.ready().and_then(|v| v.get(sel)).cloned() {
                     self.open_artist(a);
                 }
             }
@@ -3135,7 +3147,7 @@ impl App {
             View::Artists { artists, .. } => artists
                 .ready()
                 .and_then(|v| v.get(self.page().sel))
-                .map(|a| (Entity::ArtistLike, a.id.clone(), a.name.clone())),
+                .map(|(a, _)| (Entity::ArtistLike, a.id.clone(), a.name.clone())),
             View::Releases => self
                 .releases
                 .as_ref()
@@ -3192,11 +3204,55 @@ impl App {
         let id = self.new_view_id();
         self.push(View::Artists {
             id,
+            title: "Исполнители в коллекции".into(),
             artists: Loadable::Loading,
         });
         self.spawn(move |c, tx| async move {
-            let r = c.liked_artists().await.map_err(err_str);
-            let _ = tx.send(Msg::LikedArtists { view_id: id, result: r });
+            let r = c
+                .liked_artists()
+                .await
+                .map(|v| v.into_iter().map(|a| (a, String::new())).collect())
+                .map_err(err_str);
+            let _ = tx.send(Msg::ArtistList {
+                view_id: id,
+                liked: true,
+                result: r,
+            });
+        });
+    }
+
+    fn open_top_artists(&mut self) {
+        let id = self.new_view_id();
+        self.push(View::Artists {
+            id,
+            title: "Топ исполнителей за месяц".into(),
+            artists: Loadable::Loading,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = c
+                .top_artists()
+                .await
+                .map(|v| {
+                    v.into_iter()
+                        .map(|(a, secs, progress)| {
+                            let mark = match progress.as_str() {
+                                "up" => " ↑",
+                                "down" => " ↓",
+                                "new" => " new",
+                                _ => "",
+                            };
+                            let (h, m) = (secs / 3600, secs / 60 % 60);
+                            let time = if h > 0 { format!("{h} ч {m} мин") } else { format!("{m} мин") };
+                            (a, format!("{time}{mark}"))
+                        })
+                        .collect()
+                })
+                .map_err(err_str);
+            let _ = tx.send(Msg::ArtistList {
+                view_id: id,
+                liked: false,
+                result: r,
+            });
         });
     }
 
@@ -3454,13 +3510,13 @@ impl App {
                     }
                 }
             }
-            Msg::LikedArtists { view_id, result } => {
+            Msg::ArtistList { view_id, liked, result } => {
                 for p in &mut self.stack {
-                    if let View::Artists { id, artists } = &mut p.view
+                    if let View::Artists { id, artists, .. } = &mut p.view
                         && *id == view_id
                     {
-                        if let Ok(v) = &result {
-                            self.liked_artists.extend(v.iter().map(|a| a.id.clone()));
+                        if let (true, Ok(v)) = (liked, &result) {
+                            self.liked_artists.extend(v.iter().map(|(a, _)| a.id.clone()));
                         }
                         *artists = result.clone().into();
                     }

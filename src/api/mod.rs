@@ -595,6 +595,24 @@ impl Client {
         self.send(self.req_as(reqwest::Method::GET, &path, DESKTOP_CLIENT).query(&q)).await
     }
 
+    /// Топ исполнителей за месяц: исполнитель, сколько слушал (с), движение в топе (`up`/`down`/`same`/`new`).
+    pub async fn top_artists(&self) -> Result<Vec<(Artist, u64, String)>> {
+        let v: Value = self
+            .send(self.req_as(reqwest::Method::GET, "/personal/top/artists/month", DESKTOP_CLIENT))
+            .await?;
+        Ok(v["artists"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let a = serde_json::from_value::<Artist>(e["artist"].clone()).ok()?;
+                let secs = e["listenTimeSeconds"].as_u64().unwrap_or(0);
+                let progress = e["top"]["progress"].as_str().unwrap_or("").to_string();
+                Some((a, secs, progress))
+            })
+            .collect())
+    }
+
     /// «Похожие треки» (как в мобильном клиенте).
     pub async fn similar_tracks(&self, track_id: &str) -> Result<Vec<Track>> {
         let numeric = track_id.split(':').next().unwrap_or(track_id);

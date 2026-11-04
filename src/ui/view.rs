@@ -787,9 +787,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         View::Albums { albums, .. } => format!("Альбомы в коллекции · {}", albums.ready().map_or(0, Vec::len)),
         View::Metatags { .. } => "Жанры и настроения".into(),
         View::Metatag { title, .. } => title.clone(),
-        View::Artists { artists, .. } => {
-            format!("Исполнители в коллекции · {}", artists.ready().map_or(0, Vec::len))
-        }
+        View::Artists { title, artists, .. } => format!("{title} · {}", artists.ready().map_or(0, Vec::len)),
     };
     let crumbs = if app.stack.len() > 1 { "‹ " } else { "" };
     let block = card(
@@ -876,7 +874,12 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             };
             let rows: Vec<RowKind> = artists
                 .iter()
-                .map(|a| RowKind::Other(format!("☺ {}", a.name), String::new()))
+                .enumerate()
+                .map(|(i, (a, note))| {
+                    // У топа — место; у коллекции пояснения нет.
+                    let pos = if note.is_empty() { String::new() } else { format!("{:>2}. ", i + 1) };
+                    RowKind::Other(format!("☺ {pos}{}", a.name), note.clone())
+                })
                 .collect();
             mixed_list(f, inner, app, &rows, ctx);
         }
@@ -1524,6 +1527,7 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             PlaylistRow::LikedAlbums => {
                 RowKind::Other("\u{f004} Альбомы".into(), format!("{}", app.liked_albums.len()))
             }
+            PlaylistRow::TopArtists => RowKind::Other("★ Топ исполнителей за месяц".into(), String::new()),
             PlaylistRow::LikedArtists => {
                 RowKind::Other("\u{f004} Исполнители".into(), format!("{}", app.liked_artists.len()))
             }
