@@ -16,10 +16,9 @@ use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::output::Handle;
 use super::resample::Resampler;
 use super::source::Canceller;
-use super::{Cmd, Event, Format, Segment, Shared, Source, SourceInfo, Token};
+use super::{Cmd, Event, Format, Output, Segment, Shared, Source, SourceInfo, Token};
 
 struct Active {
     token: Token,
@@ -279,7 +278,7 @@ struct Dec {
     shared: Arc<Shared>,
     prod: rtrb::Producer<f32>,
     events: UnboundedSender<Event>,
-    out: Handle,
+    out: Arc<dyn Output>,
     cur: Option<Active>,
     next: Option<(Token, Source, f32, bool)>,
     /// Следующий трек, открытый ради кроссфейда, но другого формата: начнётся встык.
@@ -306,7 +305,7 @@ pub(super) fn spawn(
     prod: rtrb::Producer<f32>,
     rx: Receiver<Cmd>,
     events: UnboundedSender<Event>,
-    out: Handle,
+    out: Arc<dyn Output>,
 ) {
     std::thread::Builder::new()
         .name("decoder".into())
@@ -1018,7 +1017,7 @@ fn token_of(a: &Option<Active>) -> Token {
 /// Отладка подмены без звука: `a` играет, на секунде `at` его подменяют на `b` тем же
 /// путём, что и в плеере. `rate` — принудительная частота вывода (проверка ресемплера).
 /// Возвращает отчёт; `wav` — куда записать склеенный кусок для прослушивания.
-pub(crate) fn debug_splice(
+pub fn debug_splice(
     a: Source,
     b: Source,
     at: f64,

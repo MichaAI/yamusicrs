@@ -1,18 +1,10 @@
-mod api;
 mod app;
-mod audio;
-mod config;
-mod fetch;
 mod imgcache;
-mod library;
-mod lyrics;
 mod mpris;
-mod offline;
-mod offline_wave;
-mod tinyml;
-mod ynison;
 mod render;
 mod ui;
+
+use yamusic_core::{api, audio, config, fetch, library, lyrics, offline, offline_wave, tinyml, ynison};
 
 use std::path::PathBuf;
 

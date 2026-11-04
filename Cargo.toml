@@ -1,11 +1,16 @@
-[package]
-name = "yamusicrs"
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/tui"]
+default-members = ["crates/tui"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "TUI-клиент Яндекс Музыки: lossless, PipeWire, kitty-обложки"
 license = "Apache-2.0"
 
-[dependencies]
+[workspace.dependencies]
+yamusic-core = { path = "crates/core" }
+
 # runtime / util
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
 futures-util = "0.3"

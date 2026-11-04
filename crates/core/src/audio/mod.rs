@@ -1,11 +1,13 @@
-//! Аудиодвижок: декодер (symphonia) → кольцевой буфер f32 → нативный поток PipeWire.
+//! Аудиодвижок: декодер (symphonia) → кольцевой буфер f32 → вывод платформы
+//! ([`Output`]: PipeWire на десктопе, на Android — свой).
 //!
 //! Позиция воспроизведения считается по реально отданным в PipeWire сэмплам, а границы
 //! треков хранятся как «сегменты» в общей шкале сэмплов, поэтому gapless и seek не
 //! сбивают таймер.
 
 mod decoder;
-mod output;
+#[cfg(feature = "pipewire")]
+pub mod pipewire;
 mod resample;
 pub mod source;
 
@@ -17,7 +19,7 @@ use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
-pub(crate) use decoder::debug_splice;
+pub use decoder::debug_splice;
 pub use source::{Source, StreamBuffer};
 
 /// Идентификатор загруженного трека, выдаётся приложением.
@@ -50,7 +52,8 @@ pub(crate) struct Segment {
     info: SourceInfo,
 }
 
-pub(crate) struct Shared {
+/// Общее состояние движка и вывода. Вывод платформы только читает его через [`Filler`].
+pub struct Shared {
     /// Сэмплов отдано в PipeWire (или выброшено при flush).
     played: AtomicU64,
     /// Сэмплов записано декодером.
@@ -69,13 +72,27 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn mark_process(&self) {
+    fn mark_process(&self) {
         self.last_process
             .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
 
     fn volume(&self) -> f32 {
         f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// На паузе ли воспроизведение (вывод при создании потока сразу делает его неактивным).
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Читатель кольца для потока вывода с `channels` каналами.
+    pub fn filler(self: &Arc<Self>, channels: u16) -> Filler {
+        Filler {
+            last_vol: self.volume(),
+            shared: self.clone(),
+            channels: channels.max(1) as usize,
+        }
     }
 
     fn crossfade_secs(&self) -> f32 {
@@ -91,6 +108,67 @@ impl Shared {
         }
         self.played.fetch_add(n as u64, Ordering::AcqRel);
     }
+}
+
+/// Вывод звука платформы. Поток вывода берёт сэмплы через [`Shared::filler`].
+pub trait Output: Send + Sync {
+    /// Пересоздать поток под новый формат, если он отличается от текущего.
+    fn configure(&self, f: Format);
+    /// Формат, под который сейчас настроен вывод.
+    fn current(&self) -> Option<Format>;
+    /// Переподключиться с нуля (сторож при зависшем выводе).
+    fn reconnect(&self);
+    fn set_active(&self, active: bool);
+    fn quit(&self);
+}
+
+/// Запускает вывод платформы поверх общего состояния движка.
+pub type OutputFactory = Box<dyn FnOnce(Arc<Shared>) -> color_eyre::Result<Arc<dyn Output>>>;
+
+/// Сторона чтения кольца для потока вывода: громкость, счётчик отданного, отметка сторожа.
+pub struct Filler {
+    shared: Arc<Shared>,
+    channels: usize,
+    last_vol: f32,
+}
+
+impl Filler {
+    /// Заполняет `out` (чередующиеся f32) звуком; чего нет в кольце — тишиной.
+    pub fn fill(&mut self, out: &mut [f32]) {
+        let shared = &self.shared;
+        shared.mark_process();
+        let mut cons = shared.cons.lock();
+
+        let avail = cons.slots();
+        let take = (avail.min(out.len()) / self.channels) * self.channels;
+        let target = shared.volume();
+        // Кубическая кривая громкости: на слух линейнее, и 1.0 → множитель ровно 1 (bit-perfect).
+        let (from, to) = (curve(self.last_vol), curve(target));
+        self.last_vol = target;
+
+        if let Ok(chunk) = cons.read_chunk(take) {
+            let (a, b) = chunk.as_slices();
+            out[..a.len()].copy_from_slice(a);
+            out[a.len()..a.len() + b.len()].copy_from_slice(b);
+            chunk.commit_all();
+        }
+        out[take..].fill(0.0);
+        shared.played.fetch_add(take as u64, Ordering::AcqRel);
+
+        if from != 1.0 || to != 1.0 {
+            let frames = (take / self.channels).max(1);
+            for (i, frame) in out[..take].chunks_mut(self.channels).enumerate() {
+                let g = from + (to - from) * (i as f32 / frames as f32);
+                for s in frame {
+                    *s *= g;
+                }
+            }
+        }
+    }
+}
+
+fn curve(v: f32) -> f32 {
+    v * v * v
 }
 
 #[derive(Debug)]
@@ -148,12 +226,23 @@ pub struct Position {
 pub struct Player {
     shared: Arc<Shared>,
     cmd: Sender<Cmd>,
-    out: output::Handle,
+    out: Arc<dyn Output>,
     cancels: Mutex<Vec<source::Canceller>>,
 }
 
 impl Player {
+    /// Движок с выводом через PipeWire.
+    #[cfg(feature = "pipewire")]
     pub fn new(events: UnboundedSender<Event>, volume: f32) -> color_eyre::Result<Self> {
+        Self::with_output(events, volume, Box::new(pipewire::spawn))
+    }
+
+    /// Движок с выводом, который запускает `output` (на Android — свой поток вывода).
+    pub fn with_output(
+        events: UnboundedSender<Event>,
+        volume: f32,
+        output: OutputFactory,
+    ) -> color_eyre::Result<Self> {
         // ~2.7 с стерео 192 кГц — хватает с запасом для gapless и не держит много памяти.
         let (prod, cons) = rtrb::RingBuffer::<f32>::new(1 << 20);
         let shared = Arc::new(Shared {
@@ -167,7 +256,7 @@ impl Player {
             last_process: AtomicU64::new(0),
             epoch: std::time::Instant::now(),
         });
-        let out = output::spawn(shared.clone())?;
+        let out = output(shared.clone())?;
         let (tx, rx) = crossbeam_channel::unbounded();
         decoder::spawn(shared.clone(), prod, rx, events, out.clone());
         Ok(Self {
@@ -247,7 +336,7 @@ impl Player {
     }
 
     pub fn set_paused(&self, paused: bool) {
-        // Отсчёт сторожа — с момента, когда снова ждём звук из PipeWire.
+        // Отсчёт сторожа — с момента, когда снова ждём звук из вывода.
         self.shared.mark_process();
         self.shared.paused.store(paused, Ordering::Relaxed);
         self.out.set_active(!paused);
@@ -261,7 +350,7 @@ impl Player {
         self.shared.volume()
     }
 
-    /// Играем, в кольце есть звук, а PipeWire его не забирает дольше `limit`:
+    /// Играем, в кольце есть звук, а вывод его не забирает дольше `limit`:
     /// устройство вывода зависло или поток потерял связь с графом.
     pub fn stalled(&self, limit: std::time::Duration) -> bool {
         if self.paused() || self.shared.segments.lock().is_empty() || self.shared.cons.lock().slots() == 0 {
@@ -271,7 +360,7 @@ impl Player {
         self.shared.epoch.elapsed().as_millis() as u64 > last + limit.as_millis() as u64
     }
 
-    /// Пересоздать поток PipeWire с текущим форматом.
+    /// Пересоздать поток вывода с текущим форматом.
     pub fn reconnect_output(&self) {
         self.shared.mark_process();
         self.out.reconnect();

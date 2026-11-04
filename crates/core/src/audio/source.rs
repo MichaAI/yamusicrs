@@ -31,12 +31,22 @@ pub struct StreamBuffer {
     cv: Condvar,
 }
 
+static SPILL_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Каталог для временных файлов загрузки. Без вызова — кеш XDG (на Android путь
+/// даёт приложение: `ProjectDirs` там не работает).
+pub fn set_spill_dir(dir: std::path::PathBuf) {
+    let _ = SPILL_DIR.set(dir);
+}
+
 /// Файл без имени: создаём в кеше и сразу удаляем, место освободится с последней ручкой.
 fn spill_file() -> io::Result<File> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = directories::ProjectDirs::from("", "", "yamusicrs")
-        .map(|d| d.cache_dir().to_path_buf())
-        .unwrap_or_else(std::env::temp_dir);
+    let dir = SPILL_DIR.get().cloned().unwrap_or_else(|| {
+        directories::ProjectDirs::from("", "", "yamusicrs")
+            .map(|d| d.cache_dir().to_path_buf())
+            .unwrap_or_else(std::env::temp_dir)
+    });
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!(
         "stream-{}-{}.part",

@@ -5085,47 +5085,66 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
-name = "yamusicrs"
+name = "yamusic-core"
 version = "0.1.0"
 dependencies = [
  "aes",
  "base64 0.23.1",
  "chrono",
- "clap",
  "color-eyre",
  "crossbeam-channel",
- "crossterm",
  "ctr",
  "directories",
- "flate2",
  "futures-util",
  "hex",
  "hmac",
- "image",
  "libc",
  "lofty",
  "parking_lot",
  "pipewire",
- "pollster",
- "qrcode",
  "rand 0.9.5",
- "ratatui",
  "reqwest",
  "rtrb",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "symphonia",
- "textwrap",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "yamusicrs"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "clap",
+ "color-eyre",
+ "crossbeam-channel",
+ "crossterm",
+ "flate2",
+ "futures-util",
+ "hex",
+ "image",
+ "libc",
+ "pollster",
+ "qrcode",
+ "rand 0.9.5",
+ "ratatui",
+ "serde_json",
+ "textwrap",
+ "tokio",
  "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
  "unicode-width",
  "wgpu",
+ "yamusic-core",
  "zbus",
 ]
 

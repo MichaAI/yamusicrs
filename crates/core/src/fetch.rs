@@ -220,6 +220,7 @@ impl Fetcher {
         }
         // Копии трека (снимок, remux, теги) освобождены, но glibc держит их в аренах потоков.
         // SAFETY: malloc_trim безопасна в любой момент.
+        #[cfg(target_env = "gnu")]
         unsafe { libc::malloc_trim(0) };
     }
 }

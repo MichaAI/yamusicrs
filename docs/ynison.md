@@ -124,7 +124,7 @@ Android 2026.09.5 использует тот же протокол.
 
 - При подключении не забирать активность у телефона (`is_currently_active: false`,
   `paused: true`), иначе перебьём воспроизведение там.
-- app_name/app_version — как у официального клиента (антифрод), см. `DESKTOP_CLIENT` в `src/api/mod.rs`.
+- app_name/app_version — как у официального клиента (антифрод), см. `DESKTOP_CLIENT` в `crates/core/src/api/mod.rs`.
 - Конфликты решаются версиями; свою версию генерировать заново на каждое изменение.
 
 ## Где взять исходники снова
@@ -133,7 +133,7 @@ Android 2026.09.5 использует тот же протокол.
   дальше искать по строкам в `out/app/_next/static/chunks`.
 - Android: см. память о реверсе APK (adb pull + `jadx --no-res`).
 
-## Реализация в yamusicrs (`src/ynison.rs`, `src/app/yn.rs`)
+## Реализация в yamusicrs (`crates/core/src/ynison.rs`, `crates/tui/src/app/yn.rs`)
 
 - Транспорт как у Music Assistant (их провайдер проверен с официальным Android вживую):
   OAuth — HTTP-заголовком `Authorization`, `Origin: https://music.yandex.ru`, subprotocol

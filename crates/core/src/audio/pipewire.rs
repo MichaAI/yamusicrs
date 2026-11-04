@@ -7,14 +7,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use color_eyre::eyre::eyre;
 use pipewire as pw;
 use pw::spa;
 use pw::spa::pod::Pod;
 
-use super::{Format, Shared};
+use super::{Filler, Format, Output, Shared};
 
 enum Msg {
     Configure(Format),
@@ -24,15 +23,14 @@ enum Msg {
     Quit,
 }
 
-#[derive(Clone)]
-pub struct Handle {
+struct Handle {
     tx: pw::channel::Sender<Msg>,
-    configured: Arc<parking_lot::Mutex<Option<Format>>>,
+    configured: parking_lot::Mutex<Option<Format>>,
 }
 
-impl Handle {
+impl Output for Handle {
     /// Пересоздаёт поток под новый формат, если он отличается от текущего.
-    pub fn configure(&self, f: Format) {
+    fn configure(&self, f: Format) {
         let mut cur = self.configured.lock();
         if *cur != Some(f) {
             *cur = Some(f);
@@ -41,29 +39,28 @@ impl Handle {
     }
 
     /// Переподключиться к PipeWire с нуля и пересоздать поток (сторож при зависшем выводе).
-    pub fn reconnect(&self) {
+    fn reconnect(&self) {
         if let Some(f) = *self.configured.lock() {
             let _ = self.tx.send(Msg::Reconnect(f));
         }
     }
 
-    pub fn current(&self) -> Option<Format> {
+    fn current(&self) -> Option<Format> {
         *self.configured.lock()
     }
 
-    pub fn set_active(&self, active: bool) {
+    fn set_active(&self, active: bool) {
         let _ = self.tx.send(Msg::Active(active));
     }
 
-    pub fn quit(&self) {
+    fn quit(&self) {
         let _ = self.tx.send(Msg::Quit);
     }
 }
 
 struct ProcessState {
-    shared: Arc<Shared>,
+    filler: Filler,
     channels: usize,
-    last_vol: f32,
 }
 
 struct Live {
@@ -71,7 +68,8 @@ struct Live {
     _listener: pw::stream::StreamListener<ProcessState>,
 }
 
-pub fn spawn(shared: Arc<Shared>) -> color_eyre::Result<Handle> {
+/// Запускает поток PipeWire со своим `MainLoop`; ошибка — если не удалось подключиться.
+pub fn spawn(shared: Arc<Shared>) -> color_eyre::Result<Arc<dyn Output>> {
     let (tx, rx) = pw::channel::channel::<Msg>();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::Builder::new().name("pipewire".into()).spawn(move || {
@@ -83,10 +81,10 @@ pub fn spawn(shared: Arc<Shared>) -> color_eyre::Result<Handle> {
         .recv()
         .map_err(|_| eyre!("поток PipeWire умер при старте"))?
         .map_err(|e| eyre!("PipeWire: {e}"))?;
-    Ok(Handle {
+    Ok(Arc::new(Handle {
         tx,
-        configured: Arc::new(parking_lot::Mutex::new(None)),
-    })
+        configured: parking_lot::Mutex::new(None),
+    }))
 }
 
 fn run(
@@ -120,7 +118,7 @@ fn run(
                 }
                 match make_stream(&core.borrow(), &shared, f) {
                     Ok(l) => {
-                        if shared.paused.load(Ordering::Relaxed) {
+                        if shared.paused() {
                             let _ = l.stream.set_active(false);
                         }
                         *live.borrow_mut() = Some(l);
@@ -159,9 +157,8 @@ fn make_stream(core: &pw::core::CoreRc, shared: &Arc<Shared>, f: Format) -> Resu
     let stream = pw::stream::StreamRc::new(core.clone(), "yamusicrs", props)?;
 
     let state = ProcessState {
-        shared: shared.clone(),
-        channels: f.channels as usize,
-        last_vol: shared.volume(),
+        filler: shared.filler(f.channels),
+        channels: f.channels.max(1) as usize,
     };
     let listener = stream
         .add_local_listener_with_user_data(state)
@@ -179,7 +176,7 @@ fn make_stream(core: &pw::core::CoreRc, shared: &Arc<Shared>, f: Format) -> Resu
                 frames = frames.min(requested);
             }
             let out: &mut [f32] = bytemuck_f32(&mut slice[..frames * stride]);
-            fill(st, out);
+            st.filler.fill(out);
             let chunk = data.chunk_mut();
             *chunk.offset_mut() = 0;
             *chunk.stride_mut() = stride as i32;
@@ -233,40 +230,4 @@ fn bytemuck_f32(bytes: &mut [u8]) -> &mut [f32] {
     assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<f32>(), 0);
     // SAFETY: выравнивание проверено, длина кратна размеру f32 (кратна stride), любой битовый шаблон валиден для f32.
     unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast::<f32>(), bytes.len() / 4) }
-}
-
-fn fill(st: &mut ProcessState, out: &mut [f32]) {
-    let shared = &st.shared;
-    shared.mark_process();
-    let mut cons = shared.cons.lock();
-
-    let avail = cons.slots();
-    let take = (avail.min(out.len()) / st.channels) * st.channels;
-    let target = shared.volume();
-    // Кубическая кривая громкости: на слух линейнее, и 1.0 → множитель ровно 1 (bit-perfect).
-    let (from, to) = (curve(st.last_vol), curve(target));
-    st.last_vol = target;
-
-    if let Ok(chunk) = cons.read_chunk(take) {
-        let (a, b) = chunk.as_slices();
-        out[..a.len()].copy_from_slice(a);
-        out[a.len()..a.len() + b.len()].copy_from_slice(b);
-        chunk.commit_all();
-    }
-    out[take..].fill(0.0);
-    shared.played.fetch_add(take as u64, Ordering::AcqRel);
-
-    if from != 1.0 || to != 1.0 {
-        let frames = (take / st.channels).max(1);
-        for (i, frame) in out[..take].chunks_mut(st.channels).enumerate() {
-            let g = from + (to - from) * (i as f32 / frames as f32);
-            for s in frame {
-                *s *= g;
-            }
-        }
-    }
-}
-
-fn curve(v: f32) -> f32 {
-    v * v * v
 }

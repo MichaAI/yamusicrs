@@ -25,13 +25,17 @@ let
     fileset = lib.fileset.unions [
       ../Cargo.toml
       ../Cargo.lock
-      ../src
+      ../crates
       ../data
     ];
   };
 
   commonArgs = {
     inherit src;
+    # Корень — workspace без [package]: имя и версию задаём сами; ставится бинарь крейта tui.
+    pname = "yamusicrs";
+    version = "0.1.0";
+    cargoExtraArgs = "--locked -p yamusicrs";
     strictDeps = true;
     # Профиль с LTO из Cargo.toml; `release` оставлен быстрым для разработки.
     CARGO_PROFILE = "dist";
@@ -74,11 +78,18 @@ let
 
       passthru = {
         inherit gpuLibs cargoArtifacts commonArgs;
-        tests = craneLib.cargoTest (commonArgs // { inherit cargoArtifacts; });
+        tests = craneLib.cargoTest (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoExtraArgs = "--locked --workspace";
+          }
+        );
         clippy = craneLib.cargoClippy (
           commonArgs
           // {
             inherit cargoArtifacts;
+            cargoExtraArgs = "--locked --workspace";
             cargoClippyExtraArgs = "--all-targets";
           }
         );
