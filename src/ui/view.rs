@@ -329,8 +329,11 @@ fn login(f: &mut Frame, area: Rect, l: &LoginState, ctx: &Ctx) {
         Span::styled(" 2. ", ctx.accent()),
         Span::styled("Или вставь OAuth-токен / ссылку с access_token:", ctx.fg()),
     ]));
-    let masked = if l.input.len() > 8 {
-        format!("{}{}", &l.input[..6], "•".repeat((l.input.len() - 6).min(30)))
+    // По символам, не по байтам: в поле может попасть кириллица (раскладка).
+    let n = l.input.chars().count();
+    let masked = if n > 8 {
+        let head: String = l.input.chars().take(6).collect();
+        format!("{head}{}", "•".repeat((n - 6).min(30)))
     } else {
         l.input.clone()
     };
