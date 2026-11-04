@@ -544,6 +544,8 @@ pub struct App {
     start_paused: Option<Token>,
     /// Откуда открыт трек (библиотека/сеть) — до момента, когда он реально зазвучит.
     pending_origins: HashMap<Token, Origin>,
+    /// Не открывшиеся треки очереди (поколение, индекс) — автопереход их пропускает.
+    failed: HashSet<(u64, usize)>,
     /// Откуда новый источник, пока идёт подмена на ходу.
     swap_origin: Option<(Token, Origin)>,
     pub images: Images,
@@ -748,6 +750,7 @@ impl App {
             start_paused: None,
             pending_origins: HashMap::new(),
             swap_origin: None,
+            failed: HashSet::new(),
             images,
             gfx,
             controls: Vec::new(),
@@ -1630,6 +1633,7 @@ impl App {
             generation: self.queue.generation + 1,
         };
         self.next_loaded = None;
+        self.failed.clear();
     }
 
     fn alloc_token(&mut self, idx: usize) -> Option<Token> {
@@ -1755,8 +1759,25 @@ impl App {
         if self.repeat_one {
             return Some(from);
         }
-        // Недоступные (а без сети — и не скачанные) пропускаем, а не спотыкаемся о них.
-        (from + 1..self.queue.items.len()).find(|&i| self.queue.items[i].available)
+        // Недоступные (а без сети — и не скачанные) и не открывшиеся пропускаем.
+        (from + 1..self.queue.items.len()).find(|&i| self.playable(i))
+    }
+
+    fn playable(&self, i: usize) -> bool {
+        self.queue.items[i].available && !self.failed.contains(&(self.queue.generation, i))
+    }
+
+    fn mark_failed(&mut self, token: Token) {
+        if let Some((generation, idx, _)) = self.tokens.get(&token) {
+            self.failed.insert((*generation, *idx));
+        }
+    }
+
+    /// Предзагруженный следующий не открылся: текущий не трогаем, готовим следующий за ним.
+    fn next_failed(&mut self, token: Token) {
+        self.mark_failed(token);
+        self.next_loaded = None;
+        self.schedule_next();
     }
 
     // ── офлайн ───────────────────────────────────────────────────────────────
@@ -2021,9 +2042,9 @@ impl App {
             return;
         }
         if let Some(p) = self.queue.pos
-            && p > 0
+            && let Some(i) = (0..p).rev().find(|&i| self.playable(i))
         {
-            self.play_index(p - 1);
+            self.play_index(i);
         }
     }
 
@@ -2997,9 +3018,12 @@ impl App {
             Err(e) => {
                 let name = track.map(|t| t.full_title()).unwrap_or_default();
                 tracing::warn!("{name}: {e}");
-                if self.requested == Some(token) || self.next_loaded == Some(token) {
+                if self.requested == Some(token) {
                     self.toast_err(format!("{name}: {e}"));
                     self.skip_broken(token);
+                } else if self.next_loaded == Some(token) {
+                    self.toast_err(format!("{name}: {e}"));
+                    self.next_failed(token);
                 }
             }
         }
@@ -3042,6 +3066,7 @@ impl App {
     }
 
     fn skip_broken(&mut self, token: Token) {
+        self.mark_failed(token);
         self.error_streak += 1;
         if self.error_streak > 5 {
             self.toast_err("Слишком много ошибок подряд, остановился".into());
@@ -3097,6 +3122,8 @@ impl App {
                 self.toast_err(format!("{name}: {e}"));
                 if self.requested == Some(token) && self.now.as_ref().is_none_or(|n| n.token != token) {
                     self.skip_broken(token);
+                } else if self.next_loaded == Some(token) {
+                    self.next_failed(token);
                 }
             }
         }

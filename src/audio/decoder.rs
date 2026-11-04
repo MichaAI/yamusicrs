@@ -562,10 +562,14 @@ impl Dec {
     fn start_following(&mut self, token: Token, source: Source, gain: f32) {
         match open(token, source, gain) {
             Ok(a) => self.follow(a),
-            Err(Some(e)) => {
-                let _ = self.events.send(Event::Error(token, e));
+            // Следующий не открылся — ждём другой, иначе очередь молча встанет.
+            Err(e) => {
+                if let Some(e) = e {
+                    let _ = self.events.send(Event::Error(token, e));
+                }
+                self.awaiting_next = true;
+                let _ = self.events.send(Event::NeedNext);
             }
-            Err(None) => {}
         }
     }
 
