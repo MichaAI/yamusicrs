@@ -48,6 +48,7 @@ pub enum Msg {
     /// Лайк/дизлайк альбома или исполнителя не сохранился — откатить.
     EntityFailed { what: Entity, id: String, on: bool, error: String },
     Playlists(Result<Vec<Playlist>, String>),
+    Personal(Result<Vec<api::PersonalPlaylist>, String>),
     /// Программа офлайн-волны и треки, под которые она собрана.
     OfflineProgram(Result<(Vec<i32>, Vec<i32>), String>),
     /// Метаданные скачанных треков для офлайн-снимка.
@@ -533,8 +534,15 @@ pub struct WaveUi {
 
 /// Сиды «просто Моей волны».
 const MY_WAVE: &str = "user:onyourwave";
-/// Строки «♥ Альбомы» и «♥ Исполнители» под плейлистами.
-pub const COLLECTION_ROWS: usize = 2;
+
+/// Строка вкладки «Плейлисты».
+pub enum PlaylistRow<'a> {
+    /// «Настроили для вас» (Плейлист дня, Дежавю, Премьера).
+    Personal(&'a api::PersonalPlaylist),
+    Own(&'a Playlist),
+    LikedAlbums,
+    LikedArtists,
+}
 
 pub struct App {
     pub tx: UnboundedSender<Msg>,
@@ -560,6 +568,7 @@ pub struct App {
     pub tab: Tab,
     pub stack: Vec<Page>,
     pub liked: HashSet<String>,
+    pub personal: Vec<api::PersonalPlaylist>,
     /// Лайкнутые альбомы и исполнители, скрытые исполнители (id из `library/all-ids`).
     pub liked_albums: HashSet<String>,
     pub liked_artists: HashSet<String>,
@@ -773,6 +782,7 @@ impl App {
             tab: Tab::Wave,
             stack: vec![Page::new(View::Wave)],
             liked: HashSet::new(),
+            personal: Vec::new(),
             liked_albums: HashSet::new(),
             liked_artists: HashSet::new(),
             disliked_artists: HashSet::new(),
@@ -1181,6 +1191,23 @@ impl App {
         self.spawn(|c, tx| async move {
             let _ = tx.send(Msg::Playlists(c.playlists().await.map_err(err_str)));
         });
+        self.spawn(|c, tx| async move {
+            let _ = tx.send(Msg::Personal(c.personal_playlists().await.map_err(err_str)));
+        });
+    }
+
+    /// Строки вкладки «Плейлисты» (пусто, пока свои плейлисты не загрузились).
+    pub fn playlist_rows(&self) -> Vec<PlaylistRow<'_>> {
+        let Some(own) = self.playlists.ready() else {
+            return Vec::new();
+        };
+        let mut v: Vec<PlaylistRow> = self.personal.iter().map(PlaylistRow::Personal).collect();
+        v.extend(own.iter().map(PlaylistRow::Own));
+        if !self.offline {
+            v.push(PlaylistRow::LikedAlbums);
+            v.push(PlaylistRow::LikedArtists);
+        }
+        v
     }
 
     fn load_releases(&mut self) {
@@ -1632,7 +1659,7 @@ impl App {
         match &self.page().view {
             View::Wave => self.wave.items.ready().map_or(0, Vec::len),
             View::Likes => self.likes.ready().map_or(0, Vec::len),
-            View::Playlists => self.playlists.ready().map_or(0, |v| v.len() + COLLECTION_ROWS),
+            View::Playlists => self.playlist_rows().len(),
             View::Search => match &self.search {
                 Some(Loadable::Ready(items)) => items.len(),
                 _ => 0,
@@ -1745,18 +1772,19 @@ impl App {
                     self.play_list(ts, orig, "Коллекция".into());
                 }
             }
-            View::Playlists => {
-                let n = self.playlists.ready().map_or(0, Vec::len);
-                if let Some(pl) = self.playlists.ready().and_then(|p| p.get(sel)).cloned() {
+            View::Playlists => match self.playlist_rows().get(sel) {
+                Some(PlaylistRow::Personal(p)) => {
+                    let pl = p.playlist.clone();
                     self.open_playlist(pl);
-                } else if self.offline {
-                    self.toast_err("Альбомы и исполнители из коллекции — только с сетью".into());
-                } else if sel == n {
-                    self.open_liked_albums();
-                } else if sel == n + 1 {
-                    self.open_liked_artists();
                 }
-            }
+                Some(PlaylistRow::Own(p)) => {
+                    let pl = (*p).clone();
+                    self.open_playlist(pl);
+                }
+                Some(PlaylistRow::LikedAlbums) => self.open_liked_albums(),
+                Some(PlaylistRow::LikedArtists) => self.open_liked_artists(),
+                None => {}
+            },
             View::Albums { albums, .. } => {
                 if let Some(a) = albums.ready().and_then(|v| v.get(sel)).cloned() {
                     self.open_album(a);
@@ -2714,8 +2742,10 @@ impl App {
         if !matches!(self.page().view, View::Playlists) {
             return None;
         }
-        let pl = self.playlists.ready()?.get(self.page().sel)?;
-        self.is_own(pl).then(|| pl.clone())
+        match self.playlist_rows().get(self.page().sel)? {
+            PlaylistRow::Own(pl) => self.is_own(pl).then(|| (*pl).clone()),
+            _ => None,
+        }
     }
 
     /// Свой плейлист, открытый на текущей странице: (kind, позиция трека, трек).
@@ -3188,6 +3218,19 @@ impl App {
                     Err(e) => Loadable::Failed(e),
                 });
             }
+            Msg::Personal(r) => match r {
+                Ok(v) => {
+                    // Курсор остаётся на той же строке, хотя сверху добавились подборки.
+                    let shift = v.len() as isize - self.personal.len() as isize;
+                    self.personal = v;
+                    if let Some(p) = self.stack.iter_mut().find(|p| matches!(p.view, View::Playlists))
+                        && p.sel > 0
+                    {
+                        p.sel = (p.sel as isize + shift).max(0) as usize;
+                    }
+                }
+                Err(e) => tracing::warn!("personal-playlists: {e}"),
+            },
             Msg::Playlists(r) => {
                 self.playlists = match r {
                     Ok(p) => {

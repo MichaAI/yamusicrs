@@ -1409,23 +1409,27 @@ fn mixed_list(f: &mut Frame, area: Rect, app: &mut App, rows: &[RowKind], ctx: &
 }
 
 fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
-    let pls = match &app.playlists {
-        Loadable::Ready(p) => p.clone(),
-        other => return status(f, area, other, ctx, "Загружаю плейлисты"),
-    };
-    let mut rows: Vec<RowKind> = pls
+    use crate::app::PlaylistRow;
+    if let other @ (Loadable::Loading | Loadable::Failed(_)) = &app.playlists {
+        return status(f, area, other, ctx, "Загружаю плейлисты");
+    }
+    let rows: Vec<RowKind> = app
+        .playlist_rows()
         .iter()
-        .map(|p| RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0))))
+        .map(|r| match r {
+            PlaylistRow::Personal(p) => RowKind::Other(
+                format!("✦ {}", p.playlist.title),
+                p.description.clone().unwrap_or_default(),
+            ),
+            PlaylistRow::Own(p) => RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0))),
+            PlaylistRow::LikedAlbums => {
+                RowKind::Other("\u{f004} Альбомы".into(), format!("{}", app.liked_albums.len()))
+            }
+            PlaylistRow::LikedArtists => {
+                RowKind::Other("\u{f004} Исполнители".into(), format!("{}", app.liked_artists.len()))
+            }
+        })
         .collect();
-    // Должно совпадать с `COLLECTION_ROWS` и порядком в `App::activate`.
-    rows.push(RowKind::Other(
-        "\u{f004} Альбомы".into(),
-        format!("{}", app.liked_albums.len()),
-    ));
-    rows.push(RowKind::Other(
-        "\u{f004} Исполнители".into(),
-        format!("{}", app.liked_artists.len()),
-    ));
     mixed_list(f, area, app, &rows, ctx);
 }
 

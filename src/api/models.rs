@@ -578,3 +578,10 @@ impl LibraryIds {
         map.iter().filter(|(_, x)| **x == v).map(|(k, _)| k.clone()).collect()
     }
 }
+
+/// «Настроили для вас»: «Плейлист дня», «Дежавю», «Премьера»…
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PersonalPlaylist {
+    pub playlist: Playlist,
+    pub description: Option<String>,
+}

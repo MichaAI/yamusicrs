@@ -537,6 +537,19 @@ impl Client {
         Ok(serde_json::from_value(v["chart"].clone())?)
     }
 
+    /// Блок главной «Настроили для вас» (как в десктопе).
+    pub async fn personal_playlists(&self) -> Result<Vec<PersonalPlaylist>> {
+        let v: Value = self
+            .send(self.req_as(reqwest::Method::GET, "/landing-blocks/personal-playlists", DESKTOP_CLIENT))
+            .await?;
+        Ok(v["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|i| serde_json::from_value::<PersonalPlaylist>(i["data"].clone()).ok())
+            .collect())
+    }
+
     /// «Похожие треки» (как в мобильном клиенте).
     pub async fn similar_tracks(&self, track_id: &str) -> Result<Vec<Track>> {
         let numeric = track_id.split(':').next().unwrap_or(track_id);
