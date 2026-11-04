@@ -2996,17 +2996,66 @@ fn draw_lyrics(
             }
         }
         Lyrics::Plain(text) => {
-            // Текст без таймингов стоит на месте и листается колесом.
-            let max = (text.len() as u16).saturating_sub(area.height / 2);
+            // Текст без таймингов стоит на месте и листается колесом. Переносим сами, чтобы
+            // знать, сколько строк на самом деле, и показать, есть ли что-то выше и ниже.
+            let w = area.width.saturating_sub(2).max(8) as usize;
+            let rows: Vec<String> = text
+                .iter()
+                .flat_map(|l| {
+                    let l = l.trim();
+                    if l.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        textwrap::wrap(l, w).into_iter().map(|c| c.into_owned()).collect()
+                    }
+                })
+                .collect();
+            let total = rows.len() as u16;
+            let fits = total <= area.height;
+            // Когда не влезает, крайние строки области отдаём под метки «ещё N строк».
+            let view_h = if fits { area.height } else { area.height.saturating_sub(2) };
+            let max = total.saturating_sub(view_h);
+            app.plain_max.set(max);
             let scroll = app.plain_scroll.min(max);
-            let lines: Vec<Line> = text.iter().map(|l| Line::styled(l.clone(), ctx.fg())).collect();
-            f.render_widget(
-                Paragraph::new(lines)
-                    .alignment(Alignment::Center)
-                    .wrap(Wrap { trim: true })
-                    .scroll((scroll, 0)),
-                area,
-            );
+            let body = if fits {
+                area
+            } else {
+                Rect {
+                    y: area.y + 1,
+                    height: view_h,
+                    ..area
+                }
+            };
+            let lines: Vec<Line> = rows
+                .iter()
+                .skip(scroll as usize)
+                .take(view_h as usize)
+                .map(|l| Line::styled(l.clone(), ctx.fg()))
+                .collect();
+            f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), body);
+            if !fits {
+                let above = scroll;
+                let below = total - scroll - view_h.min(total - scroll);
+                let mark = |n: u16, arrow: &str| {
+                    if n == 0 {
+                        Line::raw("")
+                    } else {
+                        Line::styled(format!("{arrow} ещё {n} {}", plural(n as u64, "строка", "строки", "строк")), ctx.dim())
+                    }
+                };
+                f.render_widget(
+                    Paragraph::new(mark(above, "↑")).alignment(Alignment::Center),
+                    Rect { height: 1, ..area },
+                );
+                f.render_widget(
+                    Paragraph::new(mark(below, "↓")).alignment(Alignment::Center),
+                    Rect {
+                        y: area.y + area.height - 1,
+                        height: 1,
+                        ..area
+                    },
+                );
+            }
         }
     }
 }
@@ -3287,4 +3336,13 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         }))
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Русское склонение по числу: 1 строка, 2 строки, 5 строк.
+fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
+    match (n % 10, n % 100) {
+        (1, r) if r != 11 => one,
+        (2..=4, r) if !(12..=14).contains(&r) => few,
+        _ => many,
+    }
 }

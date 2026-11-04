@@ -744,6 +744,8 @@ pub struct App {
     pub fx_track: Option<Instant>,
     /// Ручная прокрутка текста без таймингов (строки).
     pub plain_scroll: u16,
+    /// Предел прокрутки текста без таймингов (строк после переноса), считает отрисовка.
+    pub plain_max: std::cell::Cell<u16>,
     covers_loading: HashSet<String>,
     /// Не нашлись ни в кеше, ни в файлах, а сети нет — не дёргаем каждый кадр.
     covers_failed: HashSet<String>,
@@ -969,6 +971,7 @@ impl App {
             fx_view: None,
             fx_track: None,
             plain_scroll: 0,
+            plain_max: std::cell::Cell::new(u16::MAX),
             covers_loading: HashSet::new(),
             covers_failed: HashSet::new(),
             cover_files: None,
@@ -4475,10 +4478,11 @@ impl App {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;
                 if inside(self.areas.lyrics) && matches!(self.lyrics, Some((_, Lyrics::Plain(_)))) {
+                    let max = self.plain_max.get();
                     self.plain_scroll = if up {
-                        self.plain_scroll.saturating_sub(2)
+                        self.plain_scroll.min(max).saturating_sub(2)
                     } else {
-                        self.plain_scroll + 2
+                        (self.plain_scroll + 2).min(max)
                     };
                 } else if inside(self.areas.lyrics) {
                     self.lyrics_user_offset += if up { -1.0 } else { 1.0 };
