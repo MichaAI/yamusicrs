@@ -98,7 +98,8 @@ pub enum Msg {
         result: Result<Option<(audio::Source, Origin)>, String>,
     },
     Mpris(mpris::Command),
-    Toast(String),
+    /// Лайк не сохранился на сервере — вернуть как было.
+    LikeFailed { track: Track, like: bool, error: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2583,30 +2584,47 @@ impl App {
     }
 
     fn toggle_like(&mut self, t: Track) {
+        if self.client.is_none() {
+            return self.toast_err("Без сети лайк не сохранить".into());
+        }
         let like = !self.is_liked(&t);
+        self.apply_like(&t, like);
+        if like {
+            self.wave_feedback("like", &t, None);
+            self.toast(format!("\u{f004} {}", t.full_title()));
+        } else {
+            self.wave_feedback("unlike", &t, None);
+            self.toast(format!("\u{f08a} {}", t.full_title()));
+        }
+        let id = t.full_id();
+        self.spawn(move |c, tx| async move {
+            if let Err(e) = c.set_like(&id, like).await {
+                let _ = tx.send(Msg::LikeFailed {
+                    track: t,
+                    like,
+                    error: e.to_string(),
+                });
+            }
+        });
+    }
+
+    /// Локальное состояние лайка: множество, коллекция, фильтр, MPRIS.
+    fn apply_like(&mut self, t: &Track, like: bool) {
         if like {
             self.liked.insert(t.id.clone());
-            if let Loadable::Ready(v) = &mut self.likes {
+            if let Loadable::Ready(v) = &mut self.likes
+                && !v.iter().any(|x| x.id == t.id)
+            {
                 v.insert(0, t.clone());
             }
-            self.wave_feedback("like", &t, None);
-            self.toast(format!(" {}", t.full_title()));
         } else {
             self.liked.remove(&t.id);
             if let Loadable::Ready(v) = &mut self.likes {
                 v.retain(|x| x.id != t.id);
             }
-            self.wave_feedback("unlike", &t, None);
-            self.toast(format!(" {}", t.full_title()));
         }
         self.refilter_keep();
         self.mpris_liked();
-        let id = t.full_id();
-        self.spawn(move |c, tx| async move {
-            if let Err(e) = c.set_like(&id, like).await {
-                let _ = tx.send(Msg::Toast(format!("лайк не сохранился: {e}")));
-            }
-        });
     }
 
     /// Иконка лайка в MPRIS-расширении шелла.
@@ -2997,7 +3015,10 @@ impl App {
                 }
                 mpris::Command::Dislike => self.dislike_current(),
             },
-            Msg::Toast(t) => self.toast_err(t),
+            Msg::LikeFailed { track, like, error } => {
+                self.apply_like(&track, !like);
+                self.toast_err(format!("Лайк не сохранился: {error}"));
+            }
         }
     }
 
@@ -3026,8 +3047,13 @@ impl App {
                         self.player.set_paused(paused);
                     }
                     self.player.load(token, src, gain, start);
-                    // Перезагрузка играющего трека: on_track_started не сработает, следующий ставим сами.
+                    // Перезагрузка играющего трека: on_track_started не сработает — источник
+                    // (библиотека/сеть) и следующий трек ставим сами.
                     if self.now.as_ref().is_some_and(|n| n.token == token) {
+                        let origin = self.pending_origins.remove(&token);
+                        if let Some(n) = self.now.as_mut() {
+                            n.origin = origin;
+                        }
                         self.schedule_next();
                     }
                 } else {
