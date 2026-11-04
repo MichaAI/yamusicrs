@@ -33,7 +33,10 @@ pub async fn run(mut app: App, mut rx: UnboundedReceiver<Msg>) -> color_eyre::Re
         SetTitle(TITLE)
     )?;
     let res = event_loop(&mut terminal, &mut app, &mut rx).await;
+    // Время этапов выхода — в лог: «долгий выход» иначе не поймать.
+    let t = std::time::Instant::now();
     app.shutdown();
+    let t_save = t.elapsed();
     let _ = app.images.clear_all(terminal.backend_mut());
     let _ = execute!(
         std::io::stdout(),
@@ -45,6 +48,9 @@ pub async fn run(mut app: App, mut rx: UnboundedReceiver<Msg>) -> color_eyre::Re
     print!("\x1b[23;0t");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     ratatui::restore();
+    tracing::info!("выход: сессия {t_save:?}, всего до восстановления терминала {:?}", t.elapsed());
+    drop(app);
+    tracing::info!("выход: App освобождён через {:?}", t.elapsed());
     res
 }
 

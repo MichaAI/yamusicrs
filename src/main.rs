@@ -181,13 +181,25 @@ fn main() -> color_eyre::Result<()> {
         libc::mallopt(libc::M_ARENA_MAX, 2);
     }
     // Плееру хватает двух рабочих потоков; блокирующих (декод картинок) — не больше четырёх.
-    tokio::runtime::Builder::new_multi_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .max_blocking_threads(4)
         .thread_keep_alive(std::time::Duration::from_secs(2))
         .enable_all()
-        .build()?
-        .block_on(run())
+        .build()?;
+    let res = rt.block_on(run());
+    // Runtime при освобождении ждёт фоновые блокирующие задачи. Логгер уже закрыт,
+    // так что заметную задержку дописываем в лог сами.
+    let t = std::time::Instant::now();
+    drop(rt);
+    if t.elapsed() > std::time::Duration::from_millis(200) {
+        let log = config::Paths::new().log_dir.join("yamusicrs.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(log) {
+            use std::io::Write as _;
+            let _ = writeln!(f, "выход: фоновые задачи tokio завершались {:?}", t.elapsed());
+        }
+    }
+    res
 }
 
 /// Маски манифестов Vulkan-драйверов под видеокарты из `/sys/class/drm`;
