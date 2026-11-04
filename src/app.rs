@@ -88,6 +88,11 @@ pub enum Msg {
         raw: Option<String>,
     },
     Audio(audio::Event),
+    /// Источник получше для играющего трека (подмена на ходу); `None` — lossless нет.
+    Upgraded {
+        token: Token,
+        result: Result<Option<(audio::Source, Origin)>, String>,
+    },
     Mpris(mpris::Command),
     Toast(String),
 }
@@ -539,6 +544,8 @@ pub struct App {
     start_paused: Option<Token>,
     /// Откуда открыт трек (библиотека/сеть) — до момента, когда он реально зазвучит.
     pending_origins: HashMap<Token, Origin>,
+    /// Откуда новый источник, пока идёт подмена на ходу.
+    swap_origin: Option<(Token, Origin)>,
     pub images: Images,
     pub gfx: crate::render::Gfx,
     /// Кнопки ⏮ ▶ ⏭ (в боковой панели): прямоугольник и действие 0/1/2.
@@ -740,6 +747,7 @@ impl App {
             next_loaded: None,
             start_paused: None,
             pending_origins: HashMap::new(),
+            swap_origin: None,
             images,
             gfx,
             controls: Vec::new(),
@@ -2073,6 +2081,9 @@ impl App {
             return self.toast_err("Без сети качество не выбрать".into());
         };
         f.set_quality(q);
+        if q == Quality::Lossless {
+            self.hot_upgrade();
+        }
         self.state.quality = Some(q);
         self.toast(format!("Качество: {} — для следующих треков", quality_label(q)));
     }
@@ -2160,6 +2171,71 @@ impl App {
             },
             Setting::Recheck => {}
         }
+    }
+
+    /// Играющий трек не lossless — попросить FLAC и подменить его на ходу, без паузы.
+    fn hot_upgrade(&mut self) {
+        let Some(n) = &self.now else { return };
+        // Подмена этого трека уже идёт (отметки от прошлых треков не в счёт).
+        if matches!(n.info.codec.as_str(), "FLAC" | "ALAC") || self.swap_origin.as_ref().is_some_and(|(t, _)| *t == n.token) {
+            return;
+        }
+        let Some(f) = self.fetcher.clone() else { return };
+        let (token, track) = (n.token, n.track.clone());
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = f.upgrade_source(&track).await.map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Upgraded { token, result });
+        });
+    }
+
+    fn on_upgraded(&mut self, token: Token, result: Result<Option<(audio::Source, Origin)>, String>) {
+        let playing = self.now.as_ref().is_some_and(|n| n.token == token);
+        match result {
+            Ok(Some((src, origin))) if playing => {
+                self.swap_origin = Some((token, origin));
+                self.player.swap(token, src);
+            }
+            Ok(Some((src, _))) => src.cancel(),
+            Ok(None) if playing => self.toast("У этого трека нет lossless".into()),
+            Err(e) if playing => self.toast_err(format!("Lossless: {e}")),
+            _ => {}
+        }
+    }
+
+    fn on_swapped(&mut self, token: Token, result: Result<audio::SourceInfo, String>) {
+        let origin = self.swap_origin.take_if(|(t, _)| *t == token).map(|(_, o)| o);
+        let Some(n) = self.now.as_mut().filter(|n| n.token == token) else { return };
+        match result {
+            Ok(info) => {
+                if origin.is_some() {
+                    n.origin = origin;
+                }
+                let fmt = match info.bits {
+                    Some(b) => format!("{} {b}/{}", info.codec, khz(info.rate)),
+                    None => format!("{} {}", info.codec, khz(info.rate)),
+                };
+                self.toast(match info.resampled_to {
+                    Some(to) => format!("{fmt} без паузы, ресемплинг в {} · B — перезапустить bit-perfect", khz(to)),
+                    None => format!("{fmt} без паузы"),
+                });
+            }
+            Err(e) => {
+                tracing::warn!("подмена на ходу: {e}");
+                self.toast_err(format!("Lossless на ходу не вышел: {e} — будет со следующего раза"));
+            }
+        }
+    }
+
+    /// Звук ресемплится после подмены — перезапустить трек с той же секунды в родном формате.
+    fn restart_bit_perfect(&mut self) {
+        let Some(n) = &self.now else { return };
+        if n.info.resampled_to.is_none() {
+            return self.toast("Звук и так bit-perfect".into());
+        }
+        let (token, pos) = (n.token, n.pos);
+        self.reload(token, pos);
+        self.toast("Перезапуск в родном формате".into());
     }
 
     fn enqueue(&mut self, t: Track, play_next: bool) {
@@ -2852,6 +2928,7 @@ impl App {
                 }
             }
             Msg::Audio(ev) => self.on_audio(ev),
+            Msg::Upgraded { token, result } => self.on_upgraded(token, result),
             Msg::Mpris(c) => match c {
                 mpris::Command::PlayPause => self.toggle_pause(),
                 mpris::Command::Play => {
@@ -3009,6 +3086,7 @@ impl App {
                 }
             }
             audio::Event::SeekMiss(token, secs) => self.reload(token, secs),
+            audio::Event::Swapped(token, result) => self.on_swapped(token, result),
             audio::Event::Error(token, e) => {
                 let name = self.tokens.get(&token).map(|t| t.2.full_title()).unwrap_or_default();
                 tracing::warn!("{name}: {e}");
@@ -3826,6 +3904,7 @@ impl App {
                 );
             }
             KeyCode::Char('Q') => self.cycle_quality(),
+            KeyCode::Char('B') => self.restart_bit_perfect(),
             KeyCode::Char('N') => self.toggle_normalize(),
             KeyCode::Char('P') => self.add_to_playlist(),
             KeyCode::Char('h') => self.open_history(),
@@ -4147,5 +4226,14 @@ impl Opener {
                 .map(|(p, _)| (audio::Source::File(p), Origin::Library))
                 .ok_or_else(|| color_eyre::eyre::eyre!("нет в библиотеке, а сети нет")),
         }
+    }
+}
+
+/// «44.1 кГц» / «96 кГц».
+fn khz(rate: u32) -> String {
+    if rate.is_multiple_of(1000) {
+        format!("{} кГц", rate / 1000)
+    } else {
+        format!("{:.1} кГц", rate as f32 / 1000.0)
     }
 }

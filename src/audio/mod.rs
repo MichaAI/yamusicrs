@@ -6,6 +6,7 @@
 
 mod decoder;
 mod output;
+mod resample;
 pub mod source;
 
 use std::collections::VecDeque;
@@ -16,6 +17,7 @@ use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
+pub(crate) use decoder::debug_splice;
 pub use source::{Source, StreamBuffer};
 
 /// Идентификатор загруженного трека, выдаётся приложением.
@@ -33,6 +35,8 @@ pub struct SourceInfo {
     pub codec: String,
     pub rate: u32,
     pub bits: Option<u32>,
+    /// Источник подменён на ходу и ресемплится в эту частоту (не bit-perfect).
+    pub resampled_to: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +103,8 @@ pub enum Event {
     /// Seek не по адресу: трек уже целиком декодирован (в кольце играет его хвост,
     /// а декодер ушёл на следующий). Приложение перезагружает трек с позиции.
     SeekMiss(Token, f64),
+    /// Итог горячей подмены источника трека: новый формат или почему не вышло.
+    Swapped(Token, Result<SourceInfo, String>),
 }
 
 pub(crate) enum Cmd {
@@ -116,6 +122,11 @@ pub(crate) enum Cmd {
         crossfade: bool,
     },
     ClearNext,
+    /// Подменить источник играющего трека без паузы (например, AAC → FLAC).
+    Swap {
+        token: Token,
+        source: Source,
+    },
     SetGain {
         token: Token,
         gain: f32,
@@ -210,6 +221,12 @@ impl Player {
     /// Длина кроссфейда в секундах, 0 — встык (gapless).
     pub fn set_crossfade(&self, secs: f32) {
         self.shared.crossfade.store(secs.max(0.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Подменяет источник играющего трека `token` на лету; итог придёт событием `Swapped`.
+    pub fn swap(&self, token: Token, source: Source) {
+        self.track(&source);
+        let _ = self.cmd.send(Cmd::Swap { token, source });
     }
 
     pub fn clear_next(&self) {

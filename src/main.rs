@@ -121,6 +121,9 @@ enum Debug {
         override_usage = "yamusicrs debug tinyml ПРОГРАММА ЗАПРОС",
         after_help = "TINYML_LOG=4 — печатать логи самой программы (1 ошибки … 5 отладка)."
     )]
+    /// Без звука: подменить hq-поток трека на lossless на секунде --at и отчитаться о склейке.
+    #[command(hide = true)]
+    Swap(SwapArgs),
     Tinyml {
         /// JSON-ответ сервера с `offlineRecommenderSource`.
         #[arg(value_name = "ПРОГРАММА", help_heading = "Аргументы")]
@@ -129,6 +132,21 @@ enum Debug {
         #[arg(value_name = "ЗАПРОС", help_heading = "Аргументы")]
         request: PathBuf,
     },
+}
+
+#[derive(Args)]
+struct SwapArgs {
+    /// id трека.
+    track: String,
+    /// На какой секунде подменять.
+    #[arg(long, default_value_t = 60.0)]
+    at: f64,
+    /// Принудительная частота вывода (проверка ресемплера).
+    #[arg(long)]
+    rate: Option<u32>,
+    /// Записать склейку в WAV.
+    #[arg(long)]
+    wav: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -209,6 +227,7 @@ async fn run() -> color_eyre::Result<()> {
 
     match cli.command {
         Some(Command::Debug { what: Debug::Play(p) }) => return play_files(p.files, p.crossfade).await,
+        Some(Command::Debug { what: Debug::Swap(a) }) => return swap_bench(&paths, a).await,
         Some(Command::Debug {
             what: Debug::Tinyml { program, request },
         }) => return tinyml_bench(&program, &request),
@@ -332,7 +351,7 @@ async fn play_files(files: Vec<std::path::PathBuf>, crossfade: f32) -> color_eyr
             ev = rx.recv() => match ev {
                 Some(audio::Event::Drained) | None => break,
                 Some(audio::Event::NeedNext) => enqueue(&player, &mut queued),
-                Some(audio::Event::SeekMiss(..)) => {}
+                Some(audio::Event::SeekMiss(..) | audio::Event::Swapped(..)) => {}
                 Some(audio::Event::Error(_, e)) => color_eyre::eyre::bail!(e),
             },
             _ = tick.tick() => {
@@ -345,6 +364,26 @@ async fn play_files(files: Vec<std::path::PathBuf>, crossfade: f32) -> color_eyr
                 }
             }
         }
+    }
+    Ok(())
+}
+
+async fn swap_bench(paths: &config::Paths, a: SwapArgs) -> color_eyre::Result<()> {
+    use color_eyre::eyre::eyre;
+    let tok = api::auth::StoredToken::load(&paths.token_file).ok_or_else(|| eyre!("нет токена"))?;
+    let client = api::Client::new(tok.access_token);
+    let cfg = config::Config::load(paths);
+    let lib = library::Library::open(cfg.library_dir.clone(), paths.index_file.clone(), cfg.library_max_gb);
+    let f = fetch::Fetcher::new(client.clone(), lib, api::Quality::Lossless);
+    let track = client.tracks(&[a.track]).await?.into_iter().next().ok_or_else(|| eyre!("нет трека"))?;
+    let (sa, ca) = f.debug_source(&track, api::Quality::Hq).await?;
+    let (sb, cb) = f.debug_source(&track, api::Quality::Lossless).await?;
+    println!("{} — {}: {ca} → {cb}", track.artist_names(), track.full_title());
+    let (at, rate, wav) = (a.at, a.rate, a.wav);
+    let r = tokio::task::spawn_blocking(move || audio::debug_splice(sa, sb, at, rate, wav.as_deref())).await?;
+    match r {
+        Ok(s) => println!("{s}"),
+        Err(e) => println!("ошибка: {e}"),
     }
     Ok(())
 }

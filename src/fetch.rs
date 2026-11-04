@@ -102,6 +102,26 @@ impl Fetcher {
         Ok((Source::stream(buf.clone()), Origin::Network { buf }))
     }
 
+    /// Поток трека в заданном качестве (отладка); загрузка, как обычно, ляжет в библиотеку.
+    pub async fn debug_source(&self, track: &Track, q: Quality) -> Result<(Source, String)> {
+        let info = self.client.file_info(&track.id, q).await?;
+        let buf = self.start_download(track, &info)?;
+        Ok((Source::stream(buf), info.codec))
+    }
+
+    /// Источник получше для играющего трека (горячая подмена на lossless).
+    /// `None` — lossless у трека нет.
+    pub async fn upgrade_source(&self, track: &Track) -> Result<Option<(Source, Origin)>> {
+        let info = self.client.file_info(&track.id, Quality::Lossless).await?;
+        if codec_rank(&info.codec) < 3 {
+            self.library.mark_checked(&track.id, 3);
+            return Ok(None);
+        }
+        tracing::info!("подмена {} на ходу → {}", track.id, info.codec);
+        let buf = self.start_download(track, &info)?;
+        Ok(Some((Source::stream(buf.clone()), Origin::Network { buf })))
+    }
+
     /// Запускает загрузку в фоне; по завершении трек ложится в библиотеку.
     fn start_download(&self, track: &Track, info: &DownloadInfo) -> Result<Arc<StreamBuffer>> {
         let urls = info.urls();
@@ -127,14 +147,18 @@ impl Fetcher {
             match this.download(&urls, key, &b).await {
                 Ok(()) => {
                     b.finish();
-                    this.persist(track.clone(), codec, rank, b).await;
+                    this.persist(track.clone(), codec, rank, b.clone()).await;
                 }
                 Err(e) => {
                     tracing::warn!("загрузка {} не удалась: {e}", track.id);
                     b.fail(e.to_string());
                 }
             }
-            this.active.lock().remove(&track.id);
+            // Свою запись: тот же трек могли начать качать заново в другом качестве.
+            let mut act = this.active.lock();
+            if act.get(&track.id).is_some_and(|x| Arc::ptr_eq(x, &b)) {
+                act.remove(&track.id);
+            }
         });
         Ok(buf)
     }
@@ -184,6 +208,10 @@ impl Fetcher {
             None
         };
         let id = track.id.clone();
+        // Пока качали, трек уже лёг в библиотеку в качестве получше (подмена на ходу) — не затираем.
+        if self.library.codec_of(&id).is_some_and(|c| codec_rank(&c) > codec_rank(&codec)) {
+            return tracing::info!("{id}: в библиотеке уже лучше {codec}, не сохраняю");
+        }
         let data = match buf.snapshot() {
             Ok(d) => d,
             Err(e) => return tracing::warn!("не удалось прочитать загрузку {id}: {e}"),

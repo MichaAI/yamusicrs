@@ -129,6 +129,12 @@ impl Library {
         self.index.lock().tracks.keys().cloned().collect()
     }
 
+    /// Кодек скачанного трека.
+    pub fn codec_of(&self, track_id: &str) -> Option<String> {
+        let id = track_id.split(':').next().unwrap_or(track_id);
+        self.index.lock().tracks.get(id).map(|e| e.codec.clone())
+    }
+
     /// Сколько скачанных треков хуже lossless.
     pub fn below_lossless(&self) -> usize {
         self.index.lock().tracks.values().filter(|e| codec_rank(&e.codec) < 3).count()

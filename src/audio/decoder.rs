@@ -1,10 +1,10 @@
 //! Поток декодирования: читает [`Source`], декодирует symphonia и пишет f32 в кольцо.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use symphonia::core::codecs::audio::well_known::{CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
@@ -12,10 +12,13 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::output::Handle;
+use super::resample::Resampler;
+use super::source::Canceller;
 use super::{Cmd, Event, Format, Segment, Shared, Source, SourceInfo, Token};
 
 struct Active {
@@ -32,6 +35,226 @@ struct Active {
     end_secs: Option<f64>,
     /// Решение о кроссфейде в следующий трек уже принято.
     fade_checked: bool,
+    /// Источник подменили на ходу, а его частота другая: приводим к частоте вывода.
+    resampler: Option<Resampler>,
+}
+
+impl Active {
+    /// Декодирует пакет в `out` (с ресемплингом, если нужен, и усилением).
+    fn decode_into(&mut self, packet: &Packet, out: &mut Vec<f32>, tmp: &mut Vec<f32>) -> Result<(), SymError> {
+        let buf = self.decoder.decode(packet)?;
+        let n = buf.samples_interleaved();
+        match &mut self.resampler {
+            None => {
+                out.resize(n, 0.0);
+                buf.copy_to_slice_interleaved(&mut out[..]);
+            }
+            Some(r) => {
+                tmp.resize(n, 0.0);
+                buf.copy_to_slice_interleaved(&mut tmp[..]);
+                out.clear();
+                r.process(tmp, out);
+            }
+        }
+        if self.gain != 1.0 {
+            let g = self.gain;
+            out.iter_mut().for_each(|s| *s *= g);
+        }
+        Ok(())
+    }
+
+    fn secs(&self, ts: Timestamp) -> Option<f64> {
+        secs(self.time_base, ts)
+    }
+}
+
+// ── горячая замена источника (например, AAC → FLAC посреди трека) ────────────
+//
+// Вспомогательный поток открывает новый источник, перематывает его чуть впереди
+// декодера и декодирует кусок `pre`. Декодер, дойдя до этого места, придерживает
+// свой вывод (`hold`), находит точный сдвиг между источниками взаимной корреляцией
+// и сводит их коротким равномощным наплывом — без паузы и щелчка.
+
+/// Окно корреляции, кадров.
+const CORR_N: usize = 4096;
+/// Наплыв при хорошем совпадении и при плохом (другой мастер, тишина), кадров.
+const SPLICE_SHORT: usize = 1024;
+const SPLICE_LONG: usize = 8192;
+/// Поиск сдвига ±0.1 с; начинаем придерживать вывод за 0.15 с до точки.
+const SEARCH_SECS: f64 = 0.1;
+const HOLD_PRE_SECS: f64 = 0.15;
+
+enum Swap {
+    Preparing { token: Token, cancel: Option<Canceller> },
+    Ready(Box<SwapReady>),
+}
+
+struct SwapReady {
+    token: Token,
+    active: Active,
+    /// Время (по треку) первого кадра `pre` и сам кусок нового источника на частоте вывода.
+    start: f64,
+    pre: Vec<f32>,
+    /// Придержанный вывод текущего источника и время его первого кадра.
+    hold: Vec<f32>,
+    hold_start: Option<f64>,
+}
+
+enum Prepared {
+    Ready { token: Token, active: Active, start: f64, pre: Vec<f32> },
+    /// `None` — отменили (не ошибка).
+    Failed { token: Token, err: Option<String> },
+}
+
+fn load_secs(a: &AtomicU64) -> f64 {
+    f64::from_bits(a.load(Ordering::Relaxed))
+}
+
+/// Готовит новый источник к подмене: открыть, перемотать впереди декодера, декодировать кусок.
+fn prepare(token: Token, source: Source, out: Format, decoded: Arc<AtomicU64>) -> Prepared {
+    let failed = |err: String| Prepared::Failed { token, err: Some(err) };
+    let mut a = match open(token, source, 1.0) {
+        Ok(a) => a,
+        Err(err) => return Prepared::Failed { token, err },
+    };
+    if a.format.channels != out.channels {
+        a.source.cancel();
+        return failed(format!("другое число каналов ({} вместо {})", a.format.channels, out.channels));
+    }
+    if a.format.rate != out.rate {
+        a.resampler = Some(Resampler::new(a.format.rate, out.rate, out.channels));
+        a.info.resampled_to = Some(out.rate);
+        a.format = out;
+    }
+    // Перематываем с запасом: пока новый источник докачивается до нужного места,
+    // декодер уходит вперёд. Не успели — запас вдвое больше.
+    let mut lead = 2.0;
+    let mut ok = false;
+    for _ in 0..7 {
+        let target = load_secs(&decoded) + lead;
+        if a.end_secs.is_some_and(|e| target > e - 3.0) {
+            break;
+        }
+        let Some(time) = Time::try_from_secs_f64(target) else { break };
+        let to = match a.reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time,
+                track_id: Some(a.track_id),
+            },
+        ) {
+            Ok(to) => to,
+            Err(_) if a.source.is_cancelled() => return Prepared::Failed { token, err: None },
+            Err(e) => return failed(format!("перемотка: {e}")),
+        };
+        a.decoder.reset();
+        if let Some(r) = &mut a.resampler {
+            r.reset();
+        }
+        let actual = a.secs(to.actual_ts).unwrap_or(target);
+        if actual > load_secs(&decoded) + 0.8 {
+            ok = true;
+            break;
+        }
+        lead *= 2.0;
+    }
+    if !ok {
+        a.source.cancel();
+        return failed("не догнал текущую позицию до конца трека".into());
+    }
+    let ch = out.channels.max(1) as usize;
+    let need = (CORR_N + SPLICE_LONG) * ch + (out.rate as usize / 10) * ch;
+    let (mut pre, mut chunk, mut tmp) = (Vec::new(), Vec::new(), Vec::new());
+    let mut start = None;
+    while pre.len() < need {
+        let packet = match a.reader.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => return failed("источник кончился раньше времени".into()),
+            Err(_) if a.source.is_cancelled() => return Prepared::Failed { token, err: None },
+            Err(e) => return failed(format!("чтение: {e}")),
+        };
+        if packet.track_id != a.track_id {
+            continue;
+        }
+        match a.decode_into(&packet, &mut chunk, &mut tmp) {
+            Ok(()) => {
+                if start.is_none() {
+                    start = a.secs(packet.pts);
+                }
+                pre.extend_from_slice(&chunk);
+            }
+            Err(SymError::DecodeError(_)) => {}
+            Err(e) => return failed(format!("декодер: {e}")),
+        }
+    }
+    // Первые кадры после сброса ресемплера считаются с нулевой историей — их не берём.
+    let skip = if a.resampler.is_some() { 256 } else { 0 };
+    pre.drain(..skip * ch);
+    let start = start.unwrap_or(0.0) + skip as f64 / out.rate as f64;
+    Prepared::Ready { token, active: a, start, pre }
+}
+
+/// Сводит придержанный вывод `hold` (с `hold_start`) с новым источником `pre` (с `pre_start`).
+/// Возвращает итоговые сэмплы, кадр `hold`, с которого звучит новый источник, и качество совпадения.
+fn splice(
+    hold: &[f32],
+    hold_start: f64,
+    pre: &[f32],
+    pre_start: f64,
+    rate: u32,
+    ch: usize,
+    gain: f32,
+) -> Option<(Vec<f32>, usize, f32)> {
+    let mono = |v: &[f32]| -> Vec<f32> { v.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect() };
+    let am = mono(hold);
+    let fm: Vec<f32> = mono(pre).into_iter().map(|s| s * gain).collect();
+    let m = (rate as f64 * SEARCH_SECS) as isize;
+    let hs = ((pre_start - hold_start) * rate as f64).round() as isize;
+    if hs - m < 0 || (hs + m) as usize + CORR_N + SPLICE_LONG > am.len() || fm.len() < CORR_N + SPLICE_LONG {
+        return None;
+    }
+    let f = &fm[..CORR_N];
+    let ef: f32 = f.iter().map(|x| x * x).sum();
+    // Скользящая энергия окна hold.
+    let lo = (hs - m) as usize;
+    let mut ea: f32 = am[lo..lo + CORR_N].iter().map(|x| x * x).sum();
+    let (mut best_k, mut best_c) = (0isize, f32::MIN);
+    for k in -m..=m {
+        let st = (hs + k) as usize;
+        if k > -m {
+            let out = am[st - 1];
+            let inn = am[st + CORR_N - 1];
+            ea += inn * inn - out * out;
+        }
+        let dot: f32 = am[st..st + CORR_N].iter().zip(f).map(|(x, y)| x * y).sum();
+        let c = dot / (ea.max(0.0) * ef).sqrt().max(1e-12);
+        if c > best_c {
+            best_c = c;
+            best_k = k;
+        }
+    }
+    // Тишина: сдвиг не определить, но и щёлкать нечему.
+    let silent = ef < 1e-6 * CORR_N as f32;
+    if silent {
+        best_k = 0;
+        best_c = 1.0;
+    }
+    let fl = if best_c >= 0.7 { SPLICE_SHORT } else { SPLICE_LONG };
+    let h0 = (hs + best_k) as usize;
+    let mut out = Vec::with_capacity(h0 * ch + pre.len());
+    out.extend_from_slice(&hold[..h0 * ch]);
+    for i in 0..fl {
+        let t = (i as f32 + 0.5) / fl as f32;
+        let (gin, gout) = (
+            (t * std::f32::consts::FRAC_PI_2).sin(),
+            (t * std::f32::consts::FRAC_PI_2).cos(),
+        );
+        for c in 0..ch {
+            out.push(hold[(h0 + i) * ch + c] * gout + pre[i * ch + c] * gain * gin);
+        }
+    }
+    out.extend(pre[fl * ch..].iter().map(|s| s * gain));
+    Some((out, h0, best_c))
 }
 
 /// Уходящий трек во время кроссфейда: доигрывает поверх начала следующего.
@@ -67,6 +290,12 @@ struct Dec {
     leftover: Vec<f32>,
     leftover_pos: usize,
     scratch: Vec<f32>,
+    tmp: Vec<f32>,
+    /// До какой секунды трека дошёл декодер (f64 в битах) — для подготовки подмены.
+    decoded: Arc<AtomicU64>,
+    swap: Option<Swap>,
+    prep_tx: Sender<Prepared>,
+    prep_rx: Receiver<Prepared>,
 }
 
 pub(super) fn spawn(
@@ -79,6 +308,7 @@ pub(super) fn spawn(
     std::thread::Builder::new()
         .name("decoder".into())
         .spawn(move || {
+            let (prep_tx, prep_rx) = crossbeam_channel::unbounded();
             let mut d = Dec {
                 shared,
                 prod,
@@ -94,6 +324,11 @@ pub(super) fn spawn(
                 leftover: Vec::new(),
                 leftover_pos: 0,
                 scratch: Vec::new(),
+                tmp: Vec::new(),
+                decoded: Arc::new(AtomicU64::new(0f64.to_bits())),
+                swap: None,
+                prep_tx,
+                prep_rx,
             };
             d.run(rx);
         })
@@ -157,10 +392,12 @@ fn open_inner(token: Token, source: Source, gain: f32) -> Result<Active, String>
             codec: codec.into(),
             rate,
             bits,
+            resampled_to: None,
         },
         gain,
         end_secs,
         fade_checked: false,
+        resampler: None,
     })
 }
 
@@ -185,6 +422,9 @@ impl Dec {
             if let Some(cmd) = cmd {
                 self.handle(cmd);
                 continue;
+            }
+            if let Ok(p) = self.prep_rx.try_recv() {
+                self.on_prepared(p);
             }
 
             if let Some(p) = &self.pending {
@@ -250,6 +490,7 @@ impl Dec {
                 }
             }
             Cmd::ClearNext => self.drop_next(),
+            Cmd::Swap { token, source } => self.start_swap(token, source),
             Cmd::SetGain { token, gain } => {
                 if let Some(a) = self.cur.as_mut().filter(|a| a.token == token) {
                     a.gain = gain;
@@ -271,6 +512,7 @@ impl Dec {
     }
 
     fn reset(&mut self) {
+        self.abort_swap(false);
         if let Some(a) = self.cur.take() {
             a.source.cancel();
         }
@@ -288,7 +530,8 @@ impl Dec {
 
     /// Новый трек начинает звучать с текущей позиции записи в кольце.
     fn begin(&mut self, a: Active, base_secs: f64) {
-        let start = self.shared.written.load(Ordering::Acquire);
+        // Недописанный в кольцо хвост (придержанный при подмене) прозвучит раньше нового трека.
+        let start = self.shared.written.load(Ordering::Acquire) + (self.leftover.len() - self.leftover_pos) as u64;
         let played = self.shared.played.load(Ordering::Acquire);
         let mut segs = self.shared.segments.lock();
         // Сегменты, которые уже целиком позади, больше не нужны.
@@ -350,6 +593,16 @@ impl Dec {
         if remaining > fade_secs as f64 || !self.next.as_ref().is_some_and(|n| n.3) {
             return;
         }
+        // Идёт сведение подмены — решим на следующем пакете; подмена ещё не началась — отменяем.
+        match &self.swap {
+            Some(Swap::Ready(r)) if r.hold_start.is_some() => return,
+            Some(_) => {
+                self.abort_swap(false);
+                let _ = self.events.send(Event::Swapped(token_of(&self.cur), Err("трек уже заканчивается".into())));
+            }
+            None => {}
+        }
+        let Some(a) = self.cur.as_mut() else { return };
         a.fade_checked = true;
         // Хвост короче полсекунды — переход не успеет прозвучать, обычный gapless.
         if remaining < 0.5 {
@@ -396,14 +649,11 @@ impl Dec {
             if packet.track_id != a.track_id {
                 continue;
             }
-            match a.decoder.decode(&packet) {
-                Ok(buf) => {
-                    let n = buf.samples_interleaved();
-                    scratch.resize(n, 0.0);
-                    buf.copy_to_slice_interleaved(&mut scratch[..]);
-                    let g = a.gain;
+            let mut tmp = Vec::new();
+            match a.decode_into(&packet, scratch, &mut tmp) {
+                Ok(()) => {
                     f.buf.clear();
-                    f.buf.extend(scratch.iter().map(|s| s * g));
+                    f.buf.extend_from_slice(scratch);
                     f.pos = 0;
                 }
                 Err(SymError::DecodeError(_)) => {}
@@ -454,10 +704,19 @@ impl Dec {
         ) {
             Ok(to) => {
                 a.decoder.reset();
+                if let Some(r) = &mut a.resampler {
+                    r.reset();
+                }
                 let actual = a
                     .time_base
                     .map(|tb| tb.calc_time_saturating(to.actual_ts).as_secs_f64())
                     .unwrap_or(secs);
+                self.decoded.store(actual.to_bits(), Ordering::Relaxed);
+                let token = a.token;
+                if self.swap.is_some() {
+                    self.abort_swap(false);
+                    let _ = self.events.send(Event::Swapped(token, Err("перемотка во время перехода".into())));
+                }
                 let mut a = self.cur.take().expect("cur");
                 a.fade_checked = false;
                 // Перемотка во время перехода: уходящий трек больше не нужен.
@@ -504,14 +763,14 @@ impl Dec {
             return;
         }
         let pts_end = packet.pts.saturating_add(packet.dur);
-        match a.decoder.decode(&packet) {
-            Ok(buf) => {
-                let n = buf.samples_interleaved();
-                self.scratch.resize(n, 0.0);
-                buf.copy_to_slice_interleaved(&mut self.scratch[..]);
-                if a.gain != 1.0 {
-                    let g = a.gain;
-                    self.scratch.iter_mut().for_each(|s| *s *= g);
+        let (t0, t1) = (a.secs(packet.pts), a.secs(pts_end));
+        match a.decode_into(&packet, &mut self.scratch, &mut self.tmp) {
+            Ok(()) => {
+                if let Some(t1) = t1 {
+                    self.decoded.store(t1.to_bits(), Ordering::Relaxed);
+                }
+                if self.hold_for_swap(t0, t1) {
+                    return;
                 }
                 self.mix_fade();
                 std::mem::swap(&mut self.leftover, &mut self.scratch);
@@ -548,6 +807,11 @@ impl Dec {
     }
 
     fn track_ended(&mut self) {
+        if self.swap.is_some() {
+            let token = token_of(&self.cur);
+            self.abort_swap(true);
+            let _ = self.events.send(Event::Swapped(token, Err("трек закончился раньше перехода".into())));
+        }
         if self.cur.take().is_none() {
             return;
         }
@@ -563,6 +827,152 @@ impl Dec {
         }
     }
 
+    fn start_swap(&mut self, token: Token, source: Source) {
+        let ok = self.cur.as_ref().is_some_and(|a| a.token == token) && self.fade.is_none() && self.pending.is_none();
+        if !ok {
+            source.cancel();
+            let _ = self.events.send(Event::Swapped(token, Err("трек уже сменился".into())));
+            return;
+        }
+        self.abort_swap(false);
+        let out = self.cur.as_ref().expect("cur").format;
+        let cancel = source.canceller();
+        let (tx, decoded) = (self.prep_tx.clone(), self.decoded.clone());
+        let spawned = std::thread::Builder::new()
+            .name("swap-prep".into())
+            .spawn(move || {
+                let _ = tx.send(prepare(token, source, out, decoded));
+            });
+        if spawned.is_ok() {
+            self.swap = Some(Swap::Preparing { token, cancel });
+        }
+    }
+
+    fn on_prepared(&mut self, p: Prepared) {
+        let waiting = matches!(&self.swap, Some(Swap::Preparing { token, .. }) if Some(*token) == self.cur.as_ref().map(|a| a.token));
+        match p {
+            Prepared::Failed { token, err } => {
+                if matches!(&self.swap, Some(Swap::Preparing { token: t, .. }) if *t == token) {
+                    self.swap = None;
+                }
+                if let Some(e) = err {
+                    let _ = self.events.send(Event::Swapped(token, Err(e)));
+                }
+            }
+            Prepared::Ready { token, active, start, pre } => {
+                let mine = waiting && matches!(&self.swap, Some(Swap::Preparing { token: t, .. }) if *t == token);
+                let late = load_secs(&self.decoded) > start - HOLD_PRE_SECS;
+                if !mine || late {
+                    active.source.cancel();
+                    if mine {
+                        self.swap = None;
+                        let _ = self.events.send(Event::Swapped(token, Err("не успел к нужному месту".into())));
+                    }
+                    return;
+                }
+                self.swap = Some(Swap::Ready(Box::new(SwapReady {
+                    token,
+                    active,
+                    start,
+                    pre,
+                    hold: Vec::new(),
+                    hold_start: None,
+                })));
+            }
+        }
+    }
+
+    /// Только что декодированный кусок (`scratch`, время `t0..t1`) придержан ради подмены —
+    /// тогда `true`; если придержано достаточно, источники сводятся и подмена завершается.
+    fn hold_for_swap(&mut self, t0: Option<f64>, t1: Option<f64>) -> bool {
+        let Some(Swap::Ready(r)) = &mut self.swap else { return false };
+        let Some(a) = self.cur.as_ref().filter(|a| a.token == r.token) else {
+            return false;
+        };
+        let (Some(t0), Some(t1)) = (t0, t1) else { return false };
+        if r.hold_start.is_none() {
+            if t1 < r.start - HOLD_PRE_SECS {
+                return false;
+            }
+            if t0 > r.start - SEARCH_SECS {
+                // Проскочили начало окна поиска — свести точно уже не выйдет.
+                let token = r.token;
+                self.abort_swap(false);
+                let _ = self.events.send(Event::Swapped(token, Err("не успел к нужному месту".into())));
+                return false;
+            }
+            r.hold_start = Some(t0);
+        }
+        r.hold.extend_from_slice(&self.scratch);
+        let (rate, ch) = (a.format.rate, a.format.channels.max(1) as usize);
+        let hold_start = r.hold_start.expect("hold_start");
+        let need_end = r.start + SEARCH_SECS + (CORR_N + SPLICE_LONG) as f64 / rate as f64 + 0.01;
+        if hold_start + (r.hold.len() / ch) as f64 / rate as f64 <= need_end {
+            return true;
+        }
+        let Some(Swap::Ready(r)) = self.swap.take() else { unreachable!() };
+        let r = *r;
+        let gain = a.gain;
+        let Some((out, h0, corr)) = splice(&r.hold, hold_start, &r.pre, r.start, rate, ch, gain) else {
+            r.active.source.cancel();
+            // Придержанное (включая только что декодированное) просто отдаём как есть.
+            self.leftover = r.hold;
+            self.leftover_pos = 0;
+            self.push_leftover();
+            let _ = self.events.send(Event::Swapped(r.token, Err("не удалось совместить".into())));
+            return true;
+        };
+        tracing::info!(
+            "подмена источника: {} → {} · сдвиг {:+.1} мс · совпадение {corr:.2}",
+            a.info.codec,
+            r.active.info.codec,
+            ((h0 as f64 / rate as f64 + hold_start) - r.start) * 1000.0
+        );
+        let mut new = r.active;
+        new.gain = gain;
+        new.fade_checked = false;
+        let info = new.info.clone();
+        let base = hold_start + h0 as f64 / rate as f64;
+        let start = self.shared.written.load(Ordering::Acquire) + (h0 * ch) as u64;
+        self.shared.segments.lock().push_back(Segment {
+            start,
+            token: new.token,
+            base_secs: base,
+            format: new.format,
+            info: info.clone(),
+        });
+        let token = new.token;
+        if let Some(old) = self.cur.replace(new) {
+            old.source.cancel();
+        }
+        self.leftover = out;
+        self.leftover_pos = 0;
+        self.push_leftover();
+        let _ = self.events.send(Event::Swapped(token, Ok(info)));
+        true
+    }
+
+    /// Отменяет подмену. `keep_hold` — придержанный звук всё же отдать.
+    fn abort_swap(&mut self, keep_hold: bool) {
+        match self.swap.take() {
+            Some(Swap::Preparing { cancel, .. }) => {
+                if let Some(c) = cancel {
+                    c.cancel();
+                }
+            }
+            Some(Swap::Ready(r)) => {
+                r.active.source.cancel();
+                if keep_hold && !r.hold.is_empty() {
+                    let rest = self.leftover.split_off(self.leftover_pos);
+                    self.leftover = r.hold;
+                    self.leftover.extend(rest);
+                    self.leftover_pos = 0;
+                }
+            }
+            None => {}
+        }
+    }
+
     fn check_drained(&mut self) {
         if self.drained_sent || !self.awaiting_next {
             return;
@@ -572,4 +982,122 @@ impl Dec {
             let _ = self.events.send(Event::Drained);
         }
     }
+}
+
+fn token_of(a: &Option<Active>) -> Token {
+    a.as_ref().map_or(0, |a| a.token)
+}
+
+/// Отладка подмены без звука: `a` играет, на секунде `at` его подменяют на `b` тем же
+/// путём, что и в плеере. `rate` — принудительная частота вывода (проверка ресемплера).
+/// Возвращает отчёт; `wav` — куда записать склеенный кусок для прослушивания.
+pub(crate) fn debug_splice(
+    a: Source,
+    b: Source,
+    at: f64,
+    rate: Option<u32>,
+    wav: Option<&std::path::Path>,
+) -> Result<String, String> {
+    let mut aa = open(1, a, 1.0).map_err(|e| e.unwrap_or_else(|| "отменено".into()))?;
+    if let Some(r) = rate.filter(|r| *r != aa.format.rate) {
+        aa.resampler = Some(Resampler::new(aa.format.rate, r, aa.format.channels));
+        aa.format.rate = r;
+    }
+    let out = aa.format;
+    let decoded = Arc::new(AtomicU64::new((at - 2.0).max(0.0).to_bits()));
+    let (bb, start, pre) = match prepare(2, b, out, decoded) {
+        Prepared::Ready { active, start, pre, .. } => (active, start, pre),
+        Prepared::Failed { err, .. } => return Err(err.unwrap_or_else(|| "отменено".into())),
+    };
+    let time = Time::try_from_secs_f64((start - 1.0).max(0.0)).ok_or("время")?;
+    aa.reader
+        .seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(aa.track_id) })
+        .map_err(|e| format!("перемотка a: {e}"))?;
+    aa.decoder.reset();
+    if let Some(r) = &mut aa.resampler {
+        r.reset();
+    }
+    let ch = out.channels.max(1) as usize;
+    let need_end = start + SEARCH_SECS + (CORR_N + SPLICE_LONG) as f64 / out.rate as f64 + 0.01;
+    let (mut hold, mut chunk, mut tmp) = (Vec::new(), Vec::new(), Vec::new());
+    let mut hold_start = None;
+    loop {
+        let p = aa.reader.next_packet().map_err(|e| format!("a: {e}"))?.ok_or("a кончился")?;
+        if p.track_id != aa.track_id {
+            continue;
+        }
+        let (t0, t1) = (aa.secs(p.pts).unwrap_or(0.0), aa.secs(p.pts.saturating_add(p.dur)).unwrap_or(0.0));
+        if aa.decode_into(&p, &mut chunk, &mut tmp).is_err() {
+            continue;
+        }
+        if hold_start.is_none() {
+            if t1 < start - HOLD_PRE_SECS {
+                continue;
+            }
+            hold_start = Some(t0);
+        }
+        hold.extend_from_slice(&chunk);
+        if hold_start.expect("hs") + (hold.len() / ch) as f64 / out.rate as f64 > need_end {
+            break;
+        }
+    }
+    let hs = hold_start.expect("hs");
+    let (spliced, h0, corr) = splice(&hold, hs, &pre, start, out.rate, ch, 1.0).ok_or("splice: не хватило данных")?;
+    let fl = if corr >= 0.7 { SPLICE_SHORT } else { SPLICE_LONG };
+    // Самый большой скачок между соседними сэмплами: до склейки и в зоне склейки.
+    let jump = |v: &[f32], from: usize, to: usize| -> f32 {
+        let (from, to) = (from.max(1), to.min(v.len() / ch));
+        (from..to)
+            .flat_map(|i| (0..ch).map(move |c| (i, c)))
+            .map(|(i, c)| (v[i * ch + c] - v[(i - 1) * ch + c]).abs())
+            .fold(0.0, f32::max)
+    };
+    let before = jump(&hold, 1, h0);
+    let around = jump(&spliced, h0.saturating_sub(64), h0 + fl + 64);
+    // Насколько источники совпадают после выравнивания (разница относительно сигнала).
+    let (mut diff, mut sig) = (0f64, 0f64);
+    for i in 0..CORR_N.min(pre.len() / ch).min(hold.len() / ch - h0) {
+        for c in 0..ch {
+            let x = hold[(h0 + i) * ch + c] as f64;
+            let y = pre[i * ch + c] as f64;
+            diff += (x - y) * (x - y);
+            sig += x * x;
+        }
+    }
+    let resid_db = 10.0 * (diff / sig.max(1e-12)).log10();
+    if let Some(path) = wav {
+        write_wav(path, &spliced, out.rate, out.channels).map_err(|e| format!("wav: {e}"))?;
+    }
+    Ok(format!(
+        "a: {} {} Гц → вывод {} Гц\nb: {} {} Гц{}\nточка: {start:.3} с · сдвиг {:+.2} мс · совпадение {corr:.3} · наплыв {fl} кадров\n\
+         разница после выравнивания: {resid_db:.1} дБ\nмакс. скачок сэмпла: до склейки {before:.4}, в склейке {around:.4}",
+        aa.info.codec,
+        aa.info.rate,
+        out.rate,
+        bb.info.codec,
+        bb.info.rate,
+        bb.info.resampled_to.map(|r| format!(" (ресемплинг в {r})")).unwrap_or_default(),
+        ((hs + h0 as f64 / out.rate as f64) - start) * 1000.0,
+    ))
+}
+
+fn write_wav(path: &std::path::Path, s: &[f32], rate: u32, ch: u16) -> std::io::Result<()> {
+    let mut b = Vec::with_capacity(44 + s.len() * 2);
+    let data_len = (s.len() * 2) as u32;
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data_len).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&ch.to_le_bytes());
+    b.extend_from_slice(&rate.to_le_bytes());
+    b.extend_from_slice(&(rate * ch as u32 * 2).to_le_bytes());
+    b.extend_from_slice(&(ch * 2).to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data_len.to_le_bytes());
+    for x in s {
+        b.extend_from_slice(&((x.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+    }
+    std::fs::write(path, b)
 }

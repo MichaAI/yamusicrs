@@ -504,7 +504,15 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 row(
                     &mut lines,
                     "Поток",
-                    format!("{} · {:.1} кГц{bits}", n.info.codec, n.info.rate as f32 / 1000.0),
+                    format!(
+                        "{} · {:.1} кГц{bits}{}",
+                        n.info.codec,
+                        n.info.rate as f32 / 1000.0,
+                        n.info
+                            .resampled_to
+                            .map(|r| format!(" → ресемплинг в {:.1} кГц", r as f32 / 1000.0))
+                            .unwrap_or_default()
+                    ),
                     false,
                 );
             }
@@ -2353,6 +2361,11 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, t: &Track, big_tit
                 .add_modifier(Modifier::BOLD),
         ));
         badges.push(Span::raw(" "));
+        if let Some(to) = i.resampled_to {
+            badges.push(Span::styled(format!("→ {} ресемплинг ", khz(to)), ctx.accent()));
+            badges.push(Span::styled("B ", ctx.accent().add_modifier(Modifier::BOLD)));
+            badges.push(Span::styled("bit-perfect  ", ctx.dim()));
+        }
         match &n.origin {
             Some(Origin::Library) => badges.push(Span::styled("● библиотека", ctx.dim())),
             Some(Origin::Network { buf, .. }) => {
@@ -3037,7 +3050,8 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("t", "текст на весь экран"),
         ("v / клик по обложке", "сцена: обложка крупно + текст"),
         ("r / s", "повтор трека / перемешивание"),
-        ("Q", "качество: Lossless → Высокое → Экономия"),
+        ("Q", "качество: Lossless → Высокое → Экономия (Lossless — и для играющего, без паузы)"),
+        ("B", "после перехода на lossless с ресемплингом — перезапустить трек bit-perfect"),
         ("N", "выравнивание громкости вкл/выкл"),
         ("x", "плавный переход: выкл → 3 → 6 → 10 с"),
         ("R", "обновить библиотеку"),
