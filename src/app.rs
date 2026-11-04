@@ -355,6 +355,10 @@ async fn run_pl_op(c: &Client, op: PlOp) -> (Result<String, String>, Option<Stri
 /// Идентификатор уведомления «сейчас играет» (OSC 99): с тем же id kitty обновляет его на месте.
 const NOTIFY_ID: &str = "yamusicrs-now";
 
+/// Сторож вывода: первая повторная попытка через 30 с, дальше вдвое реже, но не реже раза в 5 мин.
+const STALL_FIRST: Duration = Duration::from_secs(30);
+const STALL_MAX: Duration = Duration::from_secs(300);
+
 /// Сколько запросов помнит история поиска.
 const SEARCH_HISTORY_LEN: usize = 30;
 
@@ -602,6 +606,8 @@ pub struct App {
     last_mpris_pos: Instant,
     last_session_save: Instant,
     last_stall: Option<Instant>,
+    /// Пауза до следующей попытки оживить вывод: растёт, пока он не отвечает.
+    stall_backoff: Duration,
     /// Последний клик по строке списка — для двойного клика.
     last_click: Option<(Instant, usize)>,
     /// Строка списка под мышью.
@@ -793,6 +799,7 @@ impl App {
             last_mpris_pos: Instant::now(),
             last_session_save: Instant::now(),
             last_stall: None,
+            stall_backoff: STALL_FIRST,
             last_click: None,
             hover: None,
             mouse: (0, 0),
@@ -3163,13 +3170,23 @@ impl App {
             _ => self.on_track_started(pos),
         }
         // Сторож вывода: звук есть, а PipeWire его не берёт — сообщаем и пробуем переподключиться.
-        if self.player.stalled(Duration::from_secs(2))
-            && self.last_stall.is_none_or(|t| t.elapsed() > Duration::from_secs(30))
-        {
-            self.last_stall = Some(Instant::now());
-            tracing::warn!("PipeWire не забирает звук: пересоздаю поток");
-            self.toast_err("Устройство вывода не отвечает — переподключаюсь".into());
-            self.player.reconnect_output();
+        if self.player.stalled(Duration::from_secs(2)) {
+            if self.last_stall.is_none_or(|t| t.elapsed() > self.stall_backoff) {
+                // Сообщаем один раз за эпизод, дальше пробуем тише и реже.
+                if self.last_stall.is_none() {
+                    self.toast_err("Устройство вывода не отвечает — переподключаюсь".into());
+                }
+                tracing::warn!("PipeWire не забирает звук: переподключаюсь (следующая попытка через {:?})", self.stall_backoff);
+                if self.last_stall.is_some() {
+                    self.stall_backoff = (self.stall_backoff * 2).min(STALL_MAX);
+                }
+                self.last_stall = Some(Instant::now());
+                self.player.reconnect_output();
+            }
+        } else if self.last_stall.is_some() && !self.player.stalled(Duration::from_millis(500)) {
+            // Звук снова идёт (или пауза) — эпизод закончен.
+            self.last_stall = None;
+            self.stall_backoff = STALL_FIRST;
         }
         if self.last_session_save.elapsed() > Duration::from_secs(15) && self.now.is_some() {
             self.persist_session();

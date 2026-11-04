@@ -18,6 +18,8 @@ use super::{Format, Shared};
 
 enum Msg {
     Configure(Format),
+    /// Заново подключиться к PipeWire (демон или сессия могли перезапуститься) и создать поток.
+    Reconnect(Format),
     Active(bool),
     Quit,
 }
@@ -38,10 +40,10 @@ impl Handle {
         }
     }
 
-    /// Пересоздать поток с тем же форматом (сторож при зависшем выводе).
+    /// Переподключиться к PipeWire с нуля и пересоздать поток (сторож при зависшем выводе).
     pub fn reconnect(&self) {
         if let Some(f) = *self.configured.lock() {
-            let _ = self.tx.send(Msg::Configure(f));
+            let _ = self.tx.send(Msg::Reconnect(f));
         }
     }
 
@@ -95,7 +97,7 @@ fn run(
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
-    let core = context.connect_rc(None)?;
+    let core = Rc::new(RefCell::new(context.connect_rc(None)?));
     let _ = ready.send(Ok(()));
 
     let live: Rc<RefCell<Option<Live>>> = Rc::new(RefCell::new(None));
@@ -104,11 +106,19 @@ fn run(
     let _attached = rx.attach(mainloop.loop_(), {
         let live = live.clone();
         move |msg| match msg {
-            Msg::Configure(f) => {
+            Msg::Configure(f) | Msg::Reconnect(f) => {
+                let fresh = matches!(msg, Msg::Reconnect(_));
                 if let Some(old) = live.borrow_mut().take() {
                     let _ = old.stream.disconnect();
                 }
-                match make_stream(&core, &shared, f) {
+                if fresh {
+                    // Старое соединение после перезапуска PipeWire мертво — поток на нём не оживёт.
+                    match context.connect_rc(None) {
+                        Ok(c) => *core.borrow_mut() = c,
+                        Err(e) => return tracing::error!("не удалось переподключиться к PipeWire: {e}"),
+                    }
+                }
+                match make_stream(&core.borrow(), &shared, f) {
                     Ok(l) => {
                         if shared.paused.load(Ordering::Relaxed) {
                             let _ = l.stream.set_active(false);
