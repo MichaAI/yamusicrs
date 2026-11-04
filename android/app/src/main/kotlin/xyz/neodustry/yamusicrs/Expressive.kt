@@ -456,7 +456,13 @@ fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain:
     val bmp by produceState<Bitmap?>(app.cached(url), url) { value = url?.let { app.cover(it) } }
     val img = remember(bmp) { bmp?.asImageBitmap() }
     // plain — картинка как есть (иконки агентов волны с прозрачностью): без подложки и скругления.
-    val box = if (plain) modifier else modifier.clip(RoundedCornerShape(corner)).background(MaterialTheme.colorScheme.surfaceContainerHighest)
+    // Фото (непрозрачный угол) скругляем и в plain-режиме; иконки с прозрачностью — как есть.
+    val photo = remember(bmp) { bmp?.let { (it.getPixel(0, 0) ushr 24) == 0xFF } ?: false }
+    val box = when {
+        !plain -> modifier.clip(RoundedCornerShape(corner)).background(MaterialTheme.colorScheme.surfaceContainerHighest)
+        photo -> modifier.clip(RoundedCornerShape(22.dp))
+        else -> modifier
+    }
     Box(box) {
         img?.let {
             Image(it, null, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop, modifier = Modifier.fillMaxSize())

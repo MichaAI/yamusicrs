@@ -70,6 +70,17 @@ pub struct Artist {
     #[serde(default, deserialize_with = "id_or_empty")]
     pub id: String,
     pub name: String,
+    /// Фото (есть в поиске и списках исполнителей, в треках обычно нет).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<Cover>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub og_image: Option<String>,
+}
+
+impl Artist {
+    pub fn cover_uri(&self) -> Option<&str> {
+        self.cover.as_ref().and_then(|c| c.uri.as_deref()).or(self.og_image.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
