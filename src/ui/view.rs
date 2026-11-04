@@ -1337,12 +1337,16 @@ fn mixed_list(f: &mut Frame, area: Rect, app: &mut App, rows: &[RowKind], ctx: &
                 Line::from(sp)
             }
             RowKind::Track(t) => track_row(app, ctx, t, n, w, selected),
-            RowKind::Other(a, b) => Line::from(vec![
-                Span::styled(if selected { "▌ " } else { "  " }, ctx.accent()),
-                Span::styled(fit(a, w.saturating_sub(12)), ctx.fg()),
-                Span::styled(format!("{b:>8}"), ctx.dim()),
-            ])
-            .style(row_style(ctx, selected)),
+            // Правая колонка не уже 8 и растёт под длинное значение; край — за 2 колонки до скроллбара.
+            RowKind::Other(a, b) => {
+                let bw = b.width().max(8).min(w.saturating_sub(14));
+                Line::from(vec![
+                    Span::styled(if selected { "▌ " } else { "  " }, ctx.accent()),
+                    Span::styled(fit(a, w.saturating_sub(bw + 4)), ctx.fg()),
+                    Span::styled(format!("{:>bw$}", fit(b, bw).trim_end()), ctx.dim()),
+                ])
+                .style(row_style(ctx, selected))
+            }
         });
     }
     f.render_widget(Paragraph::new(lines), area);
