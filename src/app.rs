@@ -69,7 +69,11 @@ pub enum Msg {
         result: Result<SearchResult, String>,
     },
     WaveStarted(Result<api::RotorSession, String>),
-    WaveMore(Result<api::RotorTracks, String>),
+    /// Догрузка волны `session` (очередь могла уже смениться).
+    WaveMore {
+        session: String,
+        result: Result<api::RotorTracks, String>,
+    },
     Opened {
         token: Token,
         next: bool,
@@ -475,6 +479,8 @@ pub enum Screen {
 
 pub struct WaveUi {
     pub loading: bool,
+    /// Идёт догрузка следующей пачки играющей волны.
+    pub extending: bool,
     /// Персональные пресеты («колесо») с `wheel/new`.
     pub items: Loadable<Vec<api::WheelItem>>,
     /// Плавная позиция дуги (догоняет курсор).
@@ -726,6 +732,7 @@ impl App {
             },
             wave: WaveUi {
                 loading: false,
+                extending: false,
                 items: Loadable::Loading,
                 arc: 0.0,
                 active_seeds: None,
@@ -2319,10 +2326,10 @@ impl App {
         let QueueKind::Wave { session, .. } = &self.queue.kind else {
             return;
         };
-        if cur + 3 < self.queue.items.len() || self.wave.loading {
+        if cur + 3 < self.queue.items.len() || self.wave.extending {
             return;
         }
-        self.wave.loading = true;
+        self.wave.extending = true;
         let session = session.clone();
         let queue: Vec<String> = self
             .queue
@@ -2334,7 +2341,8 @@ impl App {
             .map(Track::full_id)
             .collect();
         self.spawn(move |c, tx| async move {
-            let _ = tx.send(Msg::WaveMore(c.rotor_tracks(&session, &queue).await.map_err(err_str)));
+            let result = c.rotor_tracks(&session, &queue).await.map_err(err_str);
+            let _ = tx.send(Msg::WaveMore { session, result });
         });
     }
 
@@ -2885,9 +2893,13 @@ impl App {
                     Err(e) => self.toast_err(format!("Волна: {e}")),
                 }
             }
-            Msg::WaveMore(r) => {
-                self.wave.loading = false;
-                match r {
+            Msg::WaveMore { session, result } => {
+                self.wave.extending = false;
+                // Пока догружали, включили другое — эти треки уже не нужны.
+                if !matches!(&self.queue.kind, QueueKind::Wave { session: s, .. } if *s == session) {
+                    return;
+                }
+                match result {
                     Ok(more) => {
                         self.keep_server_data(more.offline_recommender_data.clone());
                         let have: HashSet<String> = self.queue.items.iter().map(|t| t.id.clone()).collect();
@@ -3097,7 +3109,7 @@ impl App {
                 match next {
                     Some(i) => self.play_index(i),
                     // Волна догружается: ждём WaveMore, он сам поставит следующий.
-                    None if self.wave.loading => {}
+                    None if self.wave.extending => {}
                     None => {
                         if let Some(now) = self.now.take() {
                             self.report_end(now.token, now.pos, false);
