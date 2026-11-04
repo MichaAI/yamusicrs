@@ -58,6 +58,57 @@ pub struct Images {
     /// Передавать кадры через POSIX shared memory (без base64 в потоке терминала).
     shm: bool,
     shm_seq: u64,
+    /// Фоновое уменьшение обложек ровно под пиксели места на экране: kitty масштабирует
+    /// линейно без мипмапов, и большая картинка в маленьком месте рябит и лесенкой.
+    jobs: crossbeam_channel::Sender<ScaleJob>,
+    done: crossbeam_channel::Receiver<Scaled>,
+    /// Старые id после подмены на уменьшенные: удалить, когда кадр с новыми уже выведен.
+    retire: Vec<(u32, u64)>,
+}
+
+/// Уменьшить картинку варианта `size` (в клетках) до `px` пикселей.
+struct ScaleJob {
+    key: String,
+    size: (u16, u16),
+    old_id: u32,
+    png: Vec<u8>,
+    px: (u32, u32),
+}
+
+struct Scaled {
+    key: String,
+    size: (u16, u16),
+    old_id: u32,
+    png: Vec<u8>,
+}
+
+fn scale_worker(jobs: crossbeam_channel::Receiver<ScaleJob>, done: crossbeam_channel::Sender<Scaled>) {
+    for j in jobs {
+        let Ok(full) = image::load_from_memory(&j.png) else { continue };
+        let small = image::imageops::resize(&full.to_rgba8(), j.px.0, j.px.1, image::imageops::FilterType::Lanczos3);
+        let mut png = Vec::new();
+        if image::DynamicImage::ImageRgba8(small)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .is_ok()
+            && done
+                .send(Scaled {
+                    key: j.key,
+                    size: j.size,
+                    old_id: j.old_id,
+                    png,
+                })
+                .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Размер клетки в пикселях, если терминал его сообщает.
+fn cell_px() -> Option<(f32, f32)> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    (ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0)
+        .then(|| (ws.width as f32 / ws.columns as f32, ws.height as f32 / ws.rows as f32))
 }
 
 /// Анимированный блоб волны: одна картинка в терминале, кадры правятся на месте.
@@ -75,6 +126,13 @@ impl Images {
     pub fn new(kitty: bool) -> Self {
         // id берём случайный в 24 битах, чтобы не пересечься с другой программой в том же окне.
         let seed = (std::process::id() & 0xff) << 16;
+        let (jobs, jobs_rx) = crossbeam_channel::unbounded();
+        let (done_tx, done) = crossbeam_channel::unbounded();
+        if kitty {
+            let _ = std::thread::Builder::new()
+                .name("cover-scale".into())
+                .spawn(move || scale_worker(jobs_rx, done_tx));
+        }
         Self {
             kitty,
             next_id: seed | 0x0101,
@@ -87,6 +145,9 @@ impl Images {
             blob_every: BLOB_FRAME,
             shm: std::path::Path::new("/dev/shm").is_dir(),
             shm_seq: 0,
+            jobs,
+            done,
+            retire: Vec::new(),
         }
     }
 
@@ -195,10 +256,23 @@ impl Images {
                         }
                     }
                     let id = id.expect("id");
+                    // Сразу — полная картинка (kitty сожмёт сам), а в фоне готовим уменьшенную
+                    // ровно под пиксели места: её подставим, как будет готова.
                     transmit(&mut self.out, id, &img.png);
-                    // z=1 — явно выше блоба (z=-1).
-                    let _ = write!(self.out, "\x1b_Ga=p,U=1,i={id},c={},r={},z=1,C=1,q=2\x1b\\", size.0, size.1);
+                    place(&mut self.out, id, size);
                     img.variants.insert(size, id);
+                    if let Some((cw, ch)) = cell_px() {
+                        let px = ((size.0 as f32 * cw).round() as u32, (size.1 as f32 * ch).round() as u32);
+                        if px.0 >= 8 && px.1 >= 8 && px.0 < UPLOAD_PX && px.1 < UPLOAD_PX {
+                            let _ = self.jobs.send(ScaleJob {
+                                key: key.to_string(),
+                                size,
+                                old_id: id,
+                                png: img.png.clone(),
+                                px,
+                            });
+                        }
+                    }
                     id
                 }
             };
@@ -257,6 +331,33 @@ impl Images {
 
     /// Отдаёт накопленные команды терминалу. Вызывать перед `terminal.draw`.
     pub fn flush(&mut self, w: &mut impl Write) -> std::io::Result<()> {
+        // Кадр с новыми id уже выведен — старые можно удалять.
+        let tick = self.tick;
+        let out = &mut self.out;
+        self.retire.retain(|&(id, at)| {
+            let keep = at >= tick;
+            if !keep {
+                delete(out, id);
+            }
+            keep
+        });
+        // Готовые уменьшенные обложки — под новым id; клетки переключатся в этом же кадре.
+        while let Ok(sc) = self.done.try_recv() {
+            let live = self
+                .by_key
+                .get(&sc.key)
+                .is_some_and(|i| i.variants.get(&sc.size) == Some(&sc.old_id));
+            if !live {
+                continue;
+            }
+            let id = self.alloc_id();
+            transmit(&mut self.out, id, &sc.png);
+            place(&mut self.out, id, sc.size);
+            if let Some(img) = self.by_key.get_mut(&sc.key) {
+                img.variants.insert(sc.size, id);
+            }
+            self.retire.push((sc.old_id, self.tick));
+        }
         if !self.out.is_empty() {
             w.write_all(&self.out)?;
             w.flush()?;
@@ -368,6 +469,7 @@ impl Images {
                 .by_key
                 .values()
                 .flat_map(|i| i.variants.values())
+                .chain(self.retire.iter().map(|(id, _)| id))
                 .chain(self.blob.as_ref().map(|b| &b.id))
             {
                 write!(w, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")?;
@@ -393,6 +495,11 @@ pub fn fit_square(area: Rect, cell_aspect: f32) -> Rect {
         width: w,
         height: h,
     }
+}
+
+/// Виртуальное размещение под юникод-плейсхолдеры; z=1 — явно выше блоба (z=-1).
+fn place(out: &mut Vec<u8>, id: u32, size: (u16, u16)) {
+    let _ = write!(out, "\x1b_Ga=p,U=1,i={id},c={},r={},z=1,C=1,q=2\x1b\\", size.0, size.1);
 }
 
 /// d=I — удалить картинку вместе с данными.
