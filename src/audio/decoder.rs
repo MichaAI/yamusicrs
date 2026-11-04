@@ -75,6 +75,9 @@ impl Active {
 // свой вывод (`hold`), находит точный сдвиг между источниками взаимной корреляцией
 // и сводит их коротким равномощным наплывом — без паузы и щелчка.
 
+/// Насколько декодер может опережать воспроизведение, сек.
+const LOOKAHEAD_SECS: f64 = 3.0;
+
 /// Окно корреляции, кадров.
 const CORR_N: usize = 4096;
 /// Наплыв при хорошем совпадении и при плохом (другой мастер, тишина), кадров.
@@ -446,9 +449,23 @@ impl Dec {
             }
 
             if self.cur.is_some() {
+                // Не уходим вперёд дальше LOOKAHEAD_SECS: файл и так качается целиком в свой
+                // буфер, а большой запас в кольце только откладывает подмену источника и прочее.
+                if self.ahead_secs() > LOOKAHEAD_SECS {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
                 self.decode_step();
             }
         }
+    }
+
+    /// Сколько секунд звука уже записано в кольцо, но ещё не сыграно.
+    fn ahead_secs(&self) -> f64 {
+        let Some(a) = self.cur.as_ref() else { return 0.0 };
+        let written = self.shared.written.load(Ordering::Acquire);
+        let played = self.shared.played.load(Ordering::Acquire);
+        written.saturating_sub(played) as f64 / (a.format.rate as f64 * a.format.channels.max(1) as f64)
     }
 
     fn handle(&mut self, cmd: Cmd) {
@@ -856,6 +873,7 @@ impl Dec {
         let waiting = matches!(&self.swap, Some(Swap::Preparing { token, .. }) if Some(*token) == self.cur.as_ref().map(|a| a.token));
         match p {
             Prepared::Failed { token, err } => {
+                tracing::info!("подмена {token}: подготовка не удалась: {}", err.as_deref().unwrap_or("отменена"));
                 if matches!(&self.swap, Some(Swap::Preparing { token: t, .. }) if *t == token) {
                     self.swap = None;
                 }
@@ -866,6 +884,11 @@ impl Dec {
             Prepared::Ready { token, active, start, pre } => {
                 let mine = waiting && matches!(&self.swap, Some(Swap::Preparing { token: t, .. }) if *t == token);
                 let late = load_secs(&self.decoded) > start - HOLD_PRE_SECS;
+                tracing::info!(
+                    "подмена {token}: источник готов с {start:.2} с, декодер на {:.2} с{}",
+                    load_secs(&self.decoded),
+                    if !mine { " — уже не нужен" } else if late { " — опоздал" } else { "" }
+                );
                 if !mine || late {
                     active.source.cancel();
                     if mine {

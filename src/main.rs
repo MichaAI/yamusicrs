@@ -147,6 +147,9 @@ struct SwapArgs {
     /// Записать склейку в WAV.
     #[arg(long)]
     wav: Option<PathBuf>,
+    /// Настоящий плеер на нулевой громкости: играть hq с --at, через секунду подменить на lossless.
+    #[arg(long)]
+    live: bool,
 }
 
 #[derive(Args)]
@@ -379,6 +382,31 @@ async fn swap_bench(paths: &config::Paths, a: SwapArgs) -> color_eyre::Result<()
     let (sa, ca) = f.debug_source(&track, api::Quality::Hq).await?;
     let (sb, cb) = f.debug_source(&track, api::Quality::Lossless).await?;
     println!("{} — {}: {ca} → {cb}", track.artist_names(), track.full_title());
+    if a.live {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let player = audio::Player::new(tx, 0.0)?;
+        player.load(1, sa, 1.0, a.at);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        player.swap(1, sb);
+        let t0 = std::time::Instant::now();
+        let mut last = String::new();
+        while t0.elapsed() < std::time::Duration::from_secs(40) {
+            while let Ok(ev) = rx.try_recv() {
+                println!("{:5.1} с  событие: {ev:?}", t0.elapsed().as_secs_f32());
+            }
+            if let Some(p) = player.position() {
+                let i = &p.info;
+                let s = format!("{} {}{}", i.codec, i.rate, i.resampled_to.map(|r| format!(" → {r}")).unwrap_or_default());
+                if s != last {
+                    println!("{:5.1} с  звучит: {s} на {:.2} с трека", t0.elapsed().as_secs_f32(), p.secs);
+                    last = s;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        player.stop();
+        return Ok(());
+    }
     let (at, rate, wav) = (a.at, a.rate, a.wav);
     let r = tokio::task::spawn_blocking(move || audio::debug_splice(sa, sb, at, rate, wav.as_deref())).await?;
     match r {

@@ -24,6 +24,33 @@ pub fn key(pl: &Playlist) -> String {
     format!("{}:{}", pl.uid, pl.kind)
 }
 
+/// Треки очереди на диске: продолжение при старте без сети и без запроса метаданных.
+pub fn queue_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("queue.json")
+}
+
+pub fn load_queue(data_dir: &Path) -> Vec<Track> {
+    std::fs::read(queue_path(data_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Запись в фоне и атомарно.
+pub fn save_queue(data_dir: &Path, tracks: Vec<Track>) {
+    let path = queue_path(data_dir);
+    tokio::task::spawn_blocking(move || {
+        let Ok(b) = serde_json::to_vec(&tracks) else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, b).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    });
+}
+
 impl Snapshot {
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join("offline.json")

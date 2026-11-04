@@ -162,14 +162,14 @@ impl Client {
     // ── треки ────────────────────────────────────────────────────────────────
 
     pub async fn tracks(&self, ids: &[String]) -> Result<Vec<Track>> {
+        // Пачки по 250 — параллельно, порядок сохраняется.
+        let batches = futures_util::future::try_join_all(ids.chunks(250).map(|chunk| async move {
+            let form = [("track-ids", chunk.join(",")), ("with-positions", "true".into())];
+            self.post_form::<Vec<serde_json::Value>>("/tracks", &form).await
+        }))
+        .await?;
         let mut out = Vec::with_capacity(ids.len());
-        for chunk in ids.chunks(250) {
-            let batch: Vec<serde_json::Value> = self
-                .post_form(
-                    "/tracks",
-                    &[("track-ids", chunk.join(",")), ("with-positions", "true".into())],
-                )
-                .await?;
+        for batch in batches {
             out.extend(batch.into_iter().filter_map(|v| {
                 serde_json::from_value::<Track>(v)
                     .map_err(|e| tracing::warn!("пропускаю трек: {e}"))

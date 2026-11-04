@@ -557,10 +557,16 @@ pub struct App {
     start_paused: Option<Token>,
     /// Откуда открыт трек (библиотека/сеть) — до момента, когда он реально зазвучит.
     pending_origins: HashMap<Token, Origin>,
+    /// Какая очередь записана в queue.json: (поколение, длина).
+    queue_saved: Option<(u64, usize)>,
+    /// Очередь восстановлена из кеша, а трек ещё не открыт (ждёт сети): (индекс, секунда).
+    resume_at: Option<(usize, f64)>,
     /// Не открывшиеся треки очереди (поколение, индекс) — автопереход их пропускает.
     failed: HashSet<(u64, usize)>,
     /// Откуда новый источник, пока идёт подмена на ходу.
     swap_origin: Option<(Token, Origin, bool)>,
+    /// Подмена склеена, но ещё не зазвучала (декодер впереди): сообщение покажем, когда дойдёт.
+    swap_toast: Option<(Token, String)>,
     pub images: Images,
     pub gfx: crate::render::Gfx,
     /// Кнопки ⏮ ▶ ⏭ (в боковой панели): прямоугольник и действие 0/1/2.
@@ -766,7 +772,10 @@ impl App {
             start_paused: None,
             pending_origins: HashMap::new(),
             swap_origin: None,
+            swap_toast: None,
             failed: HashSet::new(),
+            queue_saved: None,
+            resume_at: None,
             images,
             gfx,
             controls: Vec::new(),
@@ -819,6 +828,7 @@ impl App {
             stored_token: None,
             cfg,
         };
+        app.resume_local();
         if offline {
             app.enter_offline();
         } else {
@@ -940,7 +950,44 @@ impl App {
     }
 
     /// Восстанавливает очередь прошлого запуска и ставит трек на паузу с той же секунды.
+    /// Очередь из queue.json — сразу при запуске, до входа. Скачанный трек загружается
+    /// на паузу тут же, остальные откроются после входа без запроса метаданных.
+    fn resume_local(&mut self) {
+        let Some(r) = self.state.resume.clone().filter(|r| !r.ids.is_empty()) else {
+            return;
+        };
+        let tracks = crate::offline::load_queue(&self.data_dir);
+        if tracks.len() != r.ids.len() || tracks.iter().zip(&r.ids).any(|(t, id)| t.full_id() != *id) {
+            return;
+        }
+        let kind = match r.wave {
+            Some((session, batch)) => QueueKind::Wave { session, batch },
+            None => QueueKind::List,
+        };
+        let pos = r.pos.min(tracks.len() - 1);
+        self.replace_queue(tracks, kind, r.title);
+        self.queue_saved = Some((self.queue.generation, self.queue.items.len()));
+        self.queue.pos = Some(pos);
+        if self.library.contains(&self.queue.items[pos].id) {
+            self.play_index_with(pos, r.secs, true, Opener::Offline(self.library.clone()));
+        } else {
+            self.loading_track = Some(self.queue.items[pos].clone());
+            self.resume_at = Some((pos, r.secs));
+        }
+    }
+
     fn restore_session(&mut self) {
+        // Очередь уже из кеша: открыть трек (если ещё ждал сети) и подготовить следующий.
+        if !self.queue.items.is_empty() {
+            match self.resume_at.take() {
+                Some((pos, secs)) => {
+                    self.play_index_at(pos, secs, true);
+                    self.toast("Продолжаем с того же места — Space".into());
+                }
+                None => self.schedule_next(),
+            }
+            return;
+        }
         let Some(r) = self.state.resume.clone().filter(|r| !r.ids.is_empty()) else {
             return;
         };
@@ -953,6 +1000,11 @@ impl App {
     /// Сессия на диск: при смене трека и периодически — переживёт и kill терминала.
     fn persist_session(&mut self) {
         self.save_session();
+        let mark = (self.queue.generation, self.queue.items.len());
+        if !self.queue.items.is_empty() && self.queue_saved != Some(mark) {
+            self.queue_saved = Some(mark);
+            crate::offline::save_queue(&self.data_dir, self.queue.items.clone());
+        }
         self.state.save(&self.paths);
         self.last_session_save = Instant::now();
     }
@@ -1666,10 +1718,15 @@ impl App {
     }
 
     fn play_index_at(&mut self, idx: usize, start: f64, paused: bool) {
-        let Some(token) = self.alloc_token(idx) else {
+        let Some(opener) = self.opener() else {
             return;
         };
-        let Some(fetcher) = self.opener() else {
+        self.play_index_with(idx, start, paused, opener);
+    }
+
+    fn play_index_with(&mut self, idx: usize, start: f64, paused: bool, fetcher: Opener) {
+        self.resume_at = None;
+        let Some(token) = self.alloc_token(idx) else {
             return;
         };
         if let Some(now) = &self.now {
@@ -1949,6 +2006,15 @@ impl App {
         } else {
             "нет сети, а программа офлайн-волны ещё не скачана".into()
         });
+        // Очередь из кеша: без сети доступно только скачанное.
+        if !self.queue.items.is_empty() && self.now.is_none() {
+            let items = std::mem::take(&mut self.queue.items);
+            self.queue.items = self.offline_tracks(items);
+            let from = self.resume_at.take().map_or(0, |(p, _)| p);
+            if let Some(pos) = (from..self.queue.items.len()).chain(0..from).find(|&i| self.queue.items[i].available) {
+                self.play_index_at(pos, 0.0, true);
+            }
+        }
         if self.queue.items.is_empty()
             && let Some(r) = self.state.resume.clone()
         {
@@ -2243,6 +2309,10 @@ impl App {
     }
 
     fn on_swapped(&mut self, token: Token, result: Result<audio::SourceInfo, String>) {
+        tracing::info!("подмена {token}: {}", match &result {
+            Ok(i) => format!("готово, {} {} Гц", i.codec, i.rate),
+            Err(e) => format!("не вышло: {e}"),
+        });
         let taken = self.swap_origin.take_if(|(t, ..)| *t == token);
         let auto = taken.as_ref().is_some_and(|s| s.2);
         let origin = taken.map(|(_, o, _)| o);
@@ -2256,10 +2326,11 @@ impl App {
                     Some(b) => format!("{} {b}/{}", info.codec, khz(info.rate)),
                     None => format!("{} {}", info.codec, khz(info.rate)),
                 };
-                self.toast(match info.resampled_to {
+                let text = match info.resampled_to {
                     Some(to) => format!("{fmt} без паузы, ресемплинг в {} · B — перезапустить bit-perfect", khz(to)),
                     None => format!("{fmt} без паузы"),
-                });
+                };
+                self.swap_toast = Some((token, text));
             }
             Err(e) => {
                 tracing::warn!("подмена на ходу: {e}");
@@ -3198,7 +3269,11 @@ impl App {
         match &mut self.now {
             Some(n) if n.token == pos.token => {
                 n.pos = pos.secs;
+                let changed = n.info.codec != pos.info.codec;
                 n.info = pos.info;
+                if changed && let Some((_, text)) = self.swap_toast.take_if(|(t, _)| *t == pos.token) {
+                    self.toast(text);
+                }
             }
             _ => self.on_track_started(pos),
         }
