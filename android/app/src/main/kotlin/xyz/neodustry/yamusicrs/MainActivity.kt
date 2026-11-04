@@ -26,9 +26,7 @@ class MainActivity : ComponentActivity() {
         }
         val app = application as YaApp
         setContent {
-            YaTheme {
-                AppScreen(app, openUrl = { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) })
-            }
+            AppScreen(app, openUrl = { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) })
         }
     }
 

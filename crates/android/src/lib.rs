@@ -28,6 +28,8 @@ pub struct TrackItem {
     pub album: String,
     /// Обложка 400×400 (https), если есть.
     pub cover: Option<String>,
+    /// Миниатюра 200×200 для списков.
+    pub thumb: Option<String>,
     pub duration_ms: u64,
     pub available: bool,
 }
@@ -40,10 +42,36 @@ impl From<&Track> for TrackItem {
             artists: t.artist_names(),
             album: t.album().map(|a| a.full_title()).unwrap_or_default(),
             cover: t.cover_uri().map(|u| api::cover_url(u, 400)),
+            thumb: t.cover_uri().map(|u| api::cover_url(u, 200)),
             duration_ms: t.duration_ms.unwrap_or(0),
             available: t.available,
         }
     }
+}
+
+/// Пресет «колеса» Моей волны.
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct WavePreset {
+    pub name: String,
+    pub description: Option<String>,
+    /// Иконка агента (https, 200×200).
+    pub icon: Option<String>,
+    /// Цвет агента 0xRRGGBB.
+    pub color: Option<u32>,
+    pub seeds: Vec<String>,
+}
+
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct LyricLine {
+    /// Начало строки, мс (для обычного текста — 0).
+    pub time_ms: u64,
+    pub text: String,
+}
+
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct LyricsData {
+    pub synced: bool,
+    pub lines: Vec<LyricLine>,
 }
 
 #[derive(uniffi::Enum, Clone, PartialEq, Debug)]
@@ -77,6 +105,11 @@ pub struct PlayerState {
     pub queue_pos: Option<u32>,
     pub queue_len: u32,
     pub wave: bool,
+    /// Сиды и название играющей волны (пусто — играет не волна).
+    pub wave_seeds: Vec<String>,
+    pub wave_name: String,
+    /// Волна запускается.
+    pub wave_loading: bool,
     pub likes_loading: bool,
 }
 
@@ -86,6 +119,9 @@ pub trait CoreListener: Send + Sync {
     fn on_likes(&self, likes: Vec<TrackItem>);
     fn on_queue(&self, title: String, items: Vec<TrackItem>);
     fn on_toast(&self, text: String, error: bool);
+    fn on_wheel(&self, presets: Vec<WavePreset>);
+    /// Текст играющего трека `track_id`; `None` — текста нет.
+    fn on_lyrics(&self, track_id: String, lyrics: Option<LyricsData>);
 }
 
 enum Cmd {
@@ -100,6 +136,7 @@ enum Cmd {
     ToggleLike,
     Dislike,
     Wave,
+    WaveSeeds(Vec<String>, String),
     SubmitToken(String),
     NewCode,
     Shutdown,
@@ -191,6 +228,11 @@ impl Core {
         self.send(Cmd::Wave);
     }
 
+    /// Волна по сидам пресета (`on_wheel`).
+    pub fn start_wave_with(&self, seeds: Vec<String>, name: String) {
+        self.send(Cmd::WaveSeeds(seeds, name));
+    }
+
     pub fn submit_token(&self, token: String) {
         self.send(Cmd::SubmitToken(token));
     }
@@ -269,11 +311,56 @@ async fn run(paths: Paths, music: PathBuf, mut rx: UnboundedReceiver<Cmd>, liste
             match e {
                 Effect::Toast { text, error } => listener.on_toast(text, error),
                 Effect::LikesChanged => publisher.likes_dirty = true,
+                Effect::Wheel { .. } => {
+                    if let Loadable::Ready(items) = &engine.wave.items {
+                        listener.on_wheel(items.iter().map(preset).collect());
+                    }
+                }
+                Effect::TrackStarted { track, .. } => load_lyrics(&engine, track, listener.clone()),
                 _ => {}
             }
         }
         publisher.publish(&engine, listener.as_ref());
     }
+}
+
+fn preset(i: &api::WheelItem) -> WavePreset {
+    WavePreset {
+        name: i.name().to_string(),
+        description: i.data.wave.as_ref().and_then(|w| w.description.clone()),
+        icon: i.icon().map(|u| api::cover_url(u, 200)),
+        color: i.color().map(|(r, g, b)| (r as u32) << 16 | (g as u32) << 8 | b as u32),
+        seeds: i.seeds(),
+    }
+}
+
+/// Текст зазвучавшего трека — в фоне; ответ уходит в Kotlin сам.
+fn load_lyrics(e: &Engine, t: Track, l: Arc<dyn CoreListener>) {
+    let (sync, text) = (t.has_sync_lyrics(), t.has_text_lyrics());
+    if !sync && !text {
+        return l.on_lyrics(t.id, None);
+    }
+    let (client, file) = (e.client.clone(), e.library.file(&t.id));
+    tokio::spawn(async move {
+        let (lyrics, _) = yamusic_core::lyrics::load(client, file, t.id.clone(), sync).await;
+        let data = lyrics.map(|l| match l {
+            yamusic_core::lyrics::Lyrics::Synced(v) => LyricsData {
+                synced: true,
+                lines: v
+                    .into_iter()
+                    .map(|x| LyricLine {
+                        time_ms: (x.at * 1000.0) as u64,
+                        text: x.text,
+                    })
+                    .collect(),
+            },
+            yamusic_core::lyrics::Lyrics::Plain(v) => LyricsData {
+                synced: false,
+                lines: v.into_iter().map(|text| LyricLine { time_ms: 0, text }).collect(),
+            },
+        });
+        l.on_lyrics(t.id, data);
+    });
 }
 
 fn command(e: &mut Engine, c: Cmd) {
@@ -317,6 +404,7 @@ fn command(e: &mut Engine, c: Cmd) {
                 e.start_wave(vec![MY_WAVE.into()], "Моя волна".into());
             }
         }
+        Cmd::WaveSeeds(seeds, name) => e.start_wave(seeds, name),
         Cmd::SubmitToken(t) => {
             if let Some(input) = e.login_input() {
                 *input = t;
@@ -401,6 +489,12 @@ fn snapshot(e: &Engine) -> PlayerState {
         queue_pos: e.queue.pos.map(|p| p as u32),
         queue_len: e.queue.items.len() as u32,
         wave: matches!(e.queue.kind, engine::QueueKind::Wave { .. } | engine::QueueKind::OfflineWave),
+        wave_seeds: match e.queue.kind {
+            engine::QueueKind::Wave { .. } => e.wave.active_seeds.clone().unwrap_or_default(),
+            _ => Vec::new(),
+        },
+        wave_name: e.wave.active_name.clone().unwrap_or_default(),
+        wave_loading: e.wave.loading,
         likes_loading: matches!(e.likes, Loadable::Loading),
     }
 }

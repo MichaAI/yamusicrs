@@ -76,3 +76,31 @@ mod tests {
         assert_eq!(current(&lines, 4.0), Some(1));
     }
 }
+
+/// Текст трека: из тегов скачанного файла (без сети и лишнего запроса), иначе с сервера.
+/// Старые файлы несут только обычный текст — при сети синхронный берём с сервера.
+/// Возвращает разобранный текст и исходный (LRC или строки).
+pub async fn load(
+    client: Option<crate::api::Client>,
+    file: Option<std::path::PathBuf>,
+    id: String,
+    sync: bool,
+) -> (Option<Lyrics>, Option<String>) {
+    let embedded = match file {
+        Some(p) => tokio::task::spawn_blocking(move || crate::library::embedded_lyrics(&p))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let lrc = |s: &str| matches!(Lyrics::parse_lrc(s), Lyrics::Synced(_));
+    let raw = match (embedded, client) {
+        (Some(s), c) if !sync || c.is_none() || lrc(&s) => Some(s),
+        (_, Some(c)) => c.lyrics(&id, sync).await.ok(),
+        (e, None) => e,
+    };
+    let lyrics = raw
+        .as_deref()
+        .map(|s| if sync { Lyrics::parse_lrc(s) } else { Lyrics::plain(s) });
+    (lyrics, raw)
+}

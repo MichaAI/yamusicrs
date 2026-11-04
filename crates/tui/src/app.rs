@@ -954,23 +954,7 @@ impl App {
         let file = self.engine.library.file(&id);
         let (client, tx) = (self.engine.client.clone(), self.tx.clone());
         tokio::spawn(async move {
-            let embedded = match file {
-                Some(p) => tokio::task::spawn_blocking(move || crate::library::embedded_lyrics(&p))
-                    .await
-                    .ok()
-                    .flatten(),
-                None => None,
-            };
-            // Старые файлы несут только обычный текст: при сети синхронный берём с сервера.
-            let lrc = |s: &str| matches!(Lyrics::parse_lrc(s), Lyrics::Synced(_));
-            let raw = match (embedded, client) {
-                (Some(s), c) if !sync || c.is_none() || lrc(&s) => Some(s),
-                (_, Some(c)) => c.lyrics(&id, sync).await.ok(),
-                (e, None) => e,
-            };
-            let lyrics = raw
-                .as_deref()
-                .map(|s| if sync { Lyrics::parse_lrc(s) } else { Lyrics::plain(s) });
+            let (lyrics, raw) = crate::lyrics::load(client, file, id.clone(), sync).await;
             let _ = tx.send(Msg::Lyrics {
                 track_id: id,
                 lyrics,
