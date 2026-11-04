@@ -2554,14 +2554,14 @@ impl App {
                 v.insert(0, t.clone());
             }
             self.wave_feedback("like", &t, None);
-            self.toast(format!("♥ {}", t.full_title()));
+            self.toast(format!(" {}", t.full_title()));
         } else {
             self.liked.remove(&t.id);
             if let Loadable::Ready(v) = &mut self.likes {
                 v.retain(|x| x.id != t.id);
             }
             self.wave_feedback("unlike", &t, None);
-            self.toast(format!("♡ {}", t.full_title()));
+            self.toast(format!(" {}", t.full_title()));
         }
         self.refilter_keep();
         self.mpris_liked();

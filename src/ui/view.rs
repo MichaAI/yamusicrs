@@ -668,7 +668,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
             ("n/p", "трек"),
             ("←→", "перемотка"),
             ("↑↓", "громкость"),
-            ("l", "♥"),
+            ("l", ""),
             ("v/Esc", "выйти"),
             ("?", "все клавиши"),
         ]
@@ -677,7 +677,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
             View::Wave if matches!(app.queue.kind, crate::app::QueueKind::Wave { .. }) => &[
                 ("n", "дальше"),
                 ("d", "не нравится"),
-                ("l", "♥"),
+                ("l", ""),
                 ("Space", "пауза"),
                 ("←→", "настройка"),
                 ("?", "все клавиши"),
@@ -711,7 +711,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
                 ("Enter", "играть"),
                 ("Space", "пауза"),
                 ("n/p", "трек"),
-                ("l", "♥"),
+                ("l", ""),
                 ("a", "в очередь"),
                 ("o/i", "альбом/артист"),
                 ("t", "текст"),
@@ -980,7 +980,7 @@ fn draw_artist_head(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx, name: &
         stats.push(format!("{} слушателей за месяц", fmt_count(n)));
     }
     if let Some(n) = info.and_then(|a| a.likes_count) {
-        stats.push(format!("♥ {}", fmt_count(n)));
+        stats.push(format!(" {}", fmt_count(n)));
     }
     if let Some(c) = info.and_then(|a| a.counts) {
         stats.push(format!("{} треков · {} релизов", c.tracks, c.direct_albums));
@@ -1178,7 +1178,7 @@ fn track_row<'a>(app: &App, ctx: &Ctx, t: &Track, n: usize, w: usize, selected: 
     }
     spans.push(Span::styled(format!("{dur:>6} "), ctx.dim()));
     spans.push(Span::styled(
-        if liked { "♥" } else { " " },
+        if liked { "" } else { " " },
         Style::new().fg(ctx.p.accent2.color()),
     ));
     spans.push(Span::styled(
@@ -2385,7 +2385,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, t: &Track, big_tit
         badges.push(Span::styled(format!("{} загрузка…", ctx.spinner()), ctx.dim()));
     }
     if app.is_liked(t) {
-        badges.push(Span::styled("  ♥", Style::new().fg(ctx.p.accent2.color())));
+        badges.push(Span::styled("  ", Style::new().fg(ctx.p.accent2.color())));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(badges));
@@ -3038,7 +3038,7 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("n / p", "следующий / предыдущий"),
         ("← → (Shift)", "перемотка 5 с (30 с)"),
         ("+ / -", "громкость"),
-        ("l / L", "♥ играющий / выделенный"),
+        ("l / L", " играющий / выделенный"),
         ("d", "не рекомендовать (волна)"),
         ("a / A", "в конец очереди / следующим"),
         ("P", "добавить трек в плейлист"),
