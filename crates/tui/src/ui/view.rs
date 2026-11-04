@@ -49,13 +49,13 @@ pub fn draw(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     app.overlays.clear();
     app.occluders.clear();
     // Блоб живёт только на экране волны; под справкой и полноэкранным текстом его не видно.
-    let on_wave = matches!(app.page().view, View::Wave) && !app.lyrics_mode && app.wave.items.ready().is_some();
+    let on_wave = matches!(app.page().view, View::Wave) && !app.lyrics_mode && app.engine.wave.items.ready().is_some();
     let blob_visible =
-        matches!(app.screen, Screen::Main) && !app.show_help && (app.stage_mode && app.now.is_some() || on_wave);
+        matches!(app.engine.screen, Screen::Main) && !app.show_help && (app.stage_mode && app.engine.now.is_some() || on_wave);
     if !blob_visible {
         app.images.hide_blob();
     }
-    match &app.screen {
+    match &app.engine.screen {
         Screen::Connecting(err) => connecting(f, area, err.as_deref(), ctx),
         Screen::Login(l) => login(f, area, l, ctx),
         Screen::Main => main_screen(f, app, ctx),
@@ -403,7 +403,7 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
 
     app.areas.cover = Rect::default();
     app.controls.clear();
-    if app.stage_mode && app.now.is_some() {
+    if app.stage_mode && app.engine.now.is_some() {
         draw_stage(f, body, app, ctx);
         draw_player(f, player, app, ctx);
         draw_footer(f, footer, app, ctx);
@@ -527,7 +527,7 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             if t.explicit() {
                 row(&mut lines, "Содержание", "🅴 explicit".into(), false);
             }
-            if let Some(n) = app.now.as_ref().filter(|n| n.track.id == t.id) {
+            if let Some(n) = app.engine.now.as_ref().filter(|n| n.track.id == t.id) {
                 let bits = n.info.bits.map(|b| format!(" · {b} бит")).unwrap_or_default();
                 row(
                     &mut lines,
@@ -654,16 +654,16 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let left_w: usize = spans.iter().map(|s| s.content.width()).sum();
 
     let mut right = Vec::new();
-    if app.offline {
+    if app.engine.offline {
         right.push(Span::styled("⊘ офлайн  ", Style::new().fg(ctx.p.accent2.color()).add_modifier(Modifier::BOLD)));
     }
     // Ynison: играем здесь по выбору с другого устройства или музыка сейчас на другом.
-    if app.yn_active {
+    if app.engine.yn_active {
         right.push(Span::styled("⇄ здесь  ", ctx.accent()));
-    } else if let Some(t) = app.yn_other_device() {
+    } else if let Some(t) = app.engine.yn_other_device() {
         right.push(Span::styled(format!("⇄ на «{t}»  "), ctx.dim()));
     }
-    if let Some(acc) = &app.account {
+    if let Some(acc) = &app.engine.account {
         let name = acc
             .account
             .display_name
@@ -693,7 +693,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
     let hints: &[(&str, &str)] = if app.search_editing {
         &[("Enter", "искать"), ("Esc", "выйти из поля"), ("^U", "очистить")]
-    } else if app.stage_mode && app.now.is_some() {
+    } else if app.stage_mode && app.engine.now.is_some() {
         &[
             ("Space", "пауза"),
             ("n/p", "трек"),
@@ -705,7 +705,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
         ]
     } else {
         match app.page().view {
-            View::Wave if matches!(app.queue.kind, crate::app::QueueKind::Wave { .. }) => &[
+            View::Wave if matches!(app.engine.queue.kind, crate::app::QueueKind::Wave { .. }) => &[
                 ("n", "дальше"),
                 ("d", "не нравится"),
                 ("l", ""),
@@ -756,7 +756,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
         spans.push(Span::styled(*k, ctx.accent()));
         spans.push(Span::styled(format!(" {d}  "), ctx.dim()));
     }
-    let (n, bytes) = app.library.stats();
+    let (n, bytes) = app.engine.library.stats();
     let lib = format!(
         "{} · в библиотеке {n} · {:.1} ГБ ",
         app.gfx.backend(),
@@ -775,18 +775,18 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
 fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let title = match &app.page().view {
         View::Wave => "Моя волна".to_string(),
-        View::Likes => format!("Мне нравится · {}", app.likes.ready().map_or(0, Vec::len)),
+        View::Likes => format!("Мне нравится · {}", app.engine.likes.ready().map_or(0, Vec::len)),
         View::Playlists => "Плейлисты".into(),
         View::Search => "Поиск".into(),
-        View::Queue => format!("Очередь · {}", app.queue.title),
+        View::Queue => format!("Очередь · {}", app.engine.queue.title),
         View::Releases => "Новые релизы".into(),
         View::Settings => "Настройки".into(),
         View::Tracks {
             title, album: Some(a), ..
-        } if app.liked_albums.contains(a) => format!("\u{f004} {title}"),
+        } if app.engine.liked_albums.contains(a) => format!("\u{f004} {title}"),
         View::Tracks { title, .. } => title.clone(),
-        View::Artist { name, artist_id, .. } if app.liked_artists.contains(artist_id) => format!("\u{f004} {name}"),
-        View::Artist { name, artist_id, .. } if app.disliked_artists.contains(artist_id) => {
+        View::Artist { name, artist_id, .. } if app.engine.liked_artists.contains(artist_id) => format!("\u{f004} {name}"),
+        View::Artist { name, artist_id, .. } if app.engine.disliked_artists.contains(artist_id) => {
             format!("⊘ {name} · не рекомендовать")
         }
         View::Artist { name, .. } => name.clone(),
@@ -809,7 +809,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     match &app.page().view {
         View::Wave => draw_wave(f, inner, app, ctx),
         View::Likes => {
-            let tracks = match &app.likes {
+            let tracks = match &app.engine.likes {
                 Loadable::Ready(t) => t.clone(),
                 other => return status(f, inner, other, ctx, "Загружаю коллекцию"),
             };
@@ -893,7 +893,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         View::Settings => draw_settings(f, inner, app, ctx),
         View::Search => draw_search(f, inner, app, ctx),
         View::Queue => {
-            let tracks = app.queue.items.clone();
+            let tracks = app.engine.queue.items.clone();
             if tracks.is_empty() {
                 let p = Paragraph::new("Очередь пуста — включи волну (w) или выбери что-нибудь в коллекции")
                     .style(ctx.dim())
@@ -1268,10 +1268,10 @@ fn track_columns(w: usize) -> (usize, usize, usize) {
 }
 
 fn track_row<'a>(app: &App, ctx: &Ctx, t: &Track, n: usize, w: usize, selected: bool) -> Line<'a> {
-    let playing = app.now.as_ref().is_some_and(|x| x.track.id == t.id);
-    let loading = app.loading_track.as_ref().is_some_and(|x| x.id == t.id) && !playing;
+    let playing = app.engine.now.as_ref().is_some_and(|x| x.track.id == t.id);
+    let loading = app.engine.loading_track.as_ref().is_some_and(|x| x.id == t.id) && !playing;
     let marker = if playing {
-        playing_glyph(ctx, app.player.paused())
+        playing_glyph(ctx, app.engine.player.paused())
     } else if !t.available {
         "⊘ ".into()
     } else if loading {
@@ -1286,8 +1286,8 @@ fn track_row<'a>(app: &App, ctx: &Ctx, t: &Track, n: usize, w: usize, selected: 
     } else {
         "—".into()
     };
-    let liked = app.is_liked(t);
-    let cached = app.library.contains(&t.id);
+    let liked = app.engine.is_liked(t);
+    let cached = app.engine.library.contains(&t.id);
     let (tw, aw, albw) = track_columns(w);
     let title_style = if playing {
         ctx.accent().add_modifier(Modifier::BOLD)
@@ -1518,7 +1518,7 @@ fn mixed_list(f: &mut Frame, area: Rect, app: &mut App, rows: &[RowKind], ctx: &
 
 fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     use crate::app::PlaylistRow;
-    if let other @ (Loadable::Loading | Loadable::Failed(_)) = &app.playlists {
+    if let other @ (Loadable::Loading | Loadable::Failed(_)) = &app.engine.playlists {
         return status(f, area, other, ctx, "Загружаю плейлисты");
     }
     let rows: Vec<RowKind> = app
@@ -1534,11 +1534,11 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 RowKind::Other(format!("▤ {}", p.title), format!("{} тр.{lock}", p.track_count.unwrap_or(0)))
             }
             PlaylistRow::LikedAlbums => {
-                RowKind::Other("\u{f004} Альбомы".into(), format!("{}", app.liked_albums.len()))
+                RowKind::Other("\u{f004} Альбомы".into(), format!("{}", app.engine.liked_albums.len()))
             }
             PlaylistRow::TopArtists => RowKind::Other("★ Топ исполнителей за месяц".into(), String::new()),
             PlaylistRow::LikedArtists => {
-                RowKind::Other("\u{f004} Исполнители".into(), format!("{}", app.liked_artists.len()))
+                RowKind::Other("\u{f004} Исполнители".into(), format!("{}", app.engine.liked_artists.len()))
             }
         })
         .collect();
@@ -1789,8 +1789,8 @@ fn draw_search(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 }
 
 fn draw_wave(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
-    app.wave.hits.clear();
-    let items = match &app.wave.items {
+    app.wave_hits.clear();
+    let items = match &app.engine.wave.items {
         Loadable::Ready(v) => v.clone(),
         other => {
             app.images.hide_blob();
@@ -1811,7 +1811,7 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
     let mid = area.y as f32 + area.height as f32 / 2.0 - 1.0;
     let radius = (area.width as f32 * 0.55).min(40.0);
     for (i, item) in items.iter().enumerate() {
-        let d = i as f32 - app.wave.arc;
+        let d = i as f32 - app.wave_arc;
         let y = (mid + d * SLOT).round() as i32 - 1;
         if y < area.y as i32 || y + icon_h as i32 > (area.y + area.height) as i32 {
             continue;
@@ -1852,7 +1852,7 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
         // Яркость по расстоянию от центра дуги.
         let fade = (1.0 - d.abs() / 4.5).clamp(0.15, 1.0);
         let is_sel = i == sel;
-        let active = app.is_active_preset(item);
+        let active = app.engine.is_active_preset(item);
         let base = if item.accent() { Rgb::hex(0xFFDB4D) } else { ctx.p.fg };
         let col = base.lerp(ctx.p.dim.scale(0.4), 1.0 - fade);
         let mut name_style = Style::new().fg(col.color());
@@ -1864,7 +1864,7 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
         let mut spans = Vec::new();
         if active {
             spans.push(Span::styled(
-                format!("{} ", playing_glyph(ctx, app.player.paused())),
+                format!("{} ", playing_glyph(ctx, app.engine.player.paused())),
                 ctx.accent(),
             ));
         }
@@ -1892,7 +1892,7 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
                 },
             );
         }
-        app.wave.hits.push((
+        app.wave_hits.push((
             Rect {
                 x,
                 y,
@@ -1906,8 +1906,8 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
 
 /// Правая часть: блоб в цвете пресета, название поверх, кнопки управления.
 fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate::api::WheelItem>, ctx: &Ctx) {
-    let wave_on = matches!(app.queue.kind, QueueKind::Wave { .. });
-    let playing = wave_on && app.now.is_some() && !app.player.paused();
+    let wave_on = matches!(app.engine.queue.kind, QueueKind::Wave { .. });
+    let playing = wave_on && app.engine.now.is_some() && !app.engine.player.paused();
     let [stage, hint] = Layout::vertical([Constraint::Min(6), Constraint::Length(2)]).areas(area);
 
     // Палитра блоба — только из обложки (до четырёх разных цветов).
@@ -1922,7 +1922,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate
     let colors = draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 }, None);
 
     let title = if wave_on {
-        app.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
+        app.engine.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
     } else {
         "Моя волна".into()
     };
@@ -1974,7 +1974,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate
             },
         );
     }
-    if let Some(n) = app.now.as_ref().filter(|_| wave_on) {
+    if let Some(n) = app.engine.now.as_ref().filter(|_| wave_on) {
         f.render_widget(
             Paragraph::new(Line::styled(
                 format!("{} — {}", n.track.full_title(), n.track.artist_names()),
@@ -2003,7 +2003,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate
     );
 
     // Кнопки ⏮ ▶ ⏭ — кликабельные.
-    let hint_line = if app.wave.loading {
+    let hint_line = if app.engine.wave.loading {
         Line::from(vec![
             Span::styled(format!("{} ", ctx.spinner()), ctx.accent()),
             Span::styled("запускаю…", ctx.dim()),
@@ -2122,7 +2122,7 @@ fn draw_aura(
         colors,
         phase: app.wave_phase,
         energy,
-        dither: app.cfg.blob_dither as f32,
+        dither: app.engine.cfg.blob_dither as f32,
     };
     // Kitty рисует блоб поверх фона ячеек, так что под справкой он просвечивал бы сквозь неё.
     if app.show_help {
@@ -2200,7 +2200,7 @@ fn blob_halfblocks(f: &mut Frame, r: Rect, colors: Cols, t: f32) {
 
 /// Полноэкранный «сейчас играет»: крупная обложка со свечением в её цветах, текст справа.
 fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
-    let Some(track) = app.now.as_ref().map(|n| n.track.clone()) else {
+    let Some(track) = app.engine.now.as_ref().map(|n| n.track.clone()) else {
         return;
     };
     let [left, right] = Layout::horizontal([Constraint::Percentage(52), Constraint::Min(30)]).areas(area);
@@ -2227,7 +2227,7 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         height: gh.min(area.height),
     };
     let colors = to_cols(ctx.p.blob);
-    let speed = if app.player.paused() { 0.15 } else { 0.6 };
+    let speed = if app.engine.player.paused() { 0.15 } else { 0.6 };
     // Скорость меняется плавно — без рывка при паузе/запуске.
     app.blob_speed += (speed - app.blob_speed) * (ctx.dt * 2.0).min(1.0);
     app.wave_phase += ctx.dt * app.blob_speed;
@@ -2236,7 +2236,7 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         .cover_uri()
         .filter(|k| app.images.contains(k))
         .map(|_| crate::ui::kitty::fit_square(cover, ctx.cell_aspect));
-    draw_aura(f, app, ctx, glow, colors, if app.player.paused() { 0.0 } else { 1.0 }, hole);
+    draw_aura(f, app, ctx, glow, colors, if app.engine.player.paused() { 0.0 } else { 1.0 }, hole);
     match track.cover_uri() {
         Some(k) if app.images.contains(k) => {
             app.images.render(k, cover, f.buffer_mut(), ctx.cell_aspect);
@@ -2365,7 +2365,7 @@ fn control_box(f: &mut Frame, app: &mut App, ctx: &Ctx, r: Rect) {
         .border_style(Style::new().fg(ctx.p.dim.lerp(ctx.p.accent, 0.3).scale(0.8).color()));
     f.render_widget(b, r);
     // Nerd Font (Font Awesome, BMP): назад, play/pause, вперёд — escape-кодами, чтобы не терялись.
-    let play = if app.player.paused() { "\u{f04b}" } else { "\u{f04c}" };
+    let play = if app.engine.player.paused() { "\u{f04b}" } else { "\u{f04c}" };
     let buttons = [
         ("\u{f048}", 0u8, ctx.fg()),
         (play, 1, ctx.accent()),
@@ -2404,10 +2404,10 @@ fn draw_side(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     f.render_widget(block, area);
 
     let track = app
-        .now
+        .engine.now
         .as_ref()
         .map(|n| n.track.clone())
-        .or_else(|| app.loading_track.clone());
+        .or_else(|| app.engine.loading_track.clone());
     let Some(track) = track else {
         let p = Paragraph::new(vec![
             Line::raw(""),
@@ -2550,7 +2550,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, t: &Track, big_tit
     ));
 
     let mut badges = vec![Span::raw(" ")];
-    if let Some(n) = &app.now
+    if let Some(n) = &app.engine.now
         && n.track.id == t.id
     {
         let i = &n.info;
@@ -2588,7 +2588,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx, t: &Track, big_tit
     } else {
         badges.push(Span::styled(format!("{} загрузка…", ctx.spinner()), ctx.dim()));
     }
-    if app.is_liked(t) {
+    if app.engine.is_liked(t) {
         badges.push(Span::styled("  ", Style::new().fg(ctx.p.accent2.color())));
     }
     lines.push(Line::raw(""));
@@ -2798,9 +2798,9 @@ fn draw_lyrics(
     if area.height == 0 {
         return;
     }
-    let pos = app.now.as_ref().map_or(0.0, |n| n.pos);
+    let pos = app.engine.now.as_ref().map_or(0.0, |n| n.pos);
     let Some((_, lyrics)) = &app.lyrics else {
-        let msg = match &app.now {
+        let msg = match &app.engine.now {
             Some(n) if n.track.has_sync_lyrics() || n.track.has_text_lyrics() => {
                 format!("{} текст загружается", ctx.spinner())
             }
@@ -3125,8 +3125,8 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     f.render_widget(block, area);
     let [l1, l2, l3] = Layout::vertical([Constraint::Length(1); 3]).areas(inner);
 
-    let paused = app.player.paused();
-    let (title, pos, dur) = match (&app.now, &app.loading_track) {
+    let paused = app.engine.player.paused();
+    let (title, pos, dur) = match (&app.engine.now, &app.engine.loading_track) {
         (_, Some(t)) => (
             format!("{} {} — {}", ctx.spinner(), t.full_title(), t.artist_names()),
             0.0,
@@ -3146,16 +3146,16 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     };
 
     // Строка 1: трек слева, состояние справа.
-    let vol = app.player.volume();
+    let vol = app.engine.player.volume();
     let vol_bar: String = (0..8).map(|i| if (i as f32) < vol * 8.0 { '▮' } else { '▯' }).collect();
     let mut right = vec![];
-    if app.repeat_one {
+    if app.engine.repeat_one {
         right.push(Span::styled("⟲1 ", ctx.accent()));
     }
-    if app.shuffle {
+    if app.engine.shuffle {
         right.push(Span::styled("⤨ ", ctx.accent()));
     }
-    right.push(Span::styled(format!("{} ", quality_label(app.quality())), ctx.dim()));
+    right.push(Span::styled(format!("{} ", quality_label(app.engine.quality())), ctx.dim()));
     right.push(Span::styled("vol ", ctx.dim()));
     right.push(Span::styled(vol_bar, ctx.accent()));
     right.push(Span::styled(format!(" {:>3.0}% ", vol * 100.0), ctx.dim()));
@@ -3169,7 +3169,7 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     spans.extend(right);
     f.render_widget(Paragraph::new(Line::from(spans)), l1);
     if app.kitty_text
-        && let Some(n) = &app.now
+        && let Some(n) = &app.engine.now
         && let Some(o) = link_cells(f, l1.x + 3, l1.y, tw.saturating_sub(2) as u16, App::track_url(&n.track))
     {
         app.overlays.push(o);
@@ -3189,7 +3189,7 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     } else {
         0.0
     };
-    let buffered = match app.now.as_ref().and_then(|n| n.origin.as_ref()) {
+    let buffered = match app.engine.now.as_ref().and_then(|n| n.origin.as_ref()) {
         Some(Origin::Network { buf, .. }) => buf.progress(),
         _ => 1.0,
     };
@@ -3229,14 +3229,14 @@ fn draw_player(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     f.render_widget(Paragraph::new(Line::from(sp)), l2);
 
     // Строка 3: контекст очереди.
-    let ctx_line = if app.queue.items.is_empty() {
+    let ctx_line = if app.engine.queue.items.is_empty() {
         String::new()
     } else {
         format!(
             " {} · {}/{}",
-            app.queue.title,
-            app.queue.pos.map_or(0, |p| p + 1),
-            app.queue.items.len()
+            app.engine.queue.title,
+            app.engine.queue.pos.map_or(0, |p| p + 1),
+            app.engine.queue.items.len()
         )
     };
     f.render_widget(Paragraph::new(Line::styled(ctx_line, ctx.dim())), l3);

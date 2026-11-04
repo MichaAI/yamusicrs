@@ -1,4 +1,4 @@
-//! Ynison в приложении: что делать со звуком по командам других устройств и что им сообщать.
+//! Ynison в движке: что делать со звуком по командам других устройств и что им сообщать.
 //!
 //! Правила (как у официальных устройств, проверено Music Assistant вживую):
 //! - пока активно другое устройство, мы только видны в списке и ничего не публикуем;
@@ -8,10 +8,12 @@
 //! - включили что-то здесь, пока активен другой, — забираем активность себе;
 //! - активность ушла (выбрали другое устройство или сервер сам поставил паузу) — пауза здесь.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::*;
-use crate::ynison::{Event, Out, Playable, QueueState, Status};
+use super::{Effect, Engine, Msg, QueueKind, err_str};
+use crate::api::Track;
+use crate::ynison::{self, Event, Out, Playable, QueueState, Status};
 
 /// Окно очереди, которое уходит на сервер (официальные клиенты тоже не шлют больше 200).
 const WINDOW: usize = 200;
@@ -20,9 +22,9 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 /// Расхождение позиции с командой, после которого перематываем.
 const SEEK_SLACK_MS: u64 = 2500;
 
-impl App {
+impl Engine {
     /// Подключиться, если включено в настройках, есть токен и это не тестовый экземпляр.
-    pub(super) fn ynison_start(&mut self) {
+    pub fn ynison_start(&mut self) {
         if self.ynison.is_some() || !self.cfg.ynison || self.offline {
             return;
         }
@@ -51,7 +53,7 @@ impl App {
         }));
     }
 
-    pub(super) fn ynison_stop(&mut self) {
+    pub fn ynison_stop(&mut self) {
         self.ynison = None;
         self.yn = None;
         self.yn_active = false;
@@ -76,7 +78,7 @@ impl App {
         id
     }
 
-    pub(super) fn ynison_label(&self) -> String {
+    pub fn ynison_label(&self) -> String {
         if !self.cfg.ynison {
             return "выкл".into();
         }
@@ -105,7 +107,7 @@ impl App {
 
     // ── входящее ─────────────────────────────────────────────────────────────
 
-    pub(super) fn on_ynison(&mut self, ev: Event) {
+    pub fn on_ynison(&mut self, ev: Event) {
         match ev {
             Event::Connected => {
                 self.yn_connected = true;
@@ -142,7 +144,7 @@ impl App {
             if self.now.is_some() && !self.player.paused() {
                 self.player.set_paused(true);
                 let pos = self.now.as_ref().map_or(0.0, |n| n.pos);
-                let _ = self.mpris.send(mpris::Update::Status { playing: false, pos });
+                self.emit(Effect::Playback { playing: false, pos });
                 let to = r
                     .active
                     .as_deref()
@@ -210,7 +212,7 @@ impl App {
         });
     }
 
-    pub(super) fn on_ynison_queue(
+    pub fn on_ynison_queue(
         &mut self,
         generation: u64,
         q: QueueState,
@@ -272,7 +274,7 @@ impl App {
         if self.player.paused() != s.paused {
             self.player.set_paused(s.paused);
             let pos = self.now.as_ref().map_or(0.0, |n| n.pos);
-            let _ = self.mpris.send(mpris::Update::Status { playing: !s.paused, pos });
+            self.emit(Effect::Playback { playing: !s.paused, pos });
         }
         let local = self.now.as_ref().map_or(0, |n| (n.pos * 1000.0) as u64);
         if local.abs_diff(s.progress_ms) > SEEK_SLACK_MS
@@ -281,7 +283,7 @@ impl App {
             let secs = s.progress_ms as f64 / 1000.0;
             self.player.seek(now.token, secs);
             now.pos = secs;
-            let _ = self.mpris.send(mpris::Update::Seeked(secs));
+            self.emit(Effect::Seeked(secs));
         }
     }
 
@@ -340,7 +342,7 @@ impl App {
     }
 
     /// Позиция/пауза — на сервер, если мы активны.
-    pub(super) fn yn_publish_status(&mut self) {
+    pub fn yn_publish_status(&mut self) {
         if !self.yn_active {
             return;
         }
@@ -373,7 +375,7 @@ impl App {
     }
 
     /// Трек начал играть (или встал на паузу в начале).
-    pub(super) fn yn_track_started(&mut self) {
+    pub fn yn_track_started(&mut self) {
         if std::mem::take(&mut self.yn_remote_start) {
             // Запущено по команде телефона: подтверждаем трек и позицию, активность не трогаем.
             self.yn_publish_player();
@@ -386,14 +388,14 @@ impl App {
     }
 
     /// Пауза/игра нажата здесь.
-    pub(super) fn yn_local_play_state(&mut self) {
+    pub fn yn_local_play_state(&mut self) {
         if !self.yn_active && !self.player.paused() {
             return self.yn_claim();
         }
         self.yn_publish_status();
     }
 
-    pub(super) fn yn_tick(&mut self) {
+    pub fn yn_tick(&mut self) {
         if self.yn_active && !self.player.paused() && self.now.is_some() && self.yn_last_sent.elapsed() > HEARTBEAT {
             self.yn_publish_status();
         }

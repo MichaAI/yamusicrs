@@ -35,7 +35,7 @@ pub async fn run(mut app: App, mut rx: UnboundedReceiver<Msg>) -> color_eyre::Re
     let res = event_loop(&mut terminal, &mut app, &mut rx).await;
     // Время этапов выхода — в лог: «долгий выход» иначе не поймать.
     let t = std::time::Instant::now();
-    app.shutdown();
+    app.engine.shutdown();
     let t_save = t.elapsed();
     let _ = app.images.clear_all(terminal.backend_mut());
     let _ = execute!(
@@ -60,7 +60,7 @@ async fn event_loop(
     rx: &mut UnboundedReceiver<Msg>,
 ) -> color_eyre::Result<()> {
     let mut events = EventStream::new();
-    let mut fps = app.cfg.fps.clamp(5, 120);
+    let mut fps = app.engine.cfg.fps.clamp(5, 120);
     let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / fps as f64));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_frame = Instant::now();
@@ -123,15 +123,15 @@ async fn event_loop(
             _ = tick.tick() => {}
         }
         // Частоту кадров могли поменять во вкладке «Настройки».
-        if app.cfg.fps.clamp(5, 120) != fps {
-            fps = app.cfg.fps.clamp(5, 120);
+        if app.engine.cfg.fps.clamp(5, 120) != fps {
+            fps = app.engine.cfg.fps.clamp(5, 120);
             tick = tokio::time::interval(Duration::from_secs_f64(1.0 / fps as f64));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         }
         if app.quit {
             return Ok(());
         }
-        if !refresh_checked && let Some(tok) = app.token_needs_refresh() {
+        if !refresh_checked && let Some(tok) = app.engine.token_needs_refresh() {
             refresh_checked = true;
             tracing::info!(
                 "токен скоро истечёт: refresh при следующем запуске (exp {:?})",

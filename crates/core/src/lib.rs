@@ -4,6 +4,7 @@
 pub mod api;
 pub mod audio;
 pub mod config;
+pub mod engine;
 pub mod fetch;
 pub mod library;
 pub mod lyrics;

@@ -133,7 +133,7 @@ Android 2026.09.5 использует тот же протокол.
   дальше искать по строкам в `out/app/_next/static/chunks`.
 - Android: см. память о реверсе APK (adb pull + `jadx --no-res`).
 
-## Реализация в yamusicrs (`crates/core/src/ynison.rs`, `crates/tui/src/app/yn.rs`)
+## Реализация в yamusicrs (`crates/core/src/ynison.rs`, `crates/core/src/engine/yn.rs`)
 
 - Транспорт как у Music Assistant (их провайдер проверен с официальным Android вживую):
   OAuth — HTTP-заголовком `Authorization`, `Origin: https://music.yandex.ru`, subprotocol
