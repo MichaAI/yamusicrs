@@ -77,6 +77,19 @@ fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Сегмент пути: всё, кроме букв/цифр ASCII и `-_.~`, — в %XX (теги бывают кириллицей, с пробелами и запятыми).
+fn path_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn hmac_b64(key: &[u8], msg: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac key");
     mac.update(msg.as_bytes());
@@ -560,6 +573,26 @@ impl Client {
             .flatten()
             .filter_map(|c| Some((c["title"].as_str()?.to_string(), c["value"].as_str()?.to_string())))
             .collect())
+    }
+
+    /// Дерево тегов: настроения, занятия, жанры, эпохи.
+    pub async fn metatags(&self) -> Result<Vec<MetaTree>> {
+        let v: Value = self
+            .send(self.req_as(reqwest::Method::GET, "/landing3/metatags", DESKTOP_CLIENT))
+            .await?;
+        Ok(serde_json::from_value(v["trees"].clone())?)
+    }
+
+    /// Страница тега (параметры — как у десктопа).
+    pub async fn metatag(&self, tag: &str) -> Result<Metatag> {
+        let path = format!("/metatags/{}", path_escape(tag));
+        let q = [
+            ("playlistsCount", "30".to_string()),
+            ("albumsCount", "30".into()),
+            ("artistsCount", "30".into()),
+            ("tracksCount", "0".into()),
+        ];
+        self.send(self.req_as(reqwest::Method::GET, &path, DESKTOP_CLIENT).query(&q)).await
     }
 
     /// «Похожие треки» (как в мобильном клиенте).

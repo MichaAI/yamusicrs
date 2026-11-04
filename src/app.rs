@@ -45,6 +45,8 @@ pub enum Msg {
     LibraryIds(Result<api::LibraryIds, String>),
     LikedAlbums { view_id: u64, result: Result<Vec<api::Album>, String> },
     LikedArtists { view_id: u64, result: Result<Vec<api::Artist>, String> },
+    Metatags { view_id: u64, result: Result<Vec<api::MetaTree>, String> },
+    Metatag { view_id: u64, result: Result<api::Metatag, String> },
     /// Лайк/дизлайк альбома или исполнителя не сохранился — откатить.
     EntityFailed { what: Entity, id: String, on: bool, error: String },
     Playlists(Result<Vec<Playlist>, String>),
@@ -422,6 +424,64 @@ pub enum View {
     Albums { id: u64, albums: Loadable<Vec<api::Album>> },
     /// Лайкнутые исполнители.
     Artists { id: u64, artists: Loadable<Vec<api::Artist>> },
+    /// «Жанры и настроения»: деревья тегов.
+    Metatags { id: u64, trees: Loadable<Vec<api::MetaTree>> },
+    /// Страница одного тега.
+    Metatag {
+        id: u64,
+        title: String,
+        page: Loadable<api::Metatag>,
+    },
+}
+
+/// Строка «Жанров и настроений»: заголовок ветки или тег (с глубиной вложенности).
+pub enum TagRow<'a> {
+    Header(&'a str),
+    Leaf(&'a api::MetaLeaf, usize),
+}
+
+pub fn tag_rows(trees: &[api::MetaTree]) -> Vec<TagRow<'_>> {
+    fn leaves<'a>(v: &mut Vec<TagRow<'a>>, ls: &'a [api::MetaLeaf], depth: usize) {
+        for l in ls {
+            v.push(TagRow::Leaf(l, depth));
+            leaves(v, &l.leaves, depth + 1);
+        }
+    }
+    let mut v = Vec::new();
+    for t in trees {
+        v.push(TagRow::Header(&t.title));
+        leaves(&mut v, &t.leaves, 0);
+    }
+    v
+}
+
+/// Строка страницы тега.
+pub enum MetaRow<'a> {
+    Header(&'static str),
+    Wave(&'a str),
+    Playlist(&'a Playlist),
+    Album(&'a api::Album),
+    Artist(&'a api::Artist),
+}
+
+pub fn meta_rows(m: &api::Metatag) -> Vec<MetaRow<'_>> {
+    let mut v = Vec::new();
+    if let Some(s) = m.station_id.as_deref() {
+        v.push(MetaRow::Wave(s));
+    }
+    if !m.playlists.is_empty() {
+        v.push(MetaRow::Header("Плейлисты"));
+        v.extend(m.playlists.iter().map(MetaRow::Playlist));
+    }
+    if !m.albums.is_empty() {
+        v.push(MetaRow::Header("Альбомы"));
+        v.extend(m.albums.iter().map(MetaRow::Album));
+    }
+    if !m.artists.is_empty() {
+        v.push(MetaRow::Header("Исполнители"));
+        v.extend(m.artists.iter().map(MetaRow::Artist));
+    }
+    v
 }
 
 /// Вид + курсор в нём.
@@ -1675,6 +1735,8 @@ impl App {
             View::Artist { brief, .. } => brief.ready().map_or(0, |b| artist_rows(b).len()),
             View::Albums { albums, .. } => albums.ready().map_or(0, Vec::len),
             View::Artists { artists, .. } => artists.ready().map_or(0, Vec::len),
+            View::Metatags { trees, .. } => trees.ready().map_or(0, |t| tag_rows(t).len()),
+            View::Metatag { page, .. } => page.ready().map_or(0, |m| meta_rows(m).len()),
         }
     }
 
@@ -1691,7 +1753,10 @@ impl App {
         }
         let p = self.page_mut();
         let mut sel = p.sel as isize + delta;
-        if matches!(p.view, View::Search | View::Artist { .. }) {
+        if matches!(
+            p.view,
+            View::Search | View::Artist { .. } | View::Metatags { .. } | View::Metatag { .. }
+        ) {
             // Заголовки секций пропускаем.
             sel = sel.clamp(0, len as isize - 1);
             p.sel = sel as usize;
@@ -1711,6 +1776,12 @@ impl App {
             View::Artist { brief, .. } => brief
                 .ready()
                 .is_some_and(|b| matches!(artist_rows(b).get(i), Some(ArtistRow::Header(_)))),
+            View::Metatags { trees, .. } => trees
+                .ready()
+                .is_some_and(|t| matches!(tag_rows(t).get(i), Some(TagRow::Header(_)))),
+            View::Metatag { page, .. } => page
+                .ready()
+                .is_some_and(|m| matches!(meta_rows(m).get(i), Some(MetaRow::Header(_)))),
             _ => false,
         }
     }
@@ -1797,6 +1868,35 @@ impl App {
             View::Artists { artists, .. } => {
                 if let Some(a) = artists.ready().and_then(|v| v.get(sel)).cloned() {
                     self.open_artist(a);
+                }
+            }
+            View::Metatags { trees, .. } => {
+                if let Some(TagRow::Leaf(l, _)) = trees.ready().and_then(|t| tag_rows(t).into_iter().nth(sel)) {
+                    let (tag, title) = (l.tag.clone(), l.title.clone());
+                    self.open_metatag(tag, title);
+                }
+            }
+            View::Metatag { page, title, .. } => {
+                let Some(m) = page.ready() else { return };
+                match meta_rows(m).into_iter().nth(sel) {
+                    Some(MetaRow::Wave(s)) => {
+                        let (seed, name) = (s.to_string(), format!("Волна: {title}"));
+                        self.set_tab(Tab::Wave);
+                        self.start_wave(vec![seed], name);
+                    }
+                    Some(MetaRow::Playlist(p)) => {
+                        let p = p.clone();
+                        self.open_playlist(p);
+                    }
+                    Some(MetaRow::Album(a)) => {
+                        let a = a.clone();
+                        self.open_album(a);
+                    }
+                    Some(MetaRow::Artist(a)) => {
+                        let a = a.clone();
+                        self.open_artist(a);
+                    }
+                    _ => {}
                 }
             }
             View::Queue => self.play_index(orig),
@@ -3042,8 +3142,38 @@ impl App {
                 .and_then(Loadable::ready)
                 .and_then(|v| v.get(self.page().sel))
                 .map(|a| (Entity::AlbumLike, a.id.clone(), a.title.clone())),
+            View::Metatag { page, .. } => match page.ready().and_then(|m| meta_rows(m).into_iter().nth(self.page().sel)) {
+                Some(MetaRow::Album(a)) => Some((Entity::AlbumLike, a.id.clone(), a.title.clone())),
+                Some(MetaRow::Artist(a)) => Some((Entity::ArtistLike, a.id.clone(), a.name.clone())),
+                _ => None,
+            },
             _ => None,
         }
+    }
+
+    fn open_metatags(&mut self) {
+        let id = self.new_view_id();
+        self.push(View::Metatags {
+            id,
+            trees: Loadable::Loading,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = c.metatags().await.map_err(err_str);
+            let _ = tx.send(Msg::Metatags { view_id: id, result: r });
+        });
+    }
+
+    fn open_metatag(&mut self, tag: String, title: String) {
+        let id = self.new_view_id();
+        self.push(View::Metatag {
+            id,
+            title,
+            page: Loadable::Loading,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = c.metatag(&tag).await.map_err(err_str);
+            let _ = tx.send(Msg::Metatag { view_id: id, result: r });
+        });
     }
 
     fn open_liked_albums(&mut self) {
@@ -3333,6 +3463,28 @@ impl App {
                             self.liked_artists.extend(v.iter().map(|a| a.id.clone()));
                         }
                         *artists = result.clone().into();
+                    }
+                }
+            }
+            Msg::Metatags { view_id, result } => {
+                for p in &mut self.stack {
+                    if let View::Metatags { id, trees } = &mut p.view
+                        && *id == view_id
+                    {
+                        *trees = result.clone().into();
+                    }
+                }
+                if matches!(&self.page().view, View::Metatags { id, .. } if *id == view_id) {
+                    self.page_mut().sel = 0;
+                    self.skip_headers(1);
+                }
+            }
+            Msg::Metatag { view_id, result } => {
+                for p in &mut self.stack {
+                    if let View::Metatag { id, page, .. } = &mut p.view
+                        && *id == view_id
+                    {
+                        *page = result.clone().into();
                     }
                 }
             }
@@ -4514,6 +4666,7 @@ impl App {
             KeyCode::Char('P') => self.add_to_playlist(),
             KeyCode::Char('h') => self.open_history(),
             KeyCode::Char('C') => self.open_chart(),
+            KeyCode::Char('M') if !self.offline => self.open_metatags(),
             KeyCode::Char('F') => {
                 if let Some((what, id, name)) = self.target_entity() {
                     self.toggle_entity(what, id, name);

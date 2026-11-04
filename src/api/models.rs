@@ -609,3 +609,32 @@ pub struct PersonalPlaylist {
     pub playlist: Playlist,
     pub description: Option<String>,
 }
+
+/// Ветка навигации «Настроения / Занятия / Жанры / Эпохи» (`landing3/metatags`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MetaTree {
+    pub title: String,
+    #[serde(default)]
+    pub leaves: Vec<MetaLeaf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MetaLeaf {
+    pub tag: String,
+    pub title: String,
+    #[serde(default)]
+    pub leaves: Vec<MetaLeaf>,
+}
+
+/// Страница тега: волна по нему и подборки.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Metatag {
+    pub station_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub playlists: Vec<Playlist>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub albums: Vec<Album>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub artists: Vec<Artist>,
+}

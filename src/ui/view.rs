@@ -785,6 +785,8 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         }
         View::Artist { name, .. } => name.clone(),
         View::Albums { albums, .. } => format!("Альбомы в коллекции · {}", albums.ready().map_or(0, Vec::len)),
+        View::Metatags { .. } => "Жанры и настроения".into(),
+        View::Metatag { title, .. } => title.clone(),
         View::Artists { artists, .. } => {
             format!("Исполнители в коллекции · {}", artists.ready().map_or(0, Vec::len))
         }
@@ -820,6 +822,49 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 .map(|a| {
                     let year = a.year.map(|y| format!(" · {y}")).unwrap_or_default();
                     RowKind::Other(format!("◉ {}", a.full_title()), format!("{}{year}", a.artist_names()))
+                })
+                .collect();
+            mixed_list(f, inner, app, &rows, ctx);
+        }
+        View::Metatags { trees, .. } => {
+            use crate::app::{TagRow, tag_rows};
+            let trees = match trees {
+                Loadable::Ready(v) => v.clone(),
+                other => return status(f, inner, other, ctx, "Загружаю жанры и настроения"),
+            };
+            let rows: Vec<RowKind> = tag_rows(&trees)
+                .into_iter()
+                .map(|r| match r {
+                    TagRow::Header(h) => RowKind::Header(h.to_string()),
+                    TagRow::Leaf(l, d) => {
+                        let mark = if d == 0 { "# " } else { "· " };
+                        let more = if l.leaves.is_empty() { String::new() } else { format!("{} разд.", l.leaves.len()) };
+                        RowKind::Other(format!("{}{mark}{}", "  ".repeat(d), l.title), more)
+                    }
+                })
+                .collect();
+            mixed_list(f, inner, app, &rows, ctx);
+        }
+        View::Metatag { page, title, .. } => {
+            use crate::app::{MetaRow, meta_rows};
+            let m = match page {
+                Loadable::Ready(m) => m.clone(),
+                other => return status(f, inner, other, ctx, "Загружаю подборки"),
+            };
+            let title = title.clone();
+            let rows: Vec<RowKind> = meta_rows(&m)
+                .into_iter()
+                .map(|r| match r {
+                    MetaRow::Header(h) => RowKind::Header(h.to_string()),
+                    MetaRow::Wave(_) => RowKind::Other(format!("≋ Волна: {title}"), String::new()),
+                    MetaRow::Playlist(p) => {
+                        RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0)))
+                    }
+                    MetaRow::Album(a) => {
+                        let year = a.year.map(|y| format!(" · {y}")).unwrap_or_default();
+                        RowKind::Other(format!("◉ {} — {}", a.full_title(), a.artist_names()), year.trim_start_matches(" · ").to_string())
+                    }
+                    MetaRow::Artist(a) => RowKind::Other(format!("☺ {}", a.name), String::new()),
                 })
                 .collect();
             mixed_list(f, inner, app, &rows, ctx);
@@ -3195,6 +3240,7 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("w", "Моя волна (без сети — офлайн, из скачанного)"),
         ("h / C", "история прослушиваний / чарт"),
         ("m", "похожие треки (выделенный или играющий)"),
+        ("M", "жанры, настроения, занятия, эпохи"),
         ("F", "альбом / исполнитель в коллекцию (выделенный или открытый)"),
         ("D", "исполнитель: не рекомендовать / вернуть"),
         ("/", "поиск"),
