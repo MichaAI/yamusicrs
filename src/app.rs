@@ -42,6 +42,11 @@ pub enum Msg {
     DeviceCode(Result<DeviceCode, String>),
     LoggedIn(Result<StoredToken, String>),
     Likes(Result<Vec<Track>, String>),
+    LibraryIds(Result<api::LibraryIds, String>),
+    LikedAlbums { view_id: u64, result: Result<Vec<api::Album>, String> },
+    LikedArtists { view_id: u64, result: Result<Vec<api::Artist>, String> },
+    /// Лайк/дизлайк альбома или исполнителя не сохранился — откатить.
+    EntityFailed { what: Entity, id: String, on: bool, error: String },
     Playlists(Result<Vec<Playlist>, String>),
     /// Программа офлайн-волны и треки, под которые она собрана.
     OfflineProgram(Result<(Vec<i32>, Vec<i32>), String>),
@@ -139,6 +144,14 @@ impl Tab {
     }
 }
 
+/// Что лайкаем/скрываем кроме треков.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entity {
+    AlbumLike,
+    ArtistLike,
+    ArtistDislike,
+}
+
 /// Строка вкладки «Настройки».
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
@@ -199,6 +212,15 @@ pub enum Loadable<T> {
     Loading,
     Ready(T),
     Failed(String),
+}
+
+impl<T> From<Result<T, String>> for Loadable<T> {
+    fn from(r: Result<T, String>) -> Self {
+        match r {
+            Ok(v) => Loadable::Ready(v),
+            Err(e) => Loadable::Failed(e),
+        }
+    }
 }
 
 impl<T> Loadable<T> {
@@ -385,12 +407,19 @@ pub enum View {
         tracks: Loadable<Vec<Track>>,
         /// `kind` своего плейлиста — тогда треки можно убирать и переставлять.
         playlist: Option<String>,
+        /// id альбома, если это страница альбома (для лайка альбома).
+        album: Option<String>,
     },
     Artist {
         id: u64,
         name: String,
+        artist_id: String,
         brief: Loadable<ArtistBrief>,
     },
+    /// Лайкнутые альбомы.
+    Albums { id: u64, albums: Loadable<Vec<api::Album>> },
+    /// Лайкнутые исполнители.
+    Artists { id: u64, artists: Loadable<Vec<api::Artist>> },
 }
 
 /// Вид + курсор в нём.
@@ -504,6 +533,8 @@ pub struct WaveUi {
 
 /// Сиды «просто Моей волны».
 const MY_WAVE: &str = "user:onyourwave";
+/// Строки «♥ Альбомы» и «♥ Исполнители» под плейлистами.
+pub const COLLECTION_ROWS: usize = 2;
 
 pub struct App {
     pub tx: UnboundedSender<Msg>,
@@ -529,6 +560,10 @@ pub struct App {
     pub tab: Tab,
     pub stack: Vec<Page>,
     pub liked: HashSet<String>,
+    /// Лайкнутые альбомы и исполнители, скрытые исполнители (id из `library/all-ids`).
+    pub liked_albums: HashSet<String>,
+    pub liked_artists: HashSet<String>,
+    pub disliked_artists: HashSet<String>,
     pub likes: Loadable<Vec<Track>>,
     pub playlists: Loadable<Vec<Playlist>>,
     /// Новые релизы; None — ещё не запрашивали (грузим при первом открытии).
@@ -738,6 +773,9 @@ impl App {
             tab: Tab::Wave,
             stack: vec![Page::new(View::Wave)],
             liked: HashSet::new(),
+            liked_albums: HashSet::new(),
+            liked_artists: HashSet::new(),
+            disliked_artists: HashSet::new(),
             likes: Loadable::Loading,
             playlists: Loadable::Loading,
             releases: None,
@@ -1133,6 +1171,9 @@ impl App {
             .map_err(err_str);
             let _ = tx.send(Msg::Likes(r));
         });
+        self.spawn(|c, tx| async move {
+            let _ = tx.send(Msg::LibraryIds(c.library_ids().await.map_err(err_str)));
+        });
     }
 
     fn load_playlists(&mut self) {
@@ -1172,6 +1213,7 @@ impl App {
             cover: pl.cover_uri().map(str::to_owned),
             tracks: Loadable::Loading,
             playlist: own.then(|| pl.kind.clone()),
+            album: None,
         });
         if let Some(c) = pl.cover_uri() {
             let c = c.to_string();
@@ -1206,6 +1248,7 @@ impl App {
             cover: None,
             tracks: Loadable::Loading,
             playlist: None,
+            album: None,
         });
         self.spawn(move |c, tx| async move {
             let r = c.history().await.map_err(err_str);
@@ -1222,6 +1265,7 @@ impl App {
             cover: track.cover_uri().map(str::to_owned),
             tracks: Loadable::Loading,
             playlist: None,
+            album: None,
         });
         if let Some(c) = track.cover_uri() {
             let c = c.to_string();
@@ -1248,6 +1292,7 @@ impl App {
             cover: None,
             tracks: Loadable::Loading,
             playlist: None,
+            album: None,
         });
         self.spawn(move |c, tx| async move {
             let r = async {
@@ -1273,6 +1318,7 @@ impl App {
             cover: album.cover_uri().map(str::to_owned),
             tracks: Loadable::Loading,
             playlist: None,
+            album: (!album.id.is_empty()).then(|| album.id.clone()),
         });
         if let Some(c) = album.cover_uri() {
             let c = c.to_string();
@@ -1300,6 +1346,7 @@ impl App {
         self.push(View::Artist {
             id,
             name: artist.name.clone(),
+            artist_id: artist.id.clone(),
             brief: Loadable::Loading,
         });
         self.spawn(move |c, tx| async move {
@@ -1585,7 +1632,7 @@ impl App {
         match &self.page().view {
             View::Wave => self.wave.items.ready().map_or(0, Vec::len),
             View::Likes => self.likes.ready().map_or(0, Vec::len),
-            View::Playlists => self.playlists.ready().map_or(0, Vec::len),
+            View::Playlists => self.playlists.ready().map_or(0, |v| v.len() + COLLECTION_ROWS),
             View::Search => match &self.search {
                 Some(Loadable::Ready(items)) => items.len(),
                 _ => 0,
@@ -1595,6 +1642,8 @@ impl App {
             View::Settings => Setting::ALL.len(),
             View::Tracks { tracks, .. } => tracks.ready().map_or(0, Vec::len),
             View::Artist { brief, .. } => brief.ready().map_or(0, |b| artist_rows(b).len()),
+            View::Albums { albums, .. } => albums.ready().map_or(0, Vec::len),
+            View::Artists { artists, .. } => artists.ready().map_or(0, Vec::len),
         }
     }
 
@@ -1697,8 +1746,25 @@ impl App {
                 }
             }
             View::Playlists => {
+                let n = self.playlists.ready().map_or(0, Vec::len);
                 if let Some(pl) = self.playlists.ready().and_then(|p| p.get(sel)).cloned() {
                     self.open_playlist(pl);
+                } else if self.offline {
+                    self.toast_err("Альбомы и исполнители из коллекции — только с сетью".into());
+                } else if sel == n {
+                    self.open_liked_albums();
+                } else if sel == n + 1 {
+                    self.open_liked_artists();
+                }
+            }
+            View::Albums { albums, .. } => {
+                if let Some(a) = albums.ready().and_then(|v| v.get(sel)).cloned() {
+                    self.open_album(a);
+                }
+            }
+            View::Artists { artists, .. } => {
+                if let Some(a) = artists.ready().and_then(|v| v.get(sel)).cloned() {
+                    self.open_artist(a);
                 }
             }
             View::Queue => self.play_index(orig),
@@ -2847,6 +2913,125 @@ impl App {
         }
     }
 
+    fn entity_set(&mut self, what: Entity) -> &mut HashSet<String> {
+        match what {
+            Entity::AlbumLike => &mut self.liked_albums,
+            Entity::ArtistLike => &mut self.liked_artists,
+            Entity::ArtistDislike => &mut self.disliked_artists,
+        }
+    }
+
+    /// Лайк альбома/исполнителя или «не рекомендовать исполнителя» — переключатель.
+    fn toggle_entity(&mut self, what: Entity, id: String, name: String) {
+        if self.client.is_none() {
+            return self.toast_err("Без сети не сохранить".into());
+        }
+        if id.is_empty() {
+            return self.toast_err("У этого исполнителя нет страницы на Яндекс Музыке".into());
+        }
+        let on = !self.entity_set(what).contains(&id);
+        self.apply_entity(what, &id, on);
+        let msg = match (what, on) {
+            (Entity::AlbumLike, true) => format!("\u{f004} Альбом в коллекции: {name}"),
+            (Entity::AlbumLike, false) => format!("\u{f08a} Альбом убран из коллекции: {name}"),
+            (Entity::ArtistLike, true) => format!("\u{f004} Исполнитель в коллекции: {name}"),
+            (Entity::ArtistLike, false) => format!("\u{f08a} Исполнитель убран из коллекции: {name}"),
+            (Entity::ArtistDislike, true) => format!("⊘ Не рекомендовать: {name} (D — вернуть)"),
+            (Entity::ArtistDislike, false) => format!("Снова рекомендовать: {name}"),
+        };
+        self.toast(msg);
+        self.spawn(move |c, tx| async move {
+            let r = match what {
+                Entity::AlbumLike => c.set_album_like(&id, on).await,
+                Entity::ArtistLike => c.set_artist_like(&id, on).await,
+                Entity::ArtistDislike => c.set_artist_dislike(&id, on).await,
+            };
+            if let Err(e) = r {
+                let _ = tx.send(Msg::EntityFailed {
+                    what,
+                    id,
+                    on,
+                    error: e.to_string(),
+                });
+            }
+        });
+    }
+
+    fn apply_entity(&mut self, what: Entity, id: &str, on: bool) {
+        if on {
+            self.entity_set(what).insert(id.to_string());
+            // Лайк и «не рекомендовать» взаимоисключают друг друга, как в официальных клиентах.
+            match what {
+                Entity::ArtistLike => self.disliked_artists.remove(id),
+                Entity::ArtistDislike => self.liked_artists.remove(id),
+                Entity::AlbumLike => false,
+            };
+        } else {
+            self.entity_set(what).remove(id);
+        }
+    }
+
+    /// Альбом или исполнитель под курсором, иначе — страница, на которой стоим.
+    fn target_entity(&self) -> Option<(Entity, String, String)> {
+        match &self.page().view {
+            View::Artist {
+                brief, artist_id, name, ..
+            } => {
+                let sel = self.page().sel;
+                match brief.ready().and_then(|b| artist_rows(b).get(sel).map(|r| match r {
+                    ArtistRow::Album(a) => Some((Entity::AlbumLike, a.id.clone(), a.title.clone())),
+                    ArtistRow::Artist(a) => Some((Entity::ArtistLike, a.id.clone(), a.name.clone())),
+                    _ => None,
+                })) {
+                    Some(Some(t)) => Some(t),
+                    _ => Some((Entity::ArtistLike, artist_id.clone(), name.clone())),
+                }
+            }
+            View::Tracks {
+                album: Some(a), title, ..
+            } => Some((Entity::AlbumLike, a.clone(), title.clone())),
+            View::Albums { albums, .. } => albums
+                .ready()
+                .and_then(|v| v.get(self.page().sel))
+                .map(|a| (Entity::AlbumLike, a.id.clone(), a.title.clone())),
+            View::Artists { artists, .. } => artists
+                .ready()
+                .and_then(|v| v.get(self.page().sel))
+                .map(|a| (Entity::ArtistLike, a.id.clone(), a.name.clone())),
+            View::Releases => self
+                .releases
+                .as_ref()
+                .and_then(Loadable::ready)
+                .and_then(|v| v.get(self.page().sel))
+                .map(|a| (Entity::AlbumLike, a.id.clone(), a.title.clone())),
+            _ => None,
+        }
+    }
+
+    fn open_liked_albums(&mut self) {
+        let id = self.new_view_id();
+        self.push(View::Albums {
+            id,
+            albums: Loadable::Loading,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = c.liked_albums().await.map_err(err_str);
+            let _ = tx.send(Msg::LikedAlbums { view_id: id, result: r });
+        });
+    }
+
+    fn open_liked_artists(&mut self) {
+        let id = self.new_view_id();
+        self.push(View::Artists {
+            id,
+            artists: Loadable::Loading,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = c.liked_artists().await.map_err(err_str);
+            let _ = tx.send(Msg::LikedArtists { view_id: id, result: r });
+        });
+    }
+
     fn dislike_current(&mut self) {
         let Some(t) = self.now.as_ref().map(|n| n.track.clone()) else {
             return;
@@ -3061,6 +3246,42 @@ impl App {
                 if reload_list {
                     self.load_playlists();
                 }
+            }
+            Msg::LibraryIds(r) => match r {
+                Ok(ids) => {
+                    self.liked_albums = api::LibraryIds::with(&ids.albums, 1);
+                    self.liked_artists = api::LibraryIds::with(&ids.artists, 1);
+                    self.disliked_artists = api::LibraryIds::with(&ids.artists, -1);
+                }
+                Err(e) => tracing::warn!("library/all-ids: {e}"),
+            },
+            Msg::LikedAlbums { view_id, result } => {
+                for p in &mut self.stack {
+                    if let View::Albums { id, albums } = &mut p.view
+                        && *id == view_id
+                    {
+                        if let Ok(v) = &result {
+                            self.liked_albums.extend(v.iter().map(|a| a.id.clone()));
+                        }
+                        *albums = result.clone().into();
+                    }
+                }
+            }
+            Msg::LikedArtists { view_id, result } => {
+                for p in &mut self.stack {
+                    if let View::Artists { id, artists } = &mut p.view
+                        && *id == view_id
+                    {
+                        if let Ok(v) = &result {
+                            self.liked_artists.extend(v.iter().map(|a| a.id.clone()));
+                        }
+                        *artists = result.clone().into();
+                    }
+                }
+            }
+            Msg::EntityFailed { what, id, on, error } => {
+                self.apply_entity(what, &id, !on);
+                self.toast_err(format!("не сохранилось: {error}"));
             }
             Msg::Tracks { view_id, result } => {
                 for p in &mut self.stack {
@@ -4229,6 +4450,16 @@ impl App {
             KeyCode::Char('P') => self.add_to_playlist(),
             KeyCode::Char('h') => self.open_history(),
             KeyCode::Char('C') => self.open_chart(),
+            KeyCode::Char('F') => {
+                if let Some((what, id, name)) = self.target_entity() {
+                    self.toggle_entity(what, id, name);
+                }
+            }
+            KeyCode::Char('D') => {
+                if let Some((Entity::ArtistLike, id, name)) = self.target_entity() {
+                    self.toggle_entity(Entity::ArtistDislike, id, name);
+                }
+            }
             KeyCode::Char('m') if !self.offline => {
                 if let Some(t) = self.target_track() {
                     self.open_similar(t);

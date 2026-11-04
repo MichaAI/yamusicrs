@@ -563,3 +563,18 @@ impl WheelItem {
         self.style == "CONTROL_ACCENT"
     }
 }
+
+/// `library/all-ids`: id → 1 (лайк) или -1 (скрыт/дизлайк).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LibraryIds {
+    #[serde(default)]
+    pub albums: std::collections::HashMap<String, i64>,
+    #[serde(default)]
+    pub artists: std::collections::HashMap<String, i64>,
+}
+
+impl LibraryIds {
+    pub fn with(map: &std::collections::HashMap<String, i64>, v: i64) -> std::collections::HashSet<String> {
+        map.iter().filter(|(_, x)| **x == v).map(|(k, _)| k.clone()).collect()
+    }
+}

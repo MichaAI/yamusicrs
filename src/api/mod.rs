@@ -21,6 +21,8 @@ const ANDROID_CLIENT: &str = "YandexMusicAndroid/24023621";
 const DESKTOP_CLIENT: &str = "YandexMusicDesktopAppWindows/5.95.0";
 const DESKTOP_SIGN_KEY: &[u8] = b"kzqU4XhfCaY6B6JTHODeq5";
 const DEFAULT_SIGN_KEY: &[u8] = b"p93jhgh689SBReK6ghtw62";
+/// Размер страницы лайкнутых альбомов/исполнителей.
+const LIKES_PAGE: usize = 100;
 const FILE_CODECS: &[&str] = &["flac", "flac-mp4", "aac-mp4", "he-aac-mp4", "aac", "he-aac", "mp3"];
 
 #[derive(Debug, thiserror::Error)]
@@ -280,6 +282,104 @@ impl Client {
             )
             .await?;
         Ok(())
+    }
+
+    // ── лайки альбомов и исполнителей ─────────────────────────────────────────
+
+    /// id лайкнутых (1) и скрытых (-1) альбомов и исполнителей — одним запросом, как в десктопе.
+    pub async fn library_ids(&self) -> Result<LibraryIds> {
+        self.send(self.req_as(reqwest::Method::GET, "/library/all-ids", DESKTOP_CLIENT)).await
+    }
+
+    /// Лайк альбома (пути и поля — как в мобильном клиенте).
+    pub async fn set_album_like(&self, album_id: &str, like: bool) -> Result<()> {
+        let action = if like { "add-multiple" } else { "remove" };
+        let _: Value = self
+            .post_form(
+                &format!("/users/{}/likes/albums/{action}", self.uid),
+                &[("albumIds", album_id.to_string())],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_artist_like(&self, artist_id: &str, like: bool) -> Result<()> {
+        let action = if like { "add-multiple" } else { "remove" };
+        let _: Value = self
+            .post_form(
+                &format!("/users/{}/likes/artists/{action}", self.uid),
+                &[("artistIds", artist_id.to_string())],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// «Не рекомендовать исполнителя». Снять — только десктопным путём (в мобильном его нет).
+    pub async fn set_artist_dislike(&self, artist_id: &str, dislike: bool) -> Result<()> {
+        let _: Value = if dislike {
+            self.post_form(
+                &format!("/users/{}/dislikes/artists/add-multiple", self.uid),
+                &[("artist-ids", artist_id.to_string())],
+            )
+            .await?
+        } else {
+            let path = format!("/users/{}/dislikes/artists/{artist_id}/remove", self.uid);
+            self.send(self.req_as(reqwest::Method::POST, &path, DESKTOP_CLIENT)).await?
+        };
+        Ok(())
+    }
+
+    /// Все лайкнутые альбомы, свежие сверху (постранично, как десктоп).
+    pub async fn liked_albums(&self) -> Result<Vec<Album>> {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            #[serde(default)]
+            albums: Vec<Liked>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Liked {
+            album: Option<Value>,
+        }
+        let mut out = Vec::new();
+        for page in 0.. {
+            let path = format!("/users/{}/likes/albums/page", self.uid);
+            let q = [
+                ("rich", "true".to_string()),
+                ("page", page.to_string()),
+                ("pageSize", LIKES_PAGE.to_string()),
+            ];
+            let p: Page = self.send(self.req_as(reqwest::Method::GET, &path, DESKTOP_CLIENT).query(&q)).await?;
+            let n = p.albums.len();
+            out.extend(
+                p.albums
+                    .into_iter()
+                    .filter_map(|l| serde_json::from_value::<Album>(l.album?).ok()),
+            );
+            if n < LIKES_PAGE {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn liked_artists(&self) -> Result<Vec<Artist>> {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            #[serde(default)]
+            artists: Vec<Value>,
+        }
+        let mut out = Vec::new();
+        for page in 0.. {
+            let path = format!("/users/{}/likes/artists/page", self.uid);
+            let q = [("page", page.to_string()), ("pageSize", LIKES_PAGE.to_string())];
+            let p: Page = self.send(self.req_as(reqwest::Method::GET, &path, DESKTOP_CLIENT).query(&q)).await?;
+            let n = p.artists.len();
+            out.extend(p.artists.into_iter().filter_map(|a| serde_json::from_value::<Artist>(a).ok()));
+            if n < LIKES_PAGE {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     // ── правка плейлистов (пути и параметры — как в мобильном клиенте) ───────

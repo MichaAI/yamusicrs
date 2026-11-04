@@ -750,8 +750,19 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         View::Queue => format!("Очередь · {}", app.queue.title),
         View::Releases => "Новые релизы".into(),
         View::Settings => "Настройки".into(),
+        View::Tracks {
+            title, album: Some(a), ..
+        } if app.liked_albums.contains(a) => format!("\u{f004} {title}"),
         View::Tracks { title, .. } => title.clone(),
+        View::Artist { name, artist_id, .. } if app.liked_artists.contains(artist_id) => format!("\u{f004} {name}"),
+        View::Artist { name, artist_id, .. } if app.disliked_artists.contains(artist_id) => {
+            format!("⊘ {name} · не рекомендовать")
+        }
         View::Artist { name, .. } => name.clone(),
+        View::Albums { albums, .. } => format!("Альбомы в коллекции · {}", albums.ready().map_or(0, Vec::len)),
+        View::Artists { artists, .. } => {
+            format!("Исполнители в коллекции · {}", artists.ready().map_or(0, Vec::len))
+        }
     };
     let crumbs = if app.stack.len() > 1 { "‹ " } else { "" };
     let block = card(
@@ -774,6 +785,31 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             track_list(f, inner, app, &tracks, ctx);
         }
         View::Playlists => draw_playlists(f, inner, app, ctx),
+        View::Albums { albums, .. } => {
+            let albums = match albums {
+                Loadable::Ready(v) => v.clone(),
+                other => return status(f, inner, other, ctx, "Загружаю альбомы"),
+            };
+            let rows: Vec<RowKind> = albums
+                .iter()
+                .map(|a| {
+                    let year = a.year.map(|y| format!(" · {y}")).unwrap_or_default();
+                    RowKind::Other(format!("◉ {}", a.full_title()), format!("{}{year}", a.artist_names()))
+                })
+                .collect();
+            mixed_list(f, inner, app, &rows, ctx);
+        }
+        View::Artists { artists, .. } => {
+            let artists = match artists {
+                Loadable::Ready(v) => v.clone(),
+                other => return status(f, inner, other, ctx, "Загружаю исполнителей"),
+            };
+            let rows: Vec<RowKind> = artists
+                .iter()
+                .map(|a| RowKind::Other(format!("☺ {}", a.name), String::new()))
+                .collect();
+            mixed_list(f, inner, app, &rows, ctx);
+        }
         View::Releases => draw_releases(f, inner, app, ctx),
         View::Settings => draw_settings(f, inner, app, ctx),
         View::Search => draw_search(f, inner, app, ctx),
@@ -1377,10 +1413,19 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         Loadable::Ready(p) => p.clone(),
         other => return status(f, area, other, ctx, "Загружаю плейлисты"),
     };
-    let rows: Vec<RowKind> = pls
+    let mut rows: Vec<RowKind> = pls
         .iter()
         .map(|p| RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0))))
         .collect();
+    // Должно совпадать с `COLLECTION_ROWS` и порядком в `App::activate`.
+    rows.push(RowKind::Other(
+        "\u{f004} Альбомы".into(),
+        format!("{}", app.liked_albums.len()),
+    ));
+    rows.push(RowKind::Other(
+        "\u{f004} Исполнители".into(),
+        format!("{}", app.liked_artists.len()),
+    ));
     mixed_list(f, area, app, &rows, ctx);
 }
 
@@ -3092,6 +3137,8 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("w", "Моя волна (без сети — офлайн, из скачанного)"),
         ("h / C", "история прослушиваний / чарт"),
         ("m", "похожие треки (выделенный или играющий)"),
+        ("F", "альбом / исполнитель в коллекцию (выделенный или открытый)"),
+        ("D", "исполнитель: не рекомендовать / вернуть"),
         ("/", "поиск"),
         ("Del", "убрать запрос из истории поиска"),
         ("t", "текст на весь экран"),
