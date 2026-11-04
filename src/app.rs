@@ -2919,8 +2919,9 @@ impl App {
             }
             Err(e) => {
                 let name = track.map(|t| t.full_title()).unwrap_or_default();
-                self.toast_err(format!("{name}: {e}"));
+                tracing::warn!("{name}: {e}");
                 if self.requested == Some(token) || self.next_loaded == Some(token) {
+                    self.toast_err(format!("{name}: {e}"));
                     self.skip_broken(token);
                 }
             }
@@ -2950,6 +2951,13 @@ impl App {
                 result: r,
             });
         });
+    }
+
+    /// Трек ещё нужен: его ждём, он играет или стоит следующим.
+    fn token_relevant(&self, token: Token) -> bool {
+        self.requested == Some(token)
+            || self.next_loaded == Some(token)
+            || self.now.as_ref().is_some_and(|n| n.token == token)
     }
 
     fn origins_insert(&mut self, token: Token, origin: Origin) {
@@ -3003,6 +3011,11 @@ impl App {
             audio::Event::SeekMiss(token, secs) => self.reload(token, secs),
             audio::Event::Error(token, e) => {
                 let name = self.tokens.get(&token).map(|t| t.2.full_title()).unwrap_or_default();
+                tracing::warn!("{name}: {e}");
+                // Трек, с которого уже ушли, — молча.
+                if !self.token_relevant(token) {
+                    return;
+                }
                 self.toast_err(format!("{name}: {e}"));
                 if self.requested == Some(token) && self.now.as_ref().is_none_or(|n| n.token != token) {
                     self.skip_broken(token);

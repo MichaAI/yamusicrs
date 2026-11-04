@@ -227,6 +227,11 @@ impl Source {
         }
     }
 
+    /// Чтение отменили (переключили трек): ошибки такого потока — не ошибки трека.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Source::Stream(_, c) if c.load(Ordering::Relaxed))
+    }
+
     /// Ручка, которой можно прервать чтение из другого потока (например, если декодер
     /// завис в ожидании недокачанных байтов, а пользователь уже переключил трек).
     pub fn canceller(&self) -> Option<Canceller> {
@@ -250,5 +255,9 @@ impl Canceller {
     pub fn cancel(&self) {
         self.1.store(true, Ordering::Relaxed);
         self.0.wake();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.1.load(Ordering::Relaxed)
     }
 }

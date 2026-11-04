@@ -100,7 +100,13 @@ pub(super) fn spawn(
         .expect("decoder thread");
 }
 
-fn open(token: Token, source: Source, gain: f32) -> Result<Active, String> {
+/// Открывает трек; `Err(None)` — чтение отменили на полпути (трек переключили), это не ошибка.
+fn open(token: Token, source: Source, gain: f32) -> Result<Active, Option<String>> {
+    let cancelled = source.canceller();
+    open_inner(token, source, gain).map_err(|e| (!cancelled.is_some_and(|c| c.is_cancelled())).then_some(e))
+}
+
+fn open_inner(token: Token, source: Source, gain: f32) -> Result<Active, String> {
     let ms = source.open().map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(ms, Default::default());
     let mut hint = Hint::new();
@@ -222,9 +228,10 @@ impl Dec {
                             self.seek(start_secs);
                         }
                     }
-                    Err(e) => {
+                    Err(Some(e)) => {
                         let _ = self.events.send(Event::Error(token, e));
                     }
+                    Err(None) => {}
                 }
             }
             Cmd::Next {
@@ -312,9 +319,10 @@ impl Dec {
     fn start_following(&mut self, token: Token, source: Source, gain: f32) {
         match open(token, source, gain) {
             Ok(a) => self.follow(a),
-            Err(e) => {
+            Err(Some(e)) => {
                 let _ = self.events.send(Event::Error(token, e));
             }
+            Err(None) => {}
         }
     }
 
@@ -351,7 +359,9 @@ impl Dec {
         let next = match open(token, source, gain) {
             Ok(n) => n,
             Err(e) => {
-                let _ = self.events.send(Event::Error(token, e));
+                if let Some(e) = e {
+                    let _ = self.events.send(Event::Error(token, e));
+                }
                 return;
             }
         };
@@ -477,6 +487,11 @@ impl Dec {
             }
             Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return self.track_ended();
+            }
+            // Чтение отменили (трек переключают) — ошибка любого вида, трек не «кончился».
+            Err(_) if a.source.is_cancelled() => {
+                self.cur = None;
+                return;
             }
             Err(e) => {
                 let token = a.token;
