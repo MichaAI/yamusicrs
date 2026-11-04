@@ -892,7 +892,18 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 .map(|r| match r {
                     ArtistRow::Header(h) => RowKind::Header(h.to_string()),
                     ArtistRow::Wave(_) => RowKind::Other("≋ Моя волна по исполнителю".into(), String::new()),
-                    ArtistRow::Track(t) => RowKind::Track(t.clone()),
+                    ArtistRow::Track(ts, i) => RowKind::Track(ts[i].clone()),
+                    ArtistRow::Concert(c) => {
+                        let when = c.datetime.as_deref().map(concert_date).unwrap_or_default();
+                        let place: Vec<&str> = [c.city.as_deref(), c.place.as_deref()].into_iter().flatten().collect();
+                        let title = c.concert_title.as_deref().map(|t| format!(" — {t}")).unwrap_or_default();
+                        let price = c
+                            .min_price
+                            .as_ref()
+                            .map(|p| format!("от {:.0} {}", p.value, p.currency_symbol.as_deref().unwrap_or("₽")))
+                            .unwrap_or_default();
+                        RowKind::Other(format!("♪ {when} · {}{title}", place.join(", ")), price)
+                    }
                     ArtistRow::Album(a) => {
                         // У чужих релизов (сборники, фиты) показываем, чьи они.
                         let whose = if a.artists.iter().any(|x| x.id == me) {
@@ -1063,6 +1074,24 @@ fn draw_artist_head(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx, name: &
         }
     }
     f.render_widget(Paragraph::new(lines), text);
+}
+
+/// «2026-11-07T22:00:00+03:00» → «сб 7 ноя, 22:00» (время площадки).
+fn concert_date(s: &str) -> String {
+    use chrono::{Datelike, Timelike};
+    const MONTHS: [&str; 12] = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+    const DAYS: [&str; 7] = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
+    match chrono::DateTime::parse_from_rfc3339(s) {
+        Ok(d) => format!(
+            "{} {} {}, {:02}:{:02}",
+            DAYS[d.weekday().num_days_from_monday() as usize],
+            d.day(),
+            MONTHS[d.month0() as usize],
+            d.hour(),
+            d.minute()
+        ),
+        Err(_) => s.get(..10).unwrap_or(s).to_string(),
+    }
 }
 
 /// 6555818 → «6,6 млн».

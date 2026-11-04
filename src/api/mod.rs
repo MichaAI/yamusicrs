@@ -605,11 +605,48 @@ impl Client {
             ("page-size", "200".into()),
             ("sort-by", "year".into()),
         ];
-        let (brief, albums) = tokio::join!(self.get::<ArtistBrief>(&bp, &[]), self.get::<ArtistAlbums>(&ap, &q));
+        let (fp, cp) = (format!("/artists/{id}/familiar-you"), format!("/artists/{id}/concerts"));
+        let fq = [
+            ("waveTracksLimit", "100".to_string()),
+            ("collectionTracksLimit", "100".into()),
+        ];
+        let (brief, albums, familiar, concerts) = tokio::join!(
+            self.get::<ArtistBrief>(&bp, &[]),
+            self.get::<ArtistAlbums>(&ap, &q),
+            self.send::<Value>(self.req_as(reqwest::Method::GET, &fp, DESKTOP_CLIENT).query(&fq)),
+            self.send::<Value>(self.req_as(reqwest::Method::GET, &cp, DESKTOP_CLIENT)),
+        );
         let mut brief = brief?;
         match albums {
             Ok(a) => brief.discography = a.albums,
             Err(e) => tracing::warn!("дискография {id}: {e}"),
+        }
+        // Сперва то, что в коллекции, потом услышанное в волне; без повторов.
+        match familiar {
+            Ok(v) => {
+                let mut seen = std::collections::HashSet::new();
+                for part in ["collection", "wave"] {
+                    for t in v[part]["tracks"].as_array().into_iter().flatten() {
+                        if let Ok(t) = serde_json::from_value::<Track>(t.clone())
+                            && seen.insert(t.id.clone())
+                        {
+                            brief.familiar.push(t);
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("familiar-you {id}: {e}"),
+        }
+        match concerts {
+            Ok(v) => {
+                brief.concerts = v["concerts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| serde_json::from_value::<Concert>(c.clone()).ok())
+                    .collect();
+            }
+            Err(e) => tracing::warn!("концерты {id}: {e}"),
         }
         Ok(brief)
     }

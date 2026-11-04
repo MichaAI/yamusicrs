@@ -1740,7 +1740,7 @@ impl App {
                 _ => None,
             },
             View::Artist { brief, .. } => match artist_rows(brief.ready()?).get(sel)? {
-                ArtistRow::Track(t) => Some(t),
+                ArtistRow::Track(ts, i) => ts.get(*i),
                 _ => None,
             },
             _ => None,
@@ -1854,11 +1854,15 @@ impl App {
                 let Some(b) = brief.ready() else { return };
                 let rows = artist_rows(b);
                 match rows.get(sel) {
-                    Some(ArtistRow::Track(_)) => {
-                        let tracks = b.popular_tracks.clone();
-                        let idx = rows[..sel].iter().filter(|r| matches!(r, ArtistRow::Track(_))).count();
-                        let name = name.clone();
+                    Some(ArtistRow::Track(ts, i)) => {
+                        let (tracks, idx, name) = (ts.to_vec(), *i, name.clone());
                         self.play_list(tracks, idx, name);
+                    }
+                    Some(ArtistRow::Concert(c)) => {
+                        if let Some(u) = c.afisha_url.clone() {
+                            crate::ui::term::copy_to_clipboard(&mut self.osc_out, &u);
+                            self.toast(format!("Ссылка на Афишу скопирована: {u}"));
+                        }
                     }
                     Some(ArtistRow::Album(a)) => {
                         let a = (*a).clone();
@@ -4769,7 +4773,9 @@ pub enum ArtistRow<'a> {
     Header(&'static str),
     /// «Моя волна по исполнителю» (id исполнителя).
     Wave(&'a str),
-    Track(&'a Track),
+    /// Трек секции: вся секция и номер в ней (Enter играет секцию с этого места).
+    Track(&'a [Track], usize),
+    Concert(&'a api::Concert),
     Album(&'a api::Album),
     Artist(&'a api::Artist),
 }
@@ -4779,9 +4785,17 @@ pub fn artist_rows(b: &ArtistBrief) -> Vec<ArtistRow<'_>> {
     if let Some(a) = b.artist.as_ref().filter(|a| !a.id.is_empty()) {
         v.push(ArtistRow::Wave(&a.id));
     }
+    if !b.familiar.is_empty() {
+        v.push(ArtistRow::Header("Знакомое вам"));
+        v.extend((0..b.familiar.len()).map(|i| ArtistRow::Track(&b.familiar, i)));
+    }
     if !b.popular_tracks.is_empty() {
         v.push(ArtistRow::Header("Популярные треки"));
-        v.extend(b.popular_tracks.iter().map(ArtistRow::Track));
+        v.extend((0..b.popular_tracks.len()).map(|i| ArtistRow::Track(&b.popular_tracks, i)));
+    }
+    if !b.concerts.is_empty() {
+        v.push(ArtistRow::Header("Концерты"));
+        v.extend(b.concerts.iter().map(ArtistRow::Concert));
     }
     // Дискография целиком, если догрузилась; иначе — то, что пришло в карточке.
     let disc: &[api::Album] = if b.discography.is_empty() {

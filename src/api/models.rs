@@ -377,6 +377,30 @@ pub struct ArtistBrief {
     /// Полная дискография (`direct-albums`), догружается отдельным запросом.
     #[serde(skip)]
     pub discography: Vec<Album>,
+    /// «Знакомое вам»: треки исполнителя из коллекции и из волны (`familiar-you`).
+    #[serde(skip)]
+    pub familiar: Vec<Track>,
+    #[serde(skip)]
+    pub concerts: Vec<Concert>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Concert {
+    pub concert_title: Option<String>,
+    pub afisha_url: Option<String>,
+    pub city: Option<String>,
+    pub place: Option<String>,
+    /// RFC 3339 с часовым поясом площадки.
+    pub datetime: Option<String>,
+    pub min_price: Option<Price>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Price {
+    pub value: f64,
+    pub currency_symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
