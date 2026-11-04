@@ -657,6 +657,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     if app.offline {
         right.push(Span::styled("⊘ офлайн  ", Style::new().fg(ctx.p.accent2.color()).add_modifier(Modifier::BOLD)));
     }
+    // Ynison: играем здесь по выбору с другого устройства или музыка сейчас на другом.
+    if app.yn_active {
+        right.push(Span::styled("⇄ здесь  ", ctx.accent()));
+    } else if let Some(t) = app.yn_other_device() {
+        right.push(Span::styled(format!("⇄ на «{t}»  "), ctx.dim()));
+    }
     if let Some(acc) = &app.account {
         let name = acc
             .account

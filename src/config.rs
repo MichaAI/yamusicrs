@@ -32,6 +32,9 @@ pub struct Config {
     pub fps: u32,
     /// Отправлять историю прослушиваний в Яндекс.
     pub report_plays: bool,
+    /// Ynison: телефон видит yamusicrs в «Слушать на…» и управляет им; включённое здесь
+    /// забирает воспроизведение у других устройств.
+    pub ynison: bool,
 }
 
 impl Default for Config {
@@ -52,6 +55,7 @@ impl Default for Config {
             blob_dither: 1,
             fps: 30,
             report_plays: true,
+            ynison: true,
         }
     }
 }

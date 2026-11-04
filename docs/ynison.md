@@ -132,3 +132,24 @@ Android 2026.09.5 использует тот же протокол.
 - Десктоп: `nix run nixpkgs#asar -- extract /nix/store/*-yandex-music-*/share/nodejs/yandex-music.asar out`,
   дальше искать по строкам в `out/app/_next/static/chunks`.
 - Android: см. память о реверсе APK (adb pull + `jadx --no-res`).
+
+## Реализация в yamusicrs (`src/ynison.rs`, `src/app/yn.rs`)
+
+- Транспорт как у Music Assistant (их провайдер проверен с официальным Android вживую):
+  OAuth — HTTP-заголовком `Authorization`, `Origin: https://music.yandex.ru`, subprotocol
+  `Bearer, v2, {JSON}` без URL-кодирования; все числа версий/времени — строками.
+- Устройство: постоянный `device_id` (`<data>/ynison-device-id`), `title` «yamusicrs · хост»,
+  `type: WEB`, `can_be_player: true`, без `is_shadow`. При подключении — пустая очередь с
+  `timestamp_ms: "0"` и `is_currently_active: false` (ничего не перехватывает), затем
+  `update_session_params {mute_events_if_passive: true}`.
+- Команды других устройств — только с автором версии не мы, не пустой и не `server-…`,
+  и только новые (повторы той же версии игнорируются).
+- Активность ушла (или `server-paused-on-active-device-disconnecting`) — пауза здесь.
+- Включили что-то здесь, пока активен другой, — `update_active_device` себе + очередь.
+- RADIO с `wave_queue…session_id` продолжается той же сессией ротора.
+- Тестовые экземпляры (`YAMUSICRS_MPRIS_NAME`) к Ynison не подключаются без `YAMUSICRS_YNISON=1`;
+  `YAMUSICRS_YNISON=0` выключает всегда; в настройках — «Ynison (Слушать на…)».
+- Live-проверка ещё не сделана: хаб отвечал 503 + go-away.
+
+Исследование MA: github.com/trudenboy/ma-provider-yandex-ynison,
+`docs/research/2026-09-01-live-ynison-official-client.md`.

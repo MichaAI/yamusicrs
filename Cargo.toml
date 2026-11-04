@@ -54,6 +54,7 @@ textwrap = "0.16"
 # desktop integration
 # MPRIS и расширение шелла — свои интерфейсы прямо на zbus.
 zbus = "6"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 # Для разработки: инкрементально и параллельно — правка пересобирает за секунды, а не минуты.
 [profile.release]

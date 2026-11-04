@@ -10,6 +10,7 @@ mod mpris;
 mod offline;
 mod offline_wave;
 mod tinyml;
+mod ynison;
 mod render;
 mod ui;
 

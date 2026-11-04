@@ -22,6 +22,9 @@ use crate::imgcache;
 use crate::tinyml::EventKind;
 use crate::ui::kitty::Images;
 use crate::ui::theme::{Palette, ThemeAnim};
+use crate::ynison;
+
+mod yn;
 
 pub enum Msg {
     /// Обложка для уведомления о новом треке готова.
@@ -56,6 +59,14 @@ pub enum Msg {
     EntityFailed { what: Entity, id: String, on: bool, error: String },
     Playlists(Result<Vec<Playlist>, String>),
     Personal(Result<Vec<api::PersonalPlaylist>, String>),
+    Ynison(ynison::Event),
+    /// Треки очереди, пришедшей с другого устройства.
+    YnisonQueue {
+        generation: u64,
+        queue: ynison::QueueState,
+        status: ynison::Status,
+        result: Result<Vec<Track>, String>,
+    },
     Found(Result<Vec<api::Found>, String>),
     Credits { track_id: String, result: Result<Vec<(String, String)>, String> },
     /// Программа офлайн-волны и треки, под которые она собрана.
@@ -170,6 +181,7 @@ pub enum Setting {
     TargetLufs,
     Crossfade,
     ReportPlays,
+    Ynison,
     Fps,
     Dither,
     /// Действие: перепроверить качество скачанных треков.
@@ -177,12 +189,13 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 8] = [
+    pub const ALL: [Setting; 9] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
         Setting::Crossfade,
         Setting::ReportPlays,
+        Setting::Ynison,
         Setting::Fps,
         Setting::Dither,
         Setting::Recheck,
@@ -195,6 +208,7 @@ impl Setting {
             Setting::TargetLufs => "Целевая громкость",
             Setting::Crossfade => "Плавный переход",
             Setting::ReportPlays => "Отправлять прослушивания",
+            Setting::Ynison => "Ynison (Слушать на…)",
             Setting::Fps => "Кадров в секунду",
             Setting::Dither => "Дизеринг блоба",
             Setting::Recheck => "Перепроверить качество скачанного",
@@ -208,6 +222,7 @@ impl Setting {
             Setting::TargetLufs => "К какой громкости выравнивать, LUFS. Работает, только когда выравнивание включено.",
             Setting::Crossfade => "Наплыв между треками; внутри одного альбома всегда встык. Клавиша x.",
             Setting::ReportPlays => "Передавать Яндексу историю прослушиваний (влияет на рекомендации и «недавно слушали»).",
+            Setting::Ynison => "yamusicrs появляется в «Слушать на…» в приложениях Яндекс Музыки: оттуда можно переключить музыку сюда и управлять ею. Включённое здесь забирает воспроизведение у телефона.",
             Setting::Fps => "Частота кадров анимаций (блоб, прокрутка, перебор символов).",
             Setting::Dither => "Шум против «колец» на градиентах блоба, в ступенях 8 бит; 0 — выключен.",
             Setting::Recheck => "Сервер не дал lossless — трек помечается и не перепроверяется 30 дней. Enter снимает пометки: каждый трек хуже lossless спросит сервер заново при следующем проигрывании и, если дадут лучше, перекачается.",
@@ -764,6 +779,16 @@ pub struct App {
     /// Прямоугольники последнего кадра — для эффектов.
     pub areas: Areas,
     last_mpris_pos: Instant,
+    /// Ynison: соединение, последнее известное состояние и активны ли мы.
+    ynison: Option<ynison::Handle>,
+    pub yn: Option<ynison::Remote>,
+    pub yn_active: bool,
+    pub yn_connected: bool,
+    /// Трек запущен по команде другого устройства — не перехватывать активность.
+    yn_remote_start: bool,
+    yn_last_sent: Instant,
+    /// Поколение загрузки очереди с другого устройства (устаревшие ответы отбрасываются).
+    yn_fetch_gen: u64,
     last_session_save: Instant,
     last_stall: Option<Instant>,
     /// Пауза до следующей попытки оживить вывод: растёт, пока он не отвечает.
@@ -969,6 +994,13 @@ impl App {
             started: Instant::now(),
             areas: Areas::default(),
             last_mpris_pos: Instant::now(),
+            ynison: None,
+            yn: None,
+            yn_active: false,
+            yn_connected: false,
+            yn_remote_start: false,
+            yn_last_sent: Instant::now(),
+            yn_fetch_gen: 0,
             last_session_save: Instant::now(),
             last_stall: None,
             stall_backoff: STALL_FIRST,
@@ -1107,6 +1139,7 @@ impl App {
         self.load_playlists();
         self.load_wheel();
         self.restore_session();
+        self.ynison_start();
     }
 
     /// Восстанавливает очередь прошлого запуска и ставит трек на паузу с той же секунды.
@@ -2510,6 +2543,7 @@ impl App {
         self.player.set_paused(p);
         let pos = self.now.as_ref().map_or(0.0, |n| n.pos);
         let _ = self.mpris.send(mpris::Update::Status { playing: !p, pos });
+        self.yn_local_play_state();
     }
 
     fn seek_to(&mut self, secs: f64) {
@@ -2523,6 +2557,7 @@ impl App {
         self.player.seek(now.token, s);
         now.pos = s;
         let _ = self.mpris.send(mpris::Update::Seeked(s));
+        self.yn_publish_status();
     }
 
     fn seek_by(&mut self, d: f64) {
@@ -2571,6 +2606,7 @@ impl App {
                 _ => "выкл".into(),
             },
             Setting::ReportPlays => if self.cfg.report_plays { "да" } else { "нет" }.into(),
+            Setting::Ynison => self.ynison_label(),
             Setting::Fps => self.cfg.fps.to_string(),
             Setting::Dither => match self.cfg.blob_dither {
                 0 => "выкл".into(),
@@ -2627,6 +2663,15 @@ impl App {
             Setting::ReportPlays => {
                 self.cfg.report_plays = !self.cfg.report_plays;
                 self.cfg.save(&self.paths);
+            }
+            Setting::Ynison => {
+                self.cfg.ynison = !self.cfg.ynison;
+                self.cfg.save(&self.paths);
+                if self.cfg.ynison {
+                    self.ynison_start();
+                } else {
+                    self.ynison_stop();
+                }
             }
             Setting::Fps => {
                 let cur = FPS_STEPS.iter().position(|f| *f >= self.cfg.fps).unwrap_or(FPS_STEPS.len() - 1);
@@ -3465,6 +3510,13 @@ impl App {
                     Err(e) => Loadable::Failed(e),
                 });
             }
+            Msg::Ynison(ev) => self.on_ynison(ev),
+            Msg::YnisonQueue {
+                generation,
+                queue,
+                status,
+                result,
+            } => self.on_ynison_queue(generation, queue, status, result),
             Msg::Credits { track_id, result } => match result {
                 Ok(v) => {
                     self.credits.insert(track_id, v);
@@ -3921,6 +3973,7 @@ impl App {
                             playing: false,
                             pos: 0.0,
                         });
+                        self.yn_publish_status();
                     }
                 }
             }
@@ -3996,6 +4049,7 @@ impl App {
             let _ = self.mpris.send(mpris::Update::Position(n.pos));
             self.last_mpris_pos = Instant::now();
         }
+        self.yn_tick();
         // Плавная прокрутка текста к текущей строке.
         if let (Some((_, Lyrics::Synced(lines))), Some(n)) = (&self.lyrics, &self.now) {
             let cur = crate::lyrics::current(lines, n.pos + 0.25).map_or(-1.0, |i| i as f32);
@@ -4075,6 +4129,7 @@ impl App {
             playing: !self.player.paused(),
             pos: pos.secs,
         });
+        self.yn_track_started();
         self.fx_track = Some(Instant::now());
         self.schedule_next();
         // Скачанный хуже lossless: играет сразу, а FLAC подменит его на ходу, если он есть.
