@@ -296,6 +296,9 @@ pub struct Playlist {
     pub og_image: Option<String>,
     #[serde(default)]
     pub tracks: Vec<TrackShort>,
+    pub description: Option<String>,
+    /// `public` / `private`.
+    pub visibility: Option<String>,
 }
 
 impl Playlist {

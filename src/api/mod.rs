@@ -406,6 +406,21 @@ impl Client {
         .await
     }
 
+    /// Описание своего плейлиста (как в мобильном клиенте: `value` в query).
+    pub async fn playlist_describe(&self, kind: &str, text: &str) -> Result<()> {
+        let path = format!("/users/{}/playlists/{kind}/description", self.uid);
+        let _: Value = self
+            .send(self.req(reqwest::Method::POST, &path).query(&[("value", text)]))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn playlist_visibility(&self, kind: &str, public: bool) -> Result<Playlist> {
+        let path = format!("/users/{}/playlists/{kind}/visibility", self.uid);
+        let v = if public { "public" } else { "private" };
+        self.send(self.req(reqwest::Method::POST, &path).query(&[("value", v)])).await
+    }
+
     pub async fn playlist_rename(&self, kind: &str, title: &str) -> Result<Playlist> {
         self.send(
             self.req(

@@ -1523,7 +1523,10 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 format!("✦ {}", p.playlist.title),
                 p.description.clone().unwrap_or_default(),
             ),
-            PlaylistRow::Own(p) => RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0))),
+            PlaylistRow::Own(p) => {
+                let lock = if p.visibility.as_deref() == Some("private") { " · \u{f023}" } else { "" };
+                RowKind::Other(format!("▤ {}", p.title), format!("{} тр.{lock}", p.track_count.unwrap_or(0)))
+            }
             PlaylistRow::LikedAlbums => {
                 RowKind::Other("\u{f004} Альбомы".into(), format!("{}", app.liked_albums.len()))
             }
@@ -3238,6 +3241,7 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("a / A", "в конец очереди / следующим"),
         ("P", "добавить трек в плейлист"),
         ("c / e / Del", "плейлисты: новый / переименовать / удалить"),
+        ("E / H", "свой плейлист: описание / приватный ↔ публичный"),
         ("Del, K / J", "свой плейлист: убрать трек, сдвинуть вверх / вниз"),
         ("o / i", "альбом / исполнитель (несколько — выбор)"),
         ("клик по подписи на сцене", "название — о треке, исполнитель, альбом"),

@@ -289,6 +289,8 @@ pub enum InputAction {
     /// Новый плейлист; трек, который сразу в него добавить.
     Create(Option<Track>),
     Rename(String),
+    /// Описание своего плейлиста (`kind`); пустое — убрать.
+    Describe(String),
 }
 
 pub enum ConfirmAction {
@@ -300,6 +302,8 @@ pub enum ConfirmAction {
 pub enum PlOp {
     Create { title: String, add: Option<String> },
     Rename { kind: String, title: String },
+    Describe { kind: String, text: String },
+    Visibility { kind: String, title: String, public: bool },
     Delete { kind: String, title: String },
     Append { kind: String, title: String, track: String },
     /// `at` — позиция в показанном списке (подсказка: настоящую ищем по id в заголовке).
@@ -322,7 +326,11 @@ fn find_pos(pl: &Playlist, full_id: &str, hint: usize) -> Option<usize> {
 async fn run_pl_op(c: &Client, op: PlOp) -> (Result<String, String>, Option<String>, bool) {
     let (kind, reload) = match &op {
         PlOp::Create { .. } => (None, true),
-        PlOp::Rename { kind, .. } | PlOp::Delete { kind, .. } | PlOp::Append { kind, .. } => (Some(kind.clone()), true),
+        PlOp::Rename { kind, .. }
+        | PlOp::Delete { kind, .. }
+        | PlOp::Append { kind, .. }
+        | PlOp::Describe { kind, .. }
+        | PlOp::Visibility { kind, .. } => (Some(kind.clone()), true),
         PlOp::Remove { kind, .. } | PlOp::Move { kind, .. } => (Some(kind.clone()), false),
     };
     let r: api::Result<String> = async {
@@ -338,6 +346,18 @@ async fn run_pl_op(c: &Client, op: PlOp) -> (Result<String, String>, Option<Stri
             PlOp::Rename { kind, title } => {
                 c.playlist_rename(&kind, &title).await?;
                 Ok(format!("Плейлист переименован: «{title}»"))
+            }
+            PlOp::Describe { kind, text } => {
+                c.playlist_describe(&kind, &text).await?;
+                Ok(if text.is_empty() { "Описание убрано".into() } else { "Описание сохранено".into() })
+            }
+            PlOp::Visibility { kind, title, public } => {
+                c.playlist_visibility(&kind, public).await?;
+                Ok(if public {
+                    format!("«{title}» теперь виден всем")
+                } else {
+                    format!("«{title}» теперь приватный")
+                })
             }
             PlOp::Delete { kind, title } => {
                 c.playlist_delete(&kind).await?;
@@ -2959,10 +2979,19 @@ impl App {
 
     fn input_submit(&mut self, text: String, action: InputAction) {
         let title = text.trim().to_string();
+        if let InputAction::Describe(kind) = action {
+            if let Loadable::Ready(v) = &mut self.playlists
+                && let Some(p) = v.iter_mut().find(|p| p.kind == kind)
+            {
+                p.description = (!title.is_empty()).then(|| title.clone());
+            }
+            return self.pl_op(PlOp::Describe { kind, text: title });
+        }
         if title.is_empty() {
             return;
         }
         match action {
+            InputAction::Describe(_) => {}
             InputAction::Create(track) => self.pl_op(PlOp::Create {
                 title,
                 add: track.map(|t| t.full_id()),
@@ -4744,6 +4773,30 @@ impl App {
                     text: String::new(),
                     action: InputAction::Create(None),
                 });
+            }
+            KeyCode::Char('E') => {
+                if let Some(pl) = self.selected_own_playlist() {
+                    self.popup = Some(Popup::Input {
+                        title: " Описание плейлиста (пусто — убрать) ",
+                        text: pl.description.clone().unwrap_or_default(),
+                        action: InputAction::Describe(pl.kind.clone()),
+                    });
+                }
+            }
+            KeyCode::Char('H') => {
+                if let Some(pl) = self.selected_own_playlist() {
+                    let public = pl.visibility.as_deref() == Some("private");
+                    if let Loadable::Ready(v) = &mut self.playlists
+                        && let Some(p) = v.iter_mut().find(|p| p.kind == pl.kind)
+                    {
+                        p.visibility = Some(if public { "public" } else { "private" }.into());
+                    }
+                    self.pl_op(PlOp::Visibility {
+                        kind: pl.kind,
+                        title: pl.title,
+                        public,
+                    });
+                }
             }
             KeyCode::Char('e') => {
                 if let Some(pl) = self.selected_own_playlist() {
