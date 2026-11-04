@@ -561,6 +561,8 @@ pub struct App {
     queue_saved: Option<(u64, usize)>,
     /// Очередь восстановлена из кеша, а трек ещё не открыт (ждёт сети): (индекс, секунда).
     resume_at: Option<(usize, f64)>,
+    /// Пока играет только сохранённый трек, а очередь грузится: (поколение заглушки, его место в полной очереди).
+    resume_partial: Option<(u64, usize)>,
     /// Не открывшиеся треки очереди (поколение, индекс) — автопереход их пропускает.
     failed: HashSet<(u64, usize)>,
     /// Откуда новый источник, пока идёт подмена на ходу.
@@ -776,6 +778,7 @@ impl App {
             failed: HashSet::new(),
             queue_saved: None,
             resume_at: None,
+            resume_partial: None,
             images,
             gfx,
             controls: Vec::new(),
@@ -956,17 +959,24 @@ impl App {
         let Some(r) = self.state.resume.clone().filter(|r| !r.ids.is_empty()) else {
             return;
         };
-        let tracks = crate::offline::load_queue(&self.data_dir);
-        if tracks.len() != r.ids.len() || tracks.iter().zip(&r.ids).any(|(t, id)| t.full_id() != *id) {
-            return;
-        }
-        let kind = match r.wave {
+        let kind = match r.wave.clone() {
             Some((session, batch)) => QueueKind::Wave { session, batch },
             None => QueueKind::List,
         };
-        let pos = r.pos.min(tracks.len() - 1);
-        self.replace_queue(tracks, kind, r.title);
-        self.queue_saved = Some((self.queue.generation, self.queue.items.len()));
+        let tracks = crate::offline::load_queue(&self.data_dir);
+        let pos = if tracks.len() == r.ids.len() && tracks.iter().zip(&r.ids).all(|(t, id)| t.full_id() == *id) {
+            let pos = r.pos.min(tracks.len() - 1);
+            self.replace_queue(tracks, kind, r.title);
+            self.queue_saved = Some((self.queue.generation, self.queue.items.len()));
+            pos
+        } else if let Some(t) = r.track.filter(|t| r.ids.get(r.pos) == Some(&t.full_id())) {
+            // Кеш очереди не подошёл: сперва один играющий трек, полная очередь — после входа.
+            self.replace_queue(vec![t], kind, r.title);
+            self.resume_partial = Some((self.queue.generation, r.pos));
+            0
+        } else {
+            return;
+        };
         self.queue.pos = Some(pos);
         if self.library.contains(&self.queue.items[pos].id) {
             self.play_index_with(pos, r.secs, true, Opener::Offline(self.library.clone()));
@@ -978,7 +988,7 @@ impl App {
 
     fn restore_session(&mut self) {
         // Очередь уже из кеша: открыть трек (если ещё ждал сети) и подготовить следующий.
-        if !self.queue.items.is_empty() {
+        if !self.queue.items.is_empty() && self.resume_partial.is_none() {
             match self.resume_at.take() {
                 Some((pos, secs)) => {
                     self.play_index_at(pos, secs, true);
@@ -987,6 +997,12 @@ impl App {
                 None => self.schedule_next(),
             }
             return;
+        }
+        // Играет заглушка из одного трека: открыть его, если ждал сети, и догрузить очередь.
+        if self.resume_partial.is_some()
+            && let Some((pos, secs)) = self.resume_at.take()
+        {
+            self.play_index_at(pos, secs, true);
         }
         let Some(r) = self.state.resume.clone().filter(|r| !r.ids.is_empty()) else {
             return;
@@ -997,11 +1013,53 @@ impl App {
         });
     }
 
+    /// Полная очередь пришла с сервера — встаёт на место заглушки из одного трека, не трогая звук.
+    fn fill_partial_queue(
+        &mut self,
+        generation: u64,
+        full_pos: usize,
+        resume: crate::config::Resume,
+        result: Result<Vec<Track>, String>,
+    ) {
+        // Пользователь уже включил другое — заглушка не актуальна.
+        if self.queue.generation != generation {
+            return;
+        }
+        let tracks = match result {
+            Ok(t) => t,
+            Err(e) => return tracing::warn!("очередь не догрузилась: {e}"),
+        };
+        let cur_id = self.queue.items.first().map(|t| t.id.clone());
+        // Недоступные сервер может не вернуть — позицию ищем по id рядом с сохранённой.
+        let Some(pos) = tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| Some(&t.id) == cur_id.as_ref())
+            .min_by_key(|(i, _)| i.abs_diff(full_pos))
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        let kind = std::mem::replace(&mut self.queue.kind, QueueKind::List);
+        self.replace_queue(tracks, kind, resume.title);
+        self.queue.pos = Some(pos);
+        // Токены заглушки (играющий трек) — на новое место в новой очереди.
+        let g = self.queue.generation;
+        for (old_gen, idx, _) in self.tokens.values_mut() {
+            if *old_gen == generation && *idx == 0 {
+                *old_gen = g;
+                *idx = pos;
+            }
+        }
+        self.schedule_next();
+        self.persist_session();
+    }
+
     /// Сессия на диск: при смене трека и периодически — переживёт и kill терминала.
     fn persist_session(&mut self) {
         self.save_session();
         let mark = (self.queue.generation, self.queue.items.len());
-        if !self.queue.items.is_empty() && self.queue_saved != Some(mark) {
+        if !self.queue.items.is_empty() && self.queue_saved != Some(mark) && !self.partial_active() {
             self.queue_saved = Some(mark);
             crate::offline::save_queue(&self.data_dir, self.queue.items.clone());
         }
@@ -1009,7 +1067,19 @@ impl App {
         self.last_session_save = Instant::now();
     }
 
+    /// Играет заглушка из одного трека, а полная очередь ещё не пришла.
+    fn partial_active(&self) -> bool {
+        self.resume_partial.is_some_and(|(g, _)| g == self.queue.generation)
+    }
+
     fn save_session(&mut self) {
+        // Заглушка: сохранённую полную очередь не трогаем, обновляем только место в треке.
+        if self.partial_active() {
+            if let Some(r) = self.state.resume.as_mut() {
+                r.secs = self.now.as_ref().map_or(r.secs, |n| n.pos);
+            }
+            return;
+        }
         self.state.resume = (!self.queue.items.is_empty()).then(|| crate::config::Resume {
             title: self.queue.title.clone(),
             ids: self.queue.items.iter().map(Track::full_id).collect(),
@@ -1019,7 +1089,13 @@ impl App {
                 QueueKind::Wave { session, batch } => Some((session.clone(), batch.clone())),
                 QueueKind::List | QueueKind::OfflineWave => None,
             },
+            track: self
+                .now
+                .as_ref()
+                .map(|n| n.track.clone())
+                .or_else(|| self.queue.pos.and_then(|p| self.queue.items.get(p).cloned())),
         });
+
     }
 
     // ── загрузки данных ──────────────────────────────────────────────────────
@@ -2785,6 +2861,9 @@ impl App {
                 Err(e) => self.wave.items = Loadable::Failed(e),
             },
             Msg::Resumed { resume, result } => {
+                if let Some((generation, full_pos)) = self.resume_partial.take() {
+                    return self.fill_partial_queue(generation, full_pos, resume, result);
+                }
                 // Пользователь уже что-то включил сам — не перебиваем.
                 if !self.queue.items.is_empty() {
                     return;

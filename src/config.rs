@@ -168,6 +168,9 @@ pub struct Resume {
     pub secs: f64,
     /// Сессия волны и последний batch, если играла волна.
     pub wave: Option<(String, Option<String>)>,
+    /// Сам играющий трек — стартует сразу, даже если очередь придётся грузить с сервера.
+    #[serde(default)]
+    pub track: Option<crate::api::Track>,
 }
 
 impl State {
