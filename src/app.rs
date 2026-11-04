@@ -628,7 +628,7 @@ pub struct Areas {
     pub progress: ratatui::layout::Rect,
     pub player: ratatui::layout::Rect,
     /// Вкладки в шапке: (x начала, x конца, вкладка).
-    pub tabs: [(u16, u16); 6],
+    pub tabs: [(u16, u16); Tab::ALL.len()],
     pub main: ratatui::layout::Rect,
     pub header: ratatui::layout::Rect,
 }
