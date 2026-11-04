@@ -23,6 +23,17 @@ android {
         versionName = "0.1.0"
     }
 
+    buildTypes {
+        // Compose в debuggable-сборке без R8 в разы медленнее (списки дёргаются) — играть
+        // стоит с release. Подпись — та же debug: ставится поверх без потери входа.
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
     buildFeatures {
         compose = true
     }

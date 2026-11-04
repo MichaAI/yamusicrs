@@ -55,7 +55,8 @@
           };
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
-          # Android-клиент: `nix develop .#android -c ./gradlew -p android assembleDebug`.
+          # Android-клиент: `nix develop .#android -c ./android/gradlew -p android assembleRelease`
+          # (release — с R8: Compose в debug-сборке заметно тормозит).
           android =
             let
               apkgs = import nixpkgs {

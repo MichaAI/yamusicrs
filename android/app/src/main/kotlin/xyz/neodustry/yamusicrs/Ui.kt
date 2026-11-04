@@ -59,6 +59,11 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Typography
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.toShape
@@ -91,20 +96,41 @@ import uniffi.yamusic_android.PlayerState
 import uniffi.yamusic_android.TrackItem
 import uniffi.yamusic_android.WavePreset
 
-private val Ink = Color(0xFF0B0B0C)
+/** Заголовки: Unbounded (OFL) — широкий и округлый, рифмуется с блобом и морфингом форм. */
+private val Display = FontFamily(
+    listOf(500, 600, 700, 800, 900).map { w ->
+        Font(R.font.unbounded, FontWeight(w), variationSettings = FontVariation.Settings(FontVariation.weight(w)))
+    },
+)
+
+private fun typography(): Typography {
+    val t = Typography()
+    fun TextStyle.display(tracking: Float) = copy(fontFamily = Display, letterSpacing = tracking.sp)
+    return t.copy(
+        displayLarge = t.displayLarge.display(-1.5f),
+        displayMedium = t.displayMedium.display(-1f),
+        displaySmall = t.displaySmall.display(-0.5f),
+        headlineLarge = t.headlineLarge.display(-0.5f),
+        headlineMedium = t.headlineMedium.display(-0.3f),
+        headlineSmall = t.headlineSmall.display(-0.2f),
+        titleLarge = t.titleLarge.display(0f),
+    )
+}
 
 // ── тема ─────────────────────────────────────────────────────────────────────
 
 /** Схема MD3 из палитры обложки (как тема TUI): акценты, тонированные поверхности, текст. */
 private fun scheme(p: Pal): ColorScheme {
-    val bg = lerp(Ink, p.surface, 0.35f)
+    // Фон — сама обложка, затемнённая (а не нейтральный почти-чёрный).
+    val bg = lerp(Color.Black, p.surface, 0.6f)
+    val ink = lerp(Color.Black, p.surface, 0.4f)
     return darkColorScheme(
         primary = p.accent,
-        onPrimary = Ink,
+        onPrimary = ink,
         primaryContainer = lerp(bg, p.accent, 0.32f),
         onPrimaryContainer = Color.White,
         secondary = p.accent2,
-        onSecondary = Ink,
+        onSecondary = ink,
         secondaryContainer = lerp(bg, p.accent2, 0.28f),
         onSecondaryContainer = Color.White,
         tertiary = p.blob[2],
@@ -113,7 +139,7 @@ private fun scheme(p: Pal): ColorScheme {
         surface = bg,
         onSurface = lerp(Color(0xFFE8E8E8), p.accent, 0.08f),
         onSurfaceVariant = lerp(Color(0xFF8C8C8C), p.accent, 0.15f),
-        surfaceContainerLowest = lerp(bg, Ink, 0.5f),
+        surfaceContainerLowest = lerp(bg, Color.Black, 0.5f),
         surfaceContainerLow = lerp(bg, p.surface, 0.5f),
         surfaceContainer = lerp(bg, lerp(p.surface, Color.White, 0.04f), 0.8f),
         surfaceContainerHigh = lerp(p.surface, Color.White, 0.07f),
@@ -146,7 +172,12 @@ fun YaTheme(pal: Pal, content: @Composable () -> Unit) {
         outline = target.outline.anim(),
         outlineVariant = target.outlineVariant.anim(),
     )
-    MaterialExpressiveTheme(colorScheme = s, motionScheme = MotionScheme.expressive(), content = content)
+    MaterialExpressiveTheme(
+        colorScheme = s,
+        motionScheme = MotionScheme.expressive(),
+        typography = remember { typography() },
+        content = content,
+    )
 }
 
 // ── корень ───────────────────────────────────────────────────────────────────
@@ -284,8 +315,8 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                 ) { t ->
                     when (t) {
                         Tab.Wave -> WaveTab(app, pal, s)
-                        Tab.Library -> LibraryTab(app, s)
-                        Tab.Queue -> QueueTab(app, s)
+                        Tab.Library -> LibraryTab(app, s.track?.id, !s.paused, s.likesLoading)
+                        Tab.Queue -> QueueTab(app, s.track?.id, s.queuePos?.toInt(), !s.paused)
                     }
                 }
                 androidx.compose.animation.AnimatedVisibility(
@@ -348,13 +379,16 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
                     MaterialTheme.typography.displayMedium.copy(fontWeight = FontWeight.Black),
                     MaterialTheme.colorScheme.onSurface,
                 )
-                val sub = when {
-                    s.waveLoading -> "настраиваю…"
-                    waveOn && s.track != null -> "${s.track!!.title} — ${s.track!!.artists}"
-                    s.offline -> "без сети — по скачанному"
-                    else -> "бесконечный поток под ваш вкус"
+                val t = s.track
+                when {
+                    s.waveLoading -> Sub("Подбираю треки")
+                    waveOn && t != null -> {
+                        Sub(t.title, MaterialTheme.colorScheme.onSurface)
+                        Sub(t.artists)
+                    }
+                    s.offline -> Sub("Без сети: играет из скачанного")
+                    else -> Sub("Бесконечный поток под ваш вкус")
                 }
-                Text(sub, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 if (s.waveLoading) {
@@ -368,10 +402,10 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
             if (presets.isNotEmpty()) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(presets, key = { it.seeds.joinToString() }) { p ->
-                        PresetCard(app, p, active = waveOn && s.waveSeeds == p.seeds) {
+                        PresetOrb(app, p, active = waveOn && s.waveSeeds == p.seeds) {
                             app.core.startWaveWith(p.seeds, p.name)
                         }
                     }
@@ -382,34 +416,43 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
 }
 
 @Composable
-private fun PresetCard(app: YaApp, p: WavePreset, active: Boolean, onClick: () -> Unit) {
+private fun Sub(text: String, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
+    Text(text, color = color, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+}
+
+/** Пресет — иконка агента и имя, без плашки; у играющего форма морфится в «печенье». */
+@Composable
+private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () -> Unit) {
     val tint = p.color?.let { Color(0xFF000000 or it.toLong()) } ?: MaterialTheme.colorScheme.primary
-    val bg by animateColorAsState(
-        if (active) lerp(MaterialTheme.colorScheme.surfaceContainerHigh, tint, 0.45f)
-        else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.82f),
-        label = "preset",
-    )
     val shape = if (active) MaterialShapes.Cookie12Sided.toShape() else MaterialShapes.Circle.toShape()
     Column(
-        Modifier.width(132.dp).clip(RoundedCornerShape(28.dp)).background(bg).clickable(onClick = onClick).padding(14.dp),
+        Modifier.width(88.dp).clip(RoundedCornerShape(20.dp)).clickable(onClick = onClick).padding(vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(Modifier.size(64.dp).clip(shape).background(tint.copy(alpha = 0.35f))) {
-            Art(app, p.icon, Modifier.fillMaxSize(), corner = 0.dp)
+        Box(
+            Modifier.size(76.dp).clip(shape).background(if (active) MaterialTheme.colorScheme.primary else Color.Transparent),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(Modifier.size(if (active) 66.dp else 76.dp).clip(shape).background(tint.copy(alpha = 0.3f))) {
+                Art(app, p.icon, Modifier.fillMaxSize(), corner = 0.dp)
+            }
         }
-        Spacer(Modifier.height(10.dp))
-        Text(p.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        p.description?.let {
-            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            p.name,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 
 // ── коллекция и очередь ──────────────────────────────────────────────────────
 
 @Composable
-private fun LibraryTab(app: YaApp, s: PlayerState) {
+private fun LibraryTab(app: YaApp, currentId: String?, playing: Boolean, loading: Boolean) {
     val likes by app.likes.collectAsStateWithLifecycle()
     var filter by rememberSaveable { mutableStateOf("") }
     val shown = remember(likes, filter) {
@@ -423,34 +466,36 @@ private fun LibraryTab(app: YaApp, s: PlayerState) {
         SearchPill(filter, { filter = it }, "Поиск по коллекции")
         if (likes.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                if (s.likesLoading) LoadingIndicator() else Text("Пусто")
+                if (loading) LoadingIndicator() else Text("Здесь появятся треки, которые вы лайкнете")
             }
             return@Column
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
-            itemsIndexed(shown, key = { _, it -> it.index }) { _, (i, t) ->
-                TrackRow(app, t, current = s.track?.id == t.id, playing = !s.paused) { app.core.playLikes(i.toUInt()) }
+            itemsIndexed(shown, key = { _, it -> it.index }, contentType = { _, _ -> "track" }) { _, (i, t) ->
+                TrackRow(app, t, current = currentId == t.id, playing = playing) { app.core.playLikes(i.toUInt()) }
             }
         }
     }
 }
 
 @Composable
-private fun QueueTab(app: YaApp, s: PlayerState) {
+private fun QueueTab(app: YaApp, currentId: String?, queuePos: Int?, playing: Boolean) {
     val q by app.queue.collectAsStateWithLifecycle()
     val (title, items) = q
     val list = rememberLazyListState()
-    LaunchedEffect(title, items.size) { s.queuePos?.let { list.scrollToItem((it.toInt() - 2).coerceAtLeast(0)) } }
+    LaunchedEffect(title, items.size) { queuePos?.let { list.scrollToItem((it - 2).coerceAtLeast(0)) } }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Header("Очередь", if (items.isEmpty()) "" else "$title · ${items.size}") {}
+        Header("Очередь", title) {}
         if (items.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Очередь пуста", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Включите волну или трек из коллекции", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             return@Column
         }
         LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
-            itemsIndexed(items) { i, t ->
-                val cur = s.queuePos?.toInt() == i
-                TrackRow(app, t, current = cur, playing = !s.paused, dim = s.queuePos?.let { i < it.toInt() } == true) {
+            itemsIndexed(items, contentType = { _, _ -> "track" }) { i, t ->
+                val cur = queuePos == i && currentId == t.id
+                TrackRow(app, t, current = cur, playing = playing, dim = queuePos?.let { i < it } == true) {
                     app.core.playQueue(i.toUInt())
                 }
             }
@@ -501,10 +546,7 @@ private fun TrackRow(app: YaApp, t: TrackItem, current: Boolean, playing: Boolea
         dim -> 0.55f
         else -> 1f
     }
-    val bg by animateColorAsState(
-        if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent,
-        label = "row",
-    )
+    val bg = if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
     Row(
         // Концентрично миниатюре: 14 + 10 (отступ) = 24.
         Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(24.dp)).background(bg)
@@ -545,8 +587,6 @@ private fun TrackRow(app: YaApp, t: TrackItem, current: Boolean, playing: Boolea
 @Composable
 private fun MiniPlayer(app: YaApp, s: PlayerState, open: () -> Unit) {
     val t = s.track ?: return
-    val pos = smoothPosition(s)
-    val frac = (pos.toFloat() / t.durationMs.toLong().coerceAtLeast(1)).coerceIn(0f, 1f)
     Surface(
         shape = RoundedCornerShape(32.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -556,8 +596,7 @@ private fun MiniPlayer(app: YaApp, s: PlayerState, open: () -> Unit) {
     ) {
         Box {
             // Прогресс — заливкой фона пилюли.
-            val fill = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-            Box(Modifier.matchParentSize().drawBehind { drawRect(fill, size = Size(size.width * frac, size.height)) })
+            ProgressFill(s, t.durationMs.toLong(), Modifier.matchParentSize())
             Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 // Концентрично пилюле: 32 − 8 (отступ) = 24.
                 Art(app, t.thumb, Modifier.size(52.dp), corner = 24.dp)
@@ -592,6 +631,15 @@ private fun MiniPlayer(app: YaApp, s: PlayerState, open: () -> Unit) {
     }
 }
 
+/** Заливка прогресса пилюли: единственное, что перерисовывается каждый кадр. */
+@Composable
+private fun ProgressFill(s: PlayerState, durationMs: Long, modifier: Modifier) {
+    val pos = smoothPosition(s)
+    val frac = (pos.toFloat() / durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val fill = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+    Box(modifier.drawBehind { drawRect(fill, size = Size(size.width * frac, size.height)) })
+}
+
 // ── сцена ────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -600,7 +648,6 @@ private fun Stage(app: YaApp, pal: Pal, s: PlayerState, close: () -> Unit) {
     var showLyrics by rememberSaveable { mutableStateOf(false) }
     val lyr by app.lyrics.collectAsStateWithLifecycle()
     val lyrics = lyr?.takeIf { it.trackId == t.id }?.lyrics
-    val pos = smoothPosition(s)
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).clickable(enabled = false) {}) {
         Blob(pal.blob, !s.paused, Modifier.fillMaxSize())
         Box(
@@ -638,7 +685,7 @@ private fun Stage(app: YaApp, pal: Pal, s: PlayerState, close: () -> Unit) {
                     BoxWithConstraints(m, contentAlignment = Alignment.Center) {
                         AnimatedContent(showLyrics && lyrics != null, label = "lyrics") { lyricsOn ->
                             if (lyricsOn && lyrics != null) {
-                                LyricsView(app, lyrics, pos)
+                                LyricsView(app, lyrics, s)
                             } else {
                                 val side = minOf(maxWidth, maxHeight, 560.dp)
                                 Art(app, t.cover, Modifier.size(side), corner = 36.dp)
@@ -648,7 +695,7 @@ private fun Stage(app: YaApp, pal: Pal, s: PlayerState, close: () -> Unit) {
                 }
                 val info: @Composable (Modifier) -> Unit = { m ->
                     Column(m, verticalArrangement = Arrangement.Bottom) {
-                        StageInfo(app, s, t, pos)
+                        StageInfo(app, s, t)
                     }
                 }
                 if (wide) {
@@ -657,9 +704,11 @@ private fun Stage(app: YaApp, pal: Pal, s: PlayerState, close: () -> Unit) {
                         info(Modifier.weight(1f).fillMaxHeight())
                     }
                 } else {
+                    // Кнопки — в зоне большого пальца: под ними остаётся заметный запас.
                     Column(Modifier.fillMaxSize()) {
                         art(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp))
                         info(Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(72.dp))
                     }
                 }
             }
@@ -669,7 +718,7 @@ private fun Stage(app: YaApp, pal: Pal, s: PlayerState, close: () -> Unit) {
 
 /** Название, исполнитель, перемотка и кнопки сцены. */
 @Composable
-private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem, pos: Long) {
+private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem) {
     // Длинное название бежит строкой, как marquee в TUI.
     ScrambleText(
         t.title,
@@ -677,15 +726,14 @@ private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem, pos: Long) {
         MaterialTheme.colorScheme.onSurface,
         Modifier.basicMarquee(initialDelayMillis = 2000),
     )
-    Text(
-        listOf(t.artists, t.album).filter { it.isNotEmpty() }.joinToString(" · "),
-        style = MaterialTheme.typography.titleMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
+    Text(t.artists, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1, overflow = TextOverflow.Ellipsis)
+    if (t.album.isNotEmpty() && t.album != t.title) {
+        Text(t.album, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
     Spacer(Modifier.height(12.dp))
-    WavySeek(pos, t.durationMs.toLong(), !s.paused && !s.loading, { app.core.seek(it.toULong()) })
+    Seek(app, s, t)
     Spacer(Modifier.height(8.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         ShapeIconButton(Ic.Dislike, "Не рекомендовать", { app.core.dislike() }, size = 52.dp, container = Color.Transparent,
@@ -705,9 +753,16 @@ private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem, pos: Long) {
     Spacer(Modifier.height(8.dp))
 }
 
+/** Перемотка со своей плавной позицией — перерисовывается одна она. */
+@Composable
+private fun Seek(app: YaApp, s: PlayerState, t: TrackItem) {
+    WavySeek(smoothPosition(s), t.durationMs.toLong(), !s.paused && !s.loading, { app.core.seek(it.toULong()) })
+}
+
 /** Текст песни: синхронный — текущая строка крупно и в акценте, список сам едет к ней (как в TUI). */
 @Composable
-private fun LyricsView(app: YaApp, l: LyricsData, posMs: Long) {
+private fun LyricsView(app: YaApp, l: LyricsData, s: PlayerState) {
+    val posMs = smoothPosition(s)
     if (!l.synced) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             l.lines.forEach { Text(it.text, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 4.dp)) }

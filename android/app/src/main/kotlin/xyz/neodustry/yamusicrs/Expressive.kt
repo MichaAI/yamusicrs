@@ -287,10 +287,9 @@ fun WavySeek(positionMs: Long, durationMs: Long, playing: Boolean, onSeek: (Long
 @Composable
 fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp) {
     val bmp by produceState<Bitmap?>(app.cached(url), url) { value = url?.let { app.cover(it) } }
+    val img = remember(bmp) { bmp?.asImageBitmap() }
     Box(modifier.clip(RoundedCornerShape(corner)).background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
-        bmp?.let {
-            Image(it.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-        }
+        img?.let { Image(it, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
     }
 }
 
