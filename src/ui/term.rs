@@ -149,7 +149,13 @@ pub struct NotifyReply {
 #[derive(Default)]
 pub struct OscFilter {
     buf: Option<String>,
+    /// Когда пришла последняя «клавиша» ответа.
+    last: Option<std::time::Instant>,
 }
+
+/// Ответ терминала приходит одной пачкой; пауза дольше — значит, его конец потерялся
+/// (или это был настоящий Alt+]), и дальше идут клавиши пользователя.
+const OSC_GAP: std::time::Duration = std::time::Duration::from_millis(150);
 
 pub enum Filtered {
     /// Обычная клавиша — дальше в приложение.
@@ -163,6 +169,11 @@ impl OscFilter {
     pub fn feed(&mut self, k: &crossterm::event::KeyEvent) -> Filtered {
         use crossterm::event::{KeyCode, KeyModifiers};
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        if self.buf.is_some() && self.last.is_none_or(|t| t.elapsed() > OSC_GAP) {
+            let b = self.buf.take().unwrap_or_default();
+            tracing::warn!("недочитанный ответ терминала брошен: {:?}", b.chars().take(40).collect::<String>());
+        }
+        self.last = Some(std::time::Instant::now());
         match (&mut self.buf, k.code) {
             (None, KeyCode::Char(']')) if alt => {
                 self.buf = Some(String::new());
