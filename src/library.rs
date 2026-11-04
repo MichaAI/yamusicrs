@@ -129,6 +129,28 @@ impl Library {
         self.index.lock().tracks.keys().cloned().collect()
     }
 
+    /// Сколько скачанных треков хуже lossless.
+    pub fn below_lossless(&self) -> usize {
+        self.index.lock().tracks.values().filter(|e| codec_rank(&e.codec) < 3).count()
+    }
+
+    /// Забывает, что сервер не дал качества получше: каждый трек хуже lossless
+    /// снова спросит сервер при следующем проигрывании. Возвращает их число.
+    pub fn reset_checks(&self) -> usize {
+        let n = {
+            let mut idx = self.index.lock();
+            let mut n = 0;
+            for e in idx.tracks.values_mut().filter(|e| codec_rank(&e.codec) < 3) {
+                e.checked_at = 0;
+                e.checked_rank = 0;
+                n += 1;
+            }
+            n
+        };
+        self.save_index();
+        n
+    }
+
     pub fn stats(&self) -> (usize, u64) {
         let idx = self.index.lock();
         (idx.tracks.len(), idx.tracks.values().map(|e| e.size).sum())

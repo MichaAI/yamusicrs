@@ -54,7 +54,7 @@ async fn event_loop(
     rx: &mut UnboundedReceiver<Msg>,
 ) -> color_eyre::Result<()> {
     let mut events = EventStream::new();
-    let fps = app.cfg.fps.clamp(5, 120);
+    let mut fps = app.cfg.fps.clamp(5, 120);
     let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / fps as f64));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_frame = Instant::now();
@@ -115,6 +115,12 @@ async fn event_loop(
                 dirty = true;
             }
             _ = tick.tick() => {}
+        }
+        // Частоту кадров могли поменять во вкладке «Настройки».
+        if app.cfg.fps.clamp(5, 120) != fps {
+            fps = app.cfg.fps.clamp(5, 120);
+            tick = tokio::time::interval(Duration::from_secs_f64(1.0 / fps as f64));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         }
         if app.quit {
             return Ok(());

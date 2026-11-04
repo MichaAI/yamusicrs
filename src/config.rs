@@ -108,6 +108,21 @@ impl Config {
         }
     }
 
+    /// Пишет конфиг (правки из вкладки «Настройки»).
+    pub fn save(&self, paths: &Paths) {
+        if let Some(dir) = paths.config_file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match toml::to_string_pretty(self) {
+            Ok(s) => {
+                if let Err(e) = std::fs::write(&paths.config_file, s) {
+                    tracing::warn!("config.toml не записался: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("config.toml не сериализовался: {e}"),
+        }
+    }
+
     /// Протоколы kitty поверх текста (крупный текст, уведомления, курсор): только в самом kitty.
     pub fn kitty_text_enabled(&self) -> bool {
         std::env::var_os("TMUX").is_none()

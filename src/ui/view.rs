@@ -678,6 +678,12 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
                 ("Space", "пауза"),
                 ("?", "все клавиши"),
             ],
+            View::Settings => &[
+                ("↑↓", "выбор"),
+                ("←→", "значение"),
+                ("Enter", "изменить"),
+                ("?", "все клавиши"),
+            ],
             View::Search if app.search_shows_history() => &[
                 ("Enter", "искать снова"),
                 ("Del", "убрать из истории"),
@@ -732,6 +738,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         View::Search => "Поиск".into(),
         View::Queue => format!("Очередь · {}", app.queue.title),
         View::Releases => "Новые релизы".into(),
+        View::Settings => "Настройки".into(),
         View::Tracks { title, .. } => title.clone(),
         View::Artist { name, .. } => name.clone(),
     };
@@ -757,6 +764,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         }
         View::Playlists => draw_playlists(f, inner, app, ctx),
         View::Releases => draw_releases(f, inner, app, ctx),
+        View::Settings => draw_settings(f, inner, app, ctx),
         View::Search => draw_search(f, inner, app, ctx),
         View::Queue => {
             let tracks = app.queue.items.clone();
@@ -1359,6 +1367,33 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         .map(|p| RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0))))
         .collect();
     mixed_list(f, area, app, &rows, ctx);
+}
+
+/// Вкладка «Настройки»: строки «название — значение», под ними пояснение к выбранной.
+fn draw_settings(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
+    use crate::app::Setting;
+    let sel = app.page().sel.min(Setting::ALL.len() - 1);
+    let rows: Vec<RowKind> = Setting::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let v = app.setting_value(*s);
+            let v = if i == sel && *s != Setting::Recheck { format!("‹ {v} ›") } else { v };
+            RowKind::Other(s.label().into(), v)
+        })
+        .collect();
+    let hint_h = 4.min(area.height.saturating_sub(rows.len() as u16));
+    let [list, hint] = Layout::vertical([Constraint::Min(1), Constraint::Length(hint_h)]).areas(area);
+    mixed_list(f, list, app, &rows, ctx);
+    let text = Setting::ALL[sel].hint();
+    let p = Paragraph::new(Line::styled(text, ctx.dim())).wrap(ratatui::widgets::Wrap { trim: true });
+    let hint = Rect {
+        x: hint.x + 2,
+        y: hint.y + 1.min(hint.height),
+        width: hint.width.saturating_sub(4),
+        height: hint.height.saturating_sub(1),
+    };
+    f.render_widget(p, hint);
 }
 
 /// Сетка «Новые релизы», как на сайте: обложка, под ней название, артисты и тип.
@@ -2975,7 +3010,7 @@ fn draw_toasts(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 
 fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
     let keys: &[(&str, &str)] = &[
-        ("1-6 / Tab", "вкладки"),
+        ("1-7 / Tab", "вкладки"),
         ("↑↓ j k, PgUp PgDn, g G", "навигация"),
         ("Enter", "играть / открыть"),
         ("Esc, Backspace", "назад"),

@@ -100,16 +100,18 @@ pub enum Tab {
     Search,
     Queue,
     Releases,
+    Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Tab::Wave,
         Tab::Likes,
         Tab::Playlists,
         Tab::Search,
         Tab::Queue,
         Tab::Releases,
+        Tab::Settings,
     ];
 
     pub fn title(self) -> &'static str {
@@ -120,9 +122,66 @@ impl Tab {
             Tab::Search => "Поиск",
             Tab::Queue => "Очередь",
             Tab::Releases => "Новинки",
+            Tab::Settings => "Настройки",
         }
     }
 }
+
+/// Строка вкладки «Настройки».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Quality,
+    Normalize,
+    TargetLufs,
+    Crossfade,
+    ReportPlays,
+    Fps,
+    Dither,
+    /// Действие: перепроверить качество скачанных треков.
+    Recheck,
+}
+
+impl Setting {
+    pub const ALL: [Setting; 8] = [
+        Setting::Quality,
+        Setting::Normalize,
+        Setting::TargetLufs,
+        Setting::Crossfade,
+        Setting::ReportPlays,
+        Setting::Fps,
+        Setting::Dither,
+        Setting::Recheck,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Setting::Quality => "Качество",
+            Setting::Normalize => "Выравнивание громкости",
+            Setting::TargetLufs => "Целевая громкость",
+            Setting::Crossfade => "Плавный переход",
+            Setting::ReportPlays => "Отправлять прослушивания",
+            Setting::Fps => "Кадров в секунду",
+            Setting::Dither => "Дизеринг блоба",
+            Setting::Recheck => "Перепроверить качество скачанного",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Setting::Quality => "Для следующих треков. Скачанные похуже тихо заменятся при проигрывании, если сервер даст лучше. Клавиша Q.",
+            Setting::Normalize => "Подгоняет громкость треков по R128 из метаданных Яндекса. Выключено — bit-perfect. Клавиша N.",
+            Setting::TargetLufs => "К какой громкости выравнивать, LUFS. Работает, только когда выравнивание включено.",
+            Setting::Crossfade => "Наплыв между треками; внутри одного альбома всегда встык. Клавиша x.",
+            Setting::ReportPlays => "Передавать Яндексу историю прослушиваний (влияет на рекомендации и «недавно слушали»).",
+            Setting::Fps => "Частота кадров анимаций (блоб, прокрутка, перебор символов).",
+            Setting::Dither => "Шум против «колец» на градиентах блоба, в ступенях 8 бит; 0 — выключен.",
+            Setting::Recheck => "Сервер не дал lossless — трек помечается и не перепроверяется 30 дней. Enter снимает пометки: каждый трек хуже lossless спросит сервер заново при следующем проигрывании и, если дадут лучше, перекачается.",
+        }
+    }
+}
+
+const CROSSFADE_STEPS: [f32; 4] = [0.0, 3.0, 6.0, 10.0];
+const FPS_STEPS: [u32; 5] = [15, 24, 30, 60, 120];
 
 pub enum Loadable<T> {
     Loading,
@@ -298,6 +357,7 @@ pub enum View {
     Queue,
     /// Сетка «Новые релизы».
     Releases,
+    Settings,
     Tracks {
         id: u64,
         title: String,
@@ -1264,6 +1324,7 @@ impl App {
             Tab::Search => View::Search,
             Tab::Queue => View::Queue,
             Tab::Releases => View::Releases,
+            Tab::Settings => View::Settings,
         };
         self.stack = vec![Page::new(v)];
         if t == Tab::Releases && self.releases.is_none() {
@@ -1341,6 +1402,7 @@ impl App {
             },
             View::Queue => self.queue.items.len(),
             View::Releases => self.releases.as_ref().and_then(Loadable::ready).map_or(0, Vec::len),
+            View::Settings => Setting::ALL.len(),
             View::Tracks { tracks, .. } => tracks.ready().map_or(0, Vec::len),
             View::Artist { brief, .. } => brief.ready().map_or(0, |b| artist_rows(b).len()),
         }
@@ -1450,6 +1512,7 @@ impl App {
                 }
             }
             View::Queue => self.play_index(orig),
+            View::Settings => self.change_setting(sel, 0),
             View::Releases => {
                 if let Some(a) = self
                     .releases
@@ -1626,17 +1689,7 @@ impl App {
     fn toggle_normalize(&mut self) {
         let on = !self.normalize();
         self.state.normalize = Some(on);
-        // Играющий трек: новое усиление и перемотка на текущее место — в кольце звук
-        // уже с прежним усилением. Следующий открываем заново.
-        if let Some(n) = &self.now {
-            let (token, pos) = (n.token, n.pos);
-            let g = self.gain_for(&n.track.clone());
-            self.player.set_gain(token, g);
-            self.seek_to(pos);
-        }
-        self.player.clear_next();
-        self.next_loaded = None;
-        self.schedule_next();
+        self.reapply_gain();
         self.toast(
             if on {
                 "Выравнивание громкости: вкл"
@@ -1647,10 +1700,27 @@ impl App {
         );
     }
 
+    /// Усиление поменялось: играющему треку — новое и перемотка на текущее место
+    /// (в кольце звук уже с прежним усилением); следующий открываем заново.
+    fn reapply_gain(&mut self) {
+        if let Some(n) = &self.now {
+            let (token, pos) = (n.token, n.pos);
+            let g = self.gain_for(&n.track.clone());
+            self.player.set_gain(token, g);
+            self.seek_to(pos);
+        }
+        self.player.clear_next();
+        self.next_loaded = None;
+        self.schedule_next();
+    }
+
     fn cycle_crossfade(&mut self) {
-        const STEPS: [f32; 4] = [0.0, 3.0, 6.0, 10.0];
         let cur = self.crossfade();
-        let next = STEPS.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(0.0);
+        let next = CROSSFADE_STEPS.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(0.0);
+        self.set_crossfade(next);
+    }
+
+    fn set_crossfade(&mut self, next: f32) {
         self.state.crossfade = Some(next);
         self.player.set_crossfade(next);
         self.toast(if next > 0.0 {
@@ -1995,9 +2065,101 @@ impl App {
             Quality::Hq => Quality::Nq,
             Quality::Nq => Quality::Lossless,
         };
+        self.set_quality(q);
+    }
+
+    fn set_quality(&mut self, q: Quality) {
+        let Some(f) = &self.fetcher else {
+            return self.toast_err("Без сети качество не выбрать".into());
+        };
         f.set_quality(q);
         self.state.quality = Some(q);
         self.toast(format!("Качество: {} — для следующих треков", quality_label(q)));
+    }
+
+    /// Текущее значение строки настроек.
+    pub fn setting_value(&self, s: Setting) -> String {
+        match s {
+            Setting::Quality => quality_label(self.quality()).into(),
+            Setting::Normalize => if self.normalize() { "вкл" } else { "выкл · bit-perfect" }.into(),
+            Setting::TargetLufs => format!("{:.0} LUFS", self.cfg.normalize_target_lufs),
+            Setting::Crossfade => match self.crossfade() {
+                c if c > 0.0 => format!("{c:.0} с"),
+                _ => "выкл".into(),
+            },
+            Setting::ReportPlays => if self.cfg.report_plays { "да" } else { "нет" }.into(),
+            Setting::Fps => self.cfg.fps.to_string(),
+            Setting::Dither => match self.cfg.blob_dither {
+                0 => "выкл".into(),
+                d => d.to_string(),
+            },
+            Setting::Recheck => match self.library.below_lossless() {
+                0 => "всё уже в lossless".into(),
+                n => format!("{n} тр. хуже lossless"),
+            },
+        }
+    }
+
+    /// Меняет настройку `i`: `dir` ±1 — стрелки, 0 — Enter/клик (следующее значение или действие).
+    fn change_setting(&mut self, i: usize, dir: isize) {
+        let Some(&s) = Setting::ALL.get(i) else { return };
+        let step = |len: usize, cur: usize| -> usize {
+            if dir == 0 {
+                (cur + 1) % len
+            } else {
+                (cur as isize + dir).clamp(0, len as isize - 1) as usize
+            }
+        };
+        match s {
+            Setting::Quality => {
+                const QS: [Quality; 3] = [Quality::Nq, Quality::Hq, Quality::Lossless];
+                let cur = QS.iter().position(|q| *q == self.quality()).unwrap_or(2);
+                let next = QS[step(QS.len(), cur)];
+                if next != self.quality() {
+                    self.set_quality(next);
+                }
+            }
+            Setting::Normalize => self.toggle_normalize(),
+            Setting::TargetLufs => {
+                let d = if dir == 0 { 1.0 } else { dir as f32 };
+                let v = (self.cfg.normalize_target_lufs.round() + d).clamp(-23.0, -8.0);
+                if v != self.cfg.normalize_target_lufs {
+                    self.cfg.normalize_target_lufs = v;
+                    self.cfg.save(&self.paths);
+                    if self.normalize() {
+                        self.reapply_gain();
+                    }
+                }
+            }
+            Setting::Crossfade => {
+                let cur = CROSSFADE_STEPS
+                    .iter()
+                    .position(|c| (*c - self.crossfade()).abs() < 0.01)
+                    .unwrap_or(0);
+                let next = CROSSFADE_STEPS[step(CROSSFADE_STEPS.len(), cur)];
+                if (next - self.crossfade()).abs() > 0.01 {
+                    self.set_crossfade(next);
+                }
+            }
+            Setting::ReportPlays => {
+                self.cfg.report_plays = !self.cfg.report_plays;
+                self.cfg.save(&self.paths);
+            }
+            Setting::Fps => {
+                let cur = FPS_STEPS.iter().position(|f| *f >= self.cfg.fps).unwrap_or(FPS_STEPS.len() - 1);
+                self.cfg.fps = FPS_STEPS[step(FPS_STEPS.len(), cur)];
+                self.cfg.save(&self.paths);
+            }
+            Setting::Dither => {
+                self.cfg.blob_dither = step(5, self.cfg.blob_dither.min(4) as usize) as u32;
+                self.cfg.save(&self.paths);
+            }
+            Setting::Recheck if dir == 0 => match self.library.reset_checks() {
+                0 => self.toast("Все скачанные треки уже в lossless".into()),
+                n => self.toast(format!("{n} тр. перепроверятся на lossless при проигрывании")),
+            },
+            Setting::Recheck => {}
+        }
     }
 
     fn enqueue(&mut self, t: Track, play_next: bool) {
@@ -3476,6 +3638,15 @@ impl App {
                 _ => {}
             }
         }
+        // Настройки: ←→ меняют значение (перемотка — с Shift).
+        if matches!(self.page().view, View::Settings) && !self.lyrics_mode && !(self.stage_mode && self.now.is_some()) {
+            let sel = self.page().sel;
+            match k.code {
+                KeyCode::Left if !shift => return self.change_setting(sel, -1),
+                KeyCode::Right if !shift => return self.change_setting(sel, 1),
+                _ => {}
+            }
+        }
         // Сетка релизов: ↑↓ — по рядам, ←→ — по карточкам (перемотка — с Shift).
         if matches!(self.page().view, View::Releases) && !self.lyrics_mode && !(self.stage_mode && self.now.is_some()) {
             let cols = self.grid_cols.max(1) as isize;
@@ -3498,6 +3669,7 @@ impl App {
             KeyCode::Char('4') => self.set_tab(Tab::Search),
             KeyCode::Char('5') => self.set_tab(Tab::Queue),
             KeyCode::Char('6') => self.set_tab(Tab::Releases),
+            KeyCode::Char('7') => self.set_tab(Tab::Settings),
             KeyCode::Tab | KeyCode::BackTab => {
                 let i = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
                 let n = Tab::ALL.len();
