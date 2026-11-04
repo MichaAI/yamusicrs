@@ -85,7 +85,12 @@ struct Scaled {
 fn scale_worker(jobs: crossbeam_channel::Receiver<ScaleJob>, done: crossbeam_channel::Sender<Scaled>) {
     for j in jobs {
         let Ok(full) = image::load_from_memory(&j.png) else { continue };
-        let small = image::imageops::resize(&full.to_rgba8(), j.px.0, j.px.1, image::imageops::FilterType::Lanczos3);
+        // Место из целых клеток почти никогда не квадратное в пикселях: обложку не растягиваем,
+        // а ставим квадратом по центру, края прозрачные.
+        let side = j.px.0.min(j.px.1);
+        let sq = image::imageops::resize(&full.to_rgba8(), side, side, image::imageops::FilterType::Lanczos3);
+        let mut small = image::RgbaImage::new(j.px.0, j.px.1);
+        image::imageops::overlay(&mut small, &sq, ((j.px.0 - side) / 2) as i64, ((j.px.1 - side) / 2) as i64);
         let mut png = Vec::new();
         if image::DynamicImage::ImageRgba8(small)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
