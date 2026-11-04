@@ -16,6 +16,9 @@ use crate::library::{Download, Library, codec_rank};
 
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 
+/// Сколько ждать ответа о качестве получше, прежде чем играть файл из библиотеки.
+const UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 #[derive(Clone)]
 pub struct Fetcher {
     client: Client,
@@ -68,40 +71,35 @@ impl Fetcher {
     }
 
     pub async fn open(&self, track: &Track) -> Result<(Source, Origin)> {
-        if let Some((path, entry)) = self.library.lookup(&track.id) {
-            // Файл хуже, чем просим, и давно не проверяли — играем что есть, а в фоне
-            // спрашиваем сервер. Если дадут лучше, файл в библиотеке будет заменён.
-            if entry.wants_upgrade(quality_rank(self.quality())) {
-                let this = self.clone();
-                let track = track.clone();
-                let have = entry.codec.clone();
-                tokio::spawn(async move { this.try_upgrade(track, have).await });
-            }
-            return Ok((Source::File(path), Origin::Library));
-        }
+        // Уже качается (предзагрузка или апгрейд) — тот же буфер: он не хуже файла.
         if let Some(buf) = self.active.lock().get(&track.id).cloned() {
             return Ok((Source::stream(buf.clone()), Origin::Network { buf }));
+        }
+        if let Some((path, entry)) = self.library.lookup(&track.id) {
+            // Файл хуже, чем просим, и давно не проверяли — сперва спрашиваем сервер:
+            // дадут лучше — сразу играем его из сети (файл в библиотеке заменится),
+            // нет или сеть не ответила — играем файл.
+            let want = self.quality();
+            if entry.wants_upgrade(quality_rank(want)) {
+                let ask = self.client.file_info(&track.id, want);
+                match tokio::time::timeout(UPGRADE_TIMEOUT, ask).await {
+                    Ok(Ok(info)) if codec_rank(&info.codec) > codec_rank(&entry.codec) => {
+                        tracing::info!("апгрейд {}: {} → {}", track.id, entry.codec, info.codec);
+                        match self.start_download(track, &info) {
+                            Ok(buf) => return Ok((Source::stream(buf.clone()), Origin::Network { buf })),
+                            Err(e) => tracing::warn!("апгрейд {}: {e}", track.id),
+                        }
+                    }
+                    Ok(Ok(_)) => self.library.mark_checked(&track.id, quality_rank(want)),
+                    Ok(Err(e)) => tracing::warn!("апгрейд {}: {e}", track.id),
+                    Err(_) => tracing::warn!("апгрейд {}: сервер не ответил, играю файл", track.id),
+                }
+            }
+            return Ok((Source::File(path), Origin::Library));
         }
         let info = self.client.file_info(&track.id, self.quality()).await?;
         let buf = self.start_download(track, &info)?;
         Ok((Source::stream(buf.clone()), Origin::Network { buf }))
-    }
-
-    async fn try_upgrade(&self, track: Track, have: String) {
-        if self.active.lock().contains_key(&track.id) {
-            return;
-        }
-        let want = self.quality();
-        match self.client.file_info(&track.id, want).await {
-            Ok(info) if codec_rank(&info.codec) > codec_rank(&have) => {
-                tracing::info!("апгрейд {}: {have} → {}", track.id, info.codec);
-                if let Err(e) = self.start_download(&track, &info) {
-                    tracing::warn!("апгрейд {}: {e}", track.id);
-                }
-            }
-            Ok(_) => self.library.mark_checked(&track.id, quality_rank(want)),
-            Err(e) => tracing::warn!("апгрейд {}: {e}", track.id),
-        }
     }
 
     /// Запускает загрузку в фоне; по завершении трек ложится в библиотеку.
