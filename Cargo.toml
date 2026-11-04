@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/tui"]
+members = ["crates/core", "crates/tui", "crates/android", "crates/uniffi-bindgen"]
 default-members = ["crates/tui"]
 
 [workspace.package]

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Нота на градиентном круге (цвета блоба). Адаптивная иконка: значимое — в центральных 66dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M54,24a30,30 0,1 1,0 60a30,30 0,1 1,0 -60z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="30"
+                android:startY="28"
+                android:endX="80"
+                android:endY="82">
+                <item android:offset="0" android:color="#FFFFCC00" />
+                <item android:offset="0.5" android:color="#FFF02A4F" />
+                <item android:offset="1" android:color="#FF785ADC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M56,38h4v30h-4z M56,38h16v8h-16z M44,68a8,8 0,1 0,16 0a8,8 0,1 0,-16 0z" />
+</vector>

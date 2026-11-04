@@ -40,3 +40,6 @@ rtrb.workspace = true
 lofty.workspace = true
 
 tokio-tungstenite.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-root-certs = "1"
