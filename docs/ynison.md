@@ -98,6 +98,28 @@ Android 2026.09.5 использует тот же протокол.
 - entity_context: `BASED_ON_ENTITY_BY_DEFAULT`
 - activity_interception_type: `DO_NOT_INTERCEPT_BY_DEFAULT`
 
+## Что выяснилось при реализации (2026-11-04)
+
+- Десктоп 5.63.1 и веб-клиент подключаются **только «тенью»**: `variables: {shadow: true}`,
+  `is_shadow: true`, `can_be_remote_controller: false`, `app_name: "Browser"`,
+  `title: "Music Desktop App"`, `type: WEB`, `device_id` — новый uuid на каждый запуск.
+  Тень публикует свою очередь (`update_player_state`, статус всегда `paused: true`;
+  пауза/позиция — `update_playing_status`) и применяет чужой diff, только когда сама не играет.
+  Управлять тенью с телефона нельзя.
+- Полноценное управляемое устройство есть только в Android, и там бинарный gRPC
+  (`ynison.music.yandex.net:443`, `ynison_redirect.YnisonRedirectService/GetRedirectToYnison`),
+  а не JSON-WebSocket.
+- Пользователь выбрал **полноценный плеер** (`is_shadow: false`) поверх JSON-WebSocket.
+- Первая проба (тень, как десктоп) 2026-11-04: redirector ответил нормально
+  (`host`, `redirect_ticket`, `session_id`, `keep_alive_params`), хаб — сразу
+  `{"error": {"grpc_code": 14, "http_code": 503, "message": "Ynison service is temporary unavailable.",
+  "details": {"ynison-error-code": "500140000", "ynison-go-away-for-seconds": "3600"}}}`
+  при app_version и 5.63.1, и 5.95.0. Сбой это или отказ нашему клиенту — не выяснено;
+  go-away соблюдать.
+- Для тестов можно использовать Waydroid с официальным Android-приложением (вместо телефона).
+- Пробный скрипт: подключение тенью и дамп сообщений хаба — `tools/ynison_probe.py`
+  (python + websockets, заголовки в subprotocols, Origin `https://music.yandex.ru`).
+
 ## Осторожно
 
 - При подключении не забирать активность у телефона (`is_currently_active: false`,
