@@ -498,6 +498,31 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                     row(&mut lines, "Жанр", g.clone(), false);
                 }
             }
+            // Авторы и лейбл; длинные списки имён — переносом по запятым.
+            for (k, v) in app.credits.get(&t.id).into_iter().flatten() {
+                if k == "Исполнитель" {
+                    continue;
+                }
+                // Колонка подписей — 14 символов.
+                let k = match k.as_str() {
+                    "Источник фонограммы" => "Фонограмма",
+                    k => k,
+                };
+                let mut first = true;
+                let mut cur = String::new();
+                for name in v.split(", ") {
+                    if !cur.is_empty() && cur.width() + name.width() + 2 > 56 {
+                        row(&mut lines, if first { k } else { "" }, format!("{cur},"), false);
+                        first = false;
+                        cur.clear();
+                    }
+                    if !cur.is_empty() {
+                        cur.push_str(", ");
+                    }
+                    cur.push_str(name);
+                }
+                row(&mut lines, if first { k } else { "" }, cur, false);
+            }
             row(&mut lines, "Длительность", fmt_time(t.duration_secs()), false);
             if t.explicit() {
                 row(&mut lines, "Содержание", "🅴 explicit".into(), false);

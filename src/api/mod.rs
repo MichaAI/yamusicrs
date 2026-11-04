@@ -550,6 +550,18 @@ impl Client {
             .collect())
     }
 
+    /// Авторы, лейбл, источник фонограммы: пары «роль — имена».
+    pub async fn credits(&self, track_id: &str) -> Result<Vec<(String, String)>> {
+        let numeric = track_id.split(':').next().unwrap_or(track_id);
+        let v: Value = self.get(&format!("/tracks/{numeric}/credits"), &[]).await?;
+        Ok(v["credits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| Some((c["title"].as_str()?.to_string(), c["value"].as_str()?.to_string())))
+            .collect())
+    }
+
     /// «Похожие треки» (как в мобильном клиенте).
     pub async fn similar_tracks(&self, track_id: &str) -> Result<Vec<Track>> {
         let numeric = track_id.split(':').next().unwrap_or(track_id);

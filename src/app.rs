@@ -49,6 +49,7 @@ pub enum Msg {
     EntityFailed { what: Entity, id: String, on: bool, error: String },
     Playlists(Result<Vec<Playlist>, String>),
     Personal(Result<Vec<api::PersonalPlaylist>, String>),
+    Credits { track_id: String, result: Result<Vec<(String, String)>, String> },
     /// Программа офлайн-волны и треки, под которые она собрана.
     OfflineProgram(Result<(Vec<i32>, Vec<i32>), String>),
     /// Метаданные скачанных треков для офлайн-снимка.
@@ -569,6 +570,8 @@ pub struct App {
     pub stack: Vec<Page>,
     pub liked: HashSet<String>,
     pub personal: Vec<api::PersonalPlaylist>,
+    /// «О треке»: авторы и лейбл по id трека (грузятся при открытии окна).
+    pub credits: HashMap<String, Vec<(String, String)>>,
     /// Лайкнутые альбомы и исполнители, скрытые исполнители (id из `library/all-ids`).
     pub liked_albums: HashSet<String>,
     pub liked_artists: HashSet<String>,
@@ -783,6 +786,7 @@ impl App {
             stack: vec![Page::new(View::Wave)],
             liked: HashSet::new(),
             personal: Vec::new(),
+            credits: HashMap::new(),
             liked_albums: HashSet::new(),
             liked_artists: HashSet::new(),
             disliked_artists: HashSet::new(),
@@ -3218,6 +3222,12 @@ impl App {
                     Err(e) => Loadable::Failed(e),
                 });
             }
+            Msg::Credits { track_id, result } => match result {
+                Ok(v) => {
+                    self.credits.insert(track_id, v);
+                }
+                Err(e) => tracing::warn!("credits {track_id}: {e}"),
+            },
             Msg::Personal(r) => match r {
                 Ok(v) => {
                     // Курсор остаётся на той же строке, хотя сверху добавились подборки.
@@ -3805,6 +3815,13 @@ impl App {
             return;
         };
         let file = self.library.lookup(&track.id);
+        if !self.credits.contains_key(&track.id) {
+            let id = track.id.clone();
+            self.spawn(move |c, tx| async move {
+                let result = c.credits(&id).await.map_err(err_str);
+                let _ = tx.send(Msg::Credits { track_id: id, result });
+            });
+        }
         self.popup = Some(Popup::TrackInfo { track, file });
     }
 
