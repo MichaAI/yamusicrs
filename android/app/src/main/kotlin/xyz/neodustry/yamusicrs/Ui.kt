@@ -3,6 +3,29 @@
 package xyz.neodustry.yamusicrs
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -296,43 +319,44 @@ private fun Login(app: YaApp, pal: Pal, p: Phase.Login, openUrl: (String) -> Uni
 
 private enum class Tab(val title: String) { Wave("Волна"), Library("Коллекция"), Queue("Очередь") }
 
+/** Ключи общих элементов: мини-плеер вырастает в сцену, обложка перелетает. */
+private const val KEY_PLAYER = "player"
+private const val KEY_COVER = "cover"
+
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    val pager = rememberPagerState { Tab.entries.size }
+    val scope = rememberCoroutineScope()
     var stage by rememberSaveable { mutableStateOf(false) }
     BackHandler(stage) { stage = false }
-    val motion = MaterialTheme.motionScheme
-    Box(Modifier.fillMaxSize()) {
+    val clock = rememberPlayClock(s)
+    val hasTrack = s.track != null
+    SharedTransitionLayout(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) {
-                AnimatedContent(
-                    Tab.entries[tab],
-                    transitionSpec = {
-                        (fadeIn(motion.defaultEffectsSpec()) + scaleIn(initialScale = 0.96f))
-                            .togetherWith(fadeOut(motion.fastEffectsSpec()))
-                    },
-                    label = "tab",
-                ) { t ->
-                    when (t) {
+                // Вкладки листаются свайпом вбок.
+                HorizontalPager(pager, key = { it }) { page ->
+                    when (Tab.entries[page]) {
                         Tab.Wave -> WaveTab(app, pal, s)
                         Tab.Library -> LibraryTab(app, s.track?.id, !s.paused, s.likesLoading)
                         Tab.Queue -> QueueTab(app, s.track?.id, s.queuePos?.toInt(), !s.paused)
                     }
                 }
                 androidx.compose.animation.AnimatedVisibility(
-                    s.track != null,
+                    !stage && hasTrack,
                     Modifier.align(Alignment.BottomCenter),
-                    enter = slideInVertically { it } + fadeIn(),
-                    exit = slideOutVertically { it } + fadeOut(),
+                    enter = fadeIn(),
+                    exit = fadeOut(),
                 ) {
-                    MiniPlayer(app, s) { stage = true }
+                    MiniPlayer(app, s, clock, this@SharedTransitionLayout, this) { stage = true }
                 }
             }
             ShortNavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                 Tab.entries.forEachIndexed { i, t ->
                     ShortNavigationBarItem(
-                        selected = tab == i,
-                        onClick = { tab = i },
+                        selected = pager.currentPage == i,
+                        onClick = { scope.launch { pager.animateScrollToPage(i) } },
                         icon = {
                             Icon(
                                 when (t) {
@@ -348,12 +372,8 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                 }
             }
         }
-        AnimatedVisibility(
-            stage && s.track != null,
-            enter = slideInVertically(MaterialTheme.motionScheme.defaultSpatialSpec()) { it } + fadeIn(),
-            exit = slideOutVertically(MaterialTheme.motionScheme.fastSpatialSpec()) { it } + fadeOut(),
-        ) {
-            Stage(app, pal, s) { stage = false }
+        AnimatedVisibility(stage && hasTrack, enter = fadeIn(), exit = fadeOut()) {
+            Stage(app, pal, s, clock, this@SharedTransitionLayout, this) { stage = false }
         }
     }
 }
@@ -394,7 +414,7 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
                 if (s.waveLoading) {
                     LoadingIndicator(Modifier.size(120.dp))
                 } else {
-                    PlayButton(playing, 132.dp, onClick = {
+                    PlayButton(playing, 132.dp, halo = true, onClick = {
                         if (waveOn && s.track != null) app.core.playPause() else app.core.startWave()
                     })
                 }
@@ -420,23 +440,15 @@ private fun Sub(text: String, color: Color = MaterialTheme.colorScheme.onSurface
     Text(text, color = color, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
-/** Пресет — иконка агента и имя, без плашки; у играющего форма морфится в «печенье». */
+/** Пресет — иконка агента как есть (без подложки и скругления) и имя; у играющего — полоска. */
 @Composable
 private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () -> Unit) {
-    val tint = p.color?.let { Color(0xFF000000 or it.toLong()) } ?: MaterialTheme.colorScheme.primary
-    val shape = if (active) MaterialShapes.Cookie12Sided.toShape() else MaterialShapes.Circle.toShape()
+    val bar by animateFloatAsState(if (active) 1f else 0f, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "bar")
     Column(
         Modifier.width(88.dp).clip(RoundedCornerShape(20.dp)).clickable(onClick = onClick).padding(vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(
-            Modifier.size(76.dp).clip(shape).background(if (active) MaterialTheme.colorScheme.primary else Color.Transparent),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(Modifier.size(if (active) 66.dp else 76.dp).clip(shape).background(tint.copy(alpha = 0.3f))) {
-                Art(app, p.icon, Modifier.fillMaxSize(), corner = 0.dp)
-            }
-        }
+        Art(app, p.icon, Modifier.size(76.dp), plain = true)
         Spacer(Modifier.height(8.dp))
         Text(
             p.name,
@@ -445,6 +457,11 @@ private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () ->
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier.width(28.dp * bar).height(4.dp).clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary),
         )
     }
 }
@@ -584,141 +601,327 @@ private fun TrackRow(app: YaApp, t: TrackItem, current: Boolean, playing: Boolea
 
 // ── мини-плеер ───────────────────────────────────────────────────────────────
 
+/**
+ * Пилюля внизу. Свайп влево/вправо — следующий/предыдущий трек, вверх или тап — сцена
+ * (пилюля вырастает в неё, обложка перелетает).
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun MiniPlayer(app: YaApp, s: PlayerState, open: () -> Unit) {
+private fun MiniPlayer(
+    app: YaApp,
+    s: PlayerState,
+    clock: PlayClock,
+    shared: SharedTransitionScope,
+    visibility: AnimatedVisibilityScope,
+    open: () -> Unit,
+) {
     val t = s.track ?: return
-    Surface(
-        shape = RoundedCornerShape(32.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        tonalElevation = 6.dp,
-        shadowElevation = 12.dp,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp).clickable(onClick = open),
-    ) {
-        Box {
-            // Прогресс — заливкой фона пилюли.
-            ProgressFill(s, t.durationMs.toLong(), Modifier.matchParentSize())
-            Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                // Концентрично пилюле: 32 − 8 (отступ) = 24.
-                Art(app, t.thumb, Modifier.size(52.dp), corner = 24.dp)
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    ScrambleText(
-                        t.title,
-                        MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        MaterialTheme.colorScheme.onSurface,
-                        Modifier.basicMarquee(initialDelayMillis = 2000),
-                    )
-                    Text(
-                        if (s.loading) "загрузка…" else t.artists,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                ShapeIconButton(
-                    if (s.liked) Ic.Heart else Ic.HeartOutline,
-                    "Нравится",
-                    { app.core.toggleLike() },
-                    size = 44.dp,
-                    container = Color.Transparent,
-                    tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+    val scope = rememberCoroutineScope()
+    val dx = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    val skip = with(density) { 96.dp.toPx() }
+    val up = with(density) { 48.dp.toPx() }
+    with(shared) {
+        Surface(
+            shape = RoundedCornerShape(32.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
+            shadowElevation = 12.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .sharedBounds(
+                    rememberSharedContentState(KEY_PLAYER),
+                    visibility,
+                    clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(32.dp)),
                 )
-                PlayButton(!s.paused, 52.dp, onClick = { app.core.playPause() })
-                ShapeIconButton(Ic.Next, "Дальше", { app.core.next() }, size = 44.dp, container = Color.Transparent)
+                .pointerInput(Unit) {
+                    var x = 0f
+                    var y = 0f
+                    detectDragGestures(
+                        onDragStart = { x = 0f; y = 0f },
+                        onDragEnd = {
+                            scope.launch {
+                                when {
+                                    y < -up && kotlin.math.abs(y) > kotlin.math.abs(x) -> {
+                                        open()
+                                        dx.snapTo(0f)
+                                    }
+                                    x < -skip -> {
+                                        app.core.next()
+                                        dx.animateTo(-size.width.toFloat(), tween(160))
+                                        dx.snapTo(size.width.toFloat() * 0.4f)
+                                        dx.animateTo(0f, spring(dampingRatio = 0.8f))
+                                    }
+                                    x > skip -> {
+                                        app.core.prev()
+                                        dx.animateTo(size.width.toFloat(), tween(160))
+                                        dx.snapTo(-size.width.toFloat() * 0.4f)
+                                        dx.animateTo(0f, spring(dampingRatio = 0.8f))
+                                    }
+                                    else -> dx.animateTo(0f, spring(dampingRatio = 0.7f))
+                                }
+                            }
+                        },
+                        onDragCancel = { scope.launch { dx.animateTo(0f) } },
+                    ) { change, d ->
+                        change.consume()
+                        x += d.x
+                        y += d.y
+                        scope.launch { dx.snapTo(x) }
+                    }
+                }
+                .clickable(onClick = open),
+        ) {
+            Box {
+                ProgressFill(clock, t.durationMs.toLong(), Modifier.matchParentSize())
+                Row(
+                    Modifier
+                        .padding(8.dp)
+                        .graphicsLayer {
+                            translationX = dx.value
+                            alpha = 1f - (kotlin.math.abs(dx.value) / size.width).coerceIn(0f, 0.7f)
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Концентрично пилюле: 32 − 8 (отступ) = 24.
+                    Art(
+                        app,
+                        t.cover,
+                        Modifier
+                            .sharedElement(rememberSharedContentState(KEY_COVER), visibility)
+                            .size(52.dp),
+                        corner = 24.dp,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        ScrambleText(
+                            t.title,
+                            MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            MaterialTheme.colorScheme.onSurface,
+                            Modifier.basicMarquee(initialDelayMillis = 2000),
+                        )
+                        Text(
+                            if (s.loading) "Загрузка…" else t.artists,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    ShapeIconButton(
+                        if (s.liked) Ic.Heart else Ic.HeartOutline,
+                        "Нравится",
+                        { app.core.toggleLike() },
+                        size = 44.dp,
+                        container = Color.Transparent,
+                        tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    PlayButton(!s.paused, 52.dp, onClick = { app.core.playPause() })
+                    ShapeIconButton(Ic.Next, "Дальше", { app.core.next() }, size = 44.dp, container = Color.Transparent)
+                }
             }
         }
     }
 }
 
-/** Заливка прогресса пилюли: единственное, что перерисовывается каждый кадр. */
+/** Заливка прогресса пилюли: позиция читается только при отрисовке. */
 @Composable
-private fun ProgressFill(s: PlayerState, durationMs: Long, modifier: Modifier) {
-    val pos = smoothPosition(s)
-    val frac = (pos.toFloat() / durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)
+private fun ProgressFill(clock: PlayClock, durationMs: Long, modifier: Modifier) {
     val fill = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-    Box(modifier.drawBehind { drawRect(fill, size = Size(size.width * frac, size.height)) })
+    val dur = durationMs.coerceAtLeast(1).toFloat()
+    Box(
+        modifier.drawBehind {
+            val frac = (clock.pos() / dur).coerceIn(0f, 1f)
+            drawRect(fill, size = Size(size.width * frac, size.height))
+        },
+    )
 }
 
 // ── сцена ────────────────────────────────────────────────────────────────────
 
+/**
+ * Сцена (как в TUI): блоб, обложка или текст песни, перемотка и кнопки в зоне большого
+ * пальца. Тянется за пальцем вниз и сворачивается обратно в пилюлю; обложка свайпается
+ * вбок — соседний трек.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun Stage(app: YaApp, pal: Pal, s: PlayerState, close: () -> Unit) {
+private fun Stage(
+    app: YaApp,
+    pal: Pal,
+    s: PlayerState,
+    clock: PlayClock,
+    shared: SharedTransitionScope,
+    visibility: AnimatedVisibilityScope,
+    close: () -> Unit,
+) {
     val t = s.track ?: return
     var showLyrics by rememberSaveable { mutableStateOf(false) }
     val lyr by app.lyrics.collectAsStateWithLifecycle()
     val lyrics = lyr?.takeIf { it.trackId == t.id }?.lyrics
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).clickable(enabled = false) {}) {
-        Blob(pal.blob, !s.paused, Modifier.fillMaxSize())
+    val scope = rememberCoroutineScope()
+    val dy = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    val dismiss = with(density) { 140.dp.toPx() }
+    val lyricsOn = showLyrics && lyrics != null
+    val scrim by animateFloatAsState(if (lyricsOn) 0.62f else 0f, tween(400), label = "scrim")
+    // Чем дальше утянули, тем сильнее скругление и меньше масштаб — видно, что сворачивается.
+    val pull = (dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f)
+    with(shared) {
         Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(0f to Color.Transparent, 0.5f to Color.Transparent, 1f to MaterialTheme.colorScheme.background.copy(alpha = 0.92f)),
-            ),
-        )
-        Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 24.dp, vertical = 12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ShapeIconButton(Ic.Down, "Свернуть", close, size = 48.dp)
-                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        s.queueTitle.ifEmpty { "Сейчас играет" },
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (s.format.isNotEmpty()) {
-                        Text(s.format, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                    }
-                }
-                ShapeIconButton(
-                    Ic.Lyrics,
-                    "Текст",
-                    { showLyrics = !showLyrics },
-                    size = 48.dp,
-                    container = if (showLyrics) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
-                    tint = if (showLyrics) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+            Modifier
+                .fillMaxSize()
+                .offset { IntOffset(0, dy.value.roundToInt()) }
+                .sharedBounds(
+                    rememberSharedContentState(KEY_PLAYER),
+                    visibility,
+                    clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(32.dp)),
                 )
-            }
-            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                val wide = maxWidth > maxHeight * 1.2f
-                val art: @Composable (Modifier) -> Unit = { m ->
-                    BoxWithConstraints(m, contentAlignment = Alignment.Center) {
-                        AnimatedContent(showLyrics && lyrics != null, label = "lyrics") { lyricsOn ->
+                .graphicsLayer {
+                    val k = 1f - pull * 0.08f
+                    scaleX = k
+                    scaleY = k
+                    shape = RoundedCornerShape((pull * 40).dp)
+                    clip = pull > 0f
+                }
+                .background(MaterialTheme.colorScheme.background)
+                .pointerInput(Unit) {
+                    detectVerticalDragGestures(
+                        onDragEnd = {
+                            scope.launch {
+                                if (dy.value > dismiss) close() else dy.animateTo(0f, spring(dampingRatio = 0.75f))
+                            }
+                        },
+                        onDragCancel = { scope.launch { dy.animateTo(0f) } },
+                    ) { change, d ->
+                        change.consume()
+                        scope.launch { dy.snapTo((dy.value + d).coerceAtLeast(0f)) }
+                    }
+                },
+        ) {
+            Blob(pal.blob, !s.paused, Modifier.fillMaxSize())
+            // Под текстом песни блоб приглушается, иначе строки теряются на ярких пятнах.
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(alpha = scrim)))
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        0.5f to Color.Transparent,
+                        1f to MaterialTheme.colorScheme.background.copy(alpha = 0.92f),
+                    ),
+                ),
+            )
+            Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 24.dp, vertical = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ShapeIconButton(Ic.Down, "Свернуть", close, size = 48.dp)
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            s.queueTitle.ifEmpty { "Сейчас играет" },
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (s.format.isNotEmpty()) {
+                            Text(s.format, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                    ShapeIconButton(
+                        Ic.Lyrics,
+                        "Текст песни",
+                        { showLyrics = !showLyrics },
+                        size = 48.dp,
+                        container = if (showLyrics) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
+                        tint = if (showLyrics) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                    val wide = maxWidth > maxHeight * 1.2f
+                    val art: @Composable (Modifier) -> Unit = { m ->
+                        BoxWithConstraints(m, contentAlignment = Alignment.Center) {
                             if (lyricsOn && lyrics != null) {
-                                LyricsView(app, lyrics, s)
+                                LyricsView(app, lyrics, clock)
                             } else {
                                 val side = minOf(maxWidth, maxHeight, 560.dp)
-                                Art(app, t.cover, Modifier.size(side), corner = 36.dp)
+                                SwipeCover(app, t, side, shared, visibility)
                             }
                         }
                     }
-                }
-                val info: @Composable (Modifier) -> Unit = { m ->
-                    Column(m, verticalArrangement = Arrangement.Bottom) {
-                        StageInfo(app, s, t)
-                    }
-                }
-                if (wide) {
-                    Row(Modifier.fillMaxSize().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
-                        art(Modifier.weight(1f).fillMaxHeight())
-                        info(Modifier.weight(1f).fillMaxHeight())
-                    }
-                } else {
-                    // Кнопки — в зоне большого пальца: под ними остаётся заметный запас.
-                    Column(Modifier.fillMaxSize()) {
-                        art(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp))
-                        info(Modifier.fillMaxWidth())
-                        Spacer(Modifier.height(72.dp))
+                    if (wide) {
+                        Row(Modifier.fillMaxSize().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
+                            art(Modifier.weight(1f).fillMaxHeight())
+                            Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Bottom) {
+                                StageInfo(app, s, t, clock)
+                            }
+                        }
+                    } else {
+                        // Кнопки — в зоне большого пальца: под ними остаётся заметный запас.
+                        Column(Modifier.fillMaxSize()) {
+                            art(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp))
+                            StageInfo(app, s, t, clock)
+                            Spacer(Modifier.height(72.dp))
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/** Обложка сцены: свайп вбок — соседний трек (улетает и возвращается уже новой). */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransitionScope, visibility: AnimatedVisibilityScope) {
+    val scope = rememberCoroutineScope()
+    val dx = remember { Animatable(0f) }
+    val skip = with(LocalDensity.current) { 96.dp.toPx() }
+    with(shared) {
+        Art(
+            app,
+            t.cover,
+            Modifier
+                .sharedElement(rememberSharedContentState(KEY_COVER), visibility)
+                .size(side)
+                .graphicsLayer {
+                    translationX = dx.value
+                    rotationZ = dx.value / size.width * 6f
+                }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            scope.launch {
+                                val w = size.width.toFloat()
+                                when {
+                                    dx.value < -skip -> {
+                                        app.core.next()
+                                        dx.animateTo(-w * 1.2f, tween(180))
+                                        dx.snapTo(w * 0.5f)
+                                        dx.animateTo(0f, spring(dampingRatio = 0.8f))
+                                    }
+                                    dx.value > skip -> {
+                                        app.core.prev()
+                                        dx.animateTo(w * 1.2f, tween(180))
+                                        dx.snapTo(-w * 0.5f)
+                                        dx.animateTo(0f, spring(dampingRatio = 0.8f))
+                                    }
+                                    else -> dx.animateTo(0f, spring(dampingRatio = 0.7f))
+                                }
+                            }
+                        },
+                    ) { change, d ->
+                        change.consume()
+                        scope.launch { dx.snapTo(dx.value + d) }
+                    }
+                },
+            corner = 36.dp,
+        )
     }
 }
 
 /** Название, исполнитель, перемотка и кнопки сцены. */
 @Composable
-private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem) {
+private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem, clock: PlayClock) {
     // Длинное название бежит строкой, как marquee в TUI.
     ScrambleText(
         t.title,
@@ -733,7 +936,7 @@ private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem) {
             maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
     Spacer(Modifier.height(12.dp))
-    Seek(app, s, t)
+    WavySeek(clock, t.durationMs.toLong(), !s.paused && !s.loading, { app.core.seek(it.toULong()) })
     Spacer(Modifier.height(8.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         ShapeIconButton(Ic.Dislike, "Не рекомендовать", { app.core.dislike() }, size = 52.dp, container = Color.Transparent,
@@ -753,49 +956,45 @@ private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem) {
     Spacer(Modifier.height(8.dp))
 }
 
-/** Перемотка со своей плавной позицией — перерисовывается одна она. */
+/**
+ * Текст песни: синхронный — текущая строка крупно и в акценте (с тенью, чтобы читалась над
+ * блобом), держится на трети высоты; тап по строке — перемотка. Строка пересчитывается из
+ * часов позиции, а перекомпоновка случается только при смене строки.
+ */
 @Composable
-private fun Seek(app: YaApp, s: PlayerState, t: TrackItem) {
-    WavySeek(smoothPosition(s), t.durationMs.toLong(), !s.paused && !s.loading, { app.core.seek(it.toULong()) })
-}
-
-/** Текст песни: синхронный — текущая строка крупно и в акценте, список сам едет к ней (как в TUI). */
-@Composable
-private fun LyricsView(app: YaApp, l: LyricsData, s: PlayerState) {
-    val posMs = smoothPosition(s)
+private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
     if (!l.synced) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             l.lines.forEach { Text(it.text, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 4.dp)) }
         }
         return
     }
-    val cur = l.lines.indexOfLast { it.timeMs.toLong() <= posMs + 250 }
+    val cur by remember(l) { derivedStateOf { l.lines.indexOfLast { it.timeMs.toLong() <= clock.pos() + 250 } } }
     val list = rememberLazyListState()
-    // Текущая строка держится на трети высоты; запас снизу — чтобы и последние до неё доехали.
-    LaunchedEffect(cur) {
-        if (cur >= 0) list.animateScrollToItem(cur)
-    }
+    LaunchedEffect(cur) { if (cur >= 0) list.animateScrollToItem(cur) }
+    val glow = Shadow(Color.Black.copy(alpha = 0.75f), blurRadius = 18f)
     BoxWithConstraints(Modifier.fillMaxSize()) {
-    LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(top = maxHeight / 3, bottom = maxHeight * 2 / 3)) {
-        itemsIndexed(l.lines) { i, line ->
-            val active = i == cur
-            val color by animateColorAsState(
-                when {
-                    active -> MaterialTheme.colorScheme.primary
-                    i < cur -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                    else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                },
-                label = "line",
-            )
-            Text(
-                line.text.ifBlank { "♪" },
-                style = if (active) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleLarge,
-                fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
-                color = color,
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                    .clickable { app.core.seek(line.timeMs) }.padding(vertical = 8.dp, horizontal = 4.dp),
-            )
+        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(top = maxHeight / 3, bottom = maxHeight * 2 / 3)) {
+            itemsIndexed(l.lines) { i, line ->
+                val active = i == cur
+                val color by animateColorAsState(
+                    when {
+                        active -> MaterialTheme.colorScheme.primary
+                        i < cur -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    },
+                    label = "line",
+                )
+                val style = if (active) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleLarge
+                Text(
+                    line.text.ifBlank { "♪" },
+                    style = style.copy(shadow = glow),
+                    fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
+                    color = color,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                        .clickable { app.core.seek(line.timeMs) }.padding(vertical = 8.dp, horizontal = 4.dp),
+                )
+            }
         }
-    }
     }
 }

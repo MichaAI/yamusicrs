@@ -7,6 +7,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -112,9 +113,23 @@ fun Blob(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier) {
 }
 
 @RequiresApi(33)
+private object BlobShaders {
+    private val free = ArrayDeque<RuntimeShader>()
+
+    fun take(): RuntimeShader = free.removeFirstOrNull() ?: RuntimeShader(BLOB_AGSL)
+
+    fun give(s: RuntimeShader) {
+        free.addLast(s)
+    }
+}
+
+@RequiresApi(33)
 @Composable
 private fun ShaderBlob(c: List<Color>, phase: Float, energy: Float, modifier: Modifier) {
-    val shader = remember { RuntimeShader(BLOB_AGSL) }
+    // Компиляция шейдера заметна по времени — берём готовый из пула (их нужно два:
+    // вкладка «Волна» и сцена видны одновременно во время перехода).
+    val shader = remember { BlobShaders.take() }
+    DisposableEffect(shader) { onDispose { BlobShaders.give(shader) } }
     val brush = remember(shader) { ShaderBrush(shader) }
     Canvas(modifier) {
         shader.setFloatUniform("size", size.width, size.height)
