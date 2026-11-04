@@ -362,6 +362,9 @@ const NOTIFY_ID: &str = "yamusicrs-now";
 const STALL_FIRST: Duration = Duration::from_secs(30);
 const STALL_MAX: Duration = Duration::from_secs(300);
 
+/// Строк прокрутки сетки на одно событие колеса/тачпада.
+const GRID_WHEEL_LINES: f32 = 2.0;
+
 /// Сколько запросов помнит история поиска.
 const SEARCH_HISTORY_LEN: usize = 30;
 
@@ -532,6 +535,9 @@ pub struct App {
     pub releases: Option<Loadable<Vec<api::Album>>>,
     /// Колонок в сетке релизов (знает отрисовка) и карточки на экране — для мыши.
     pub grid_cols: usize,
+    /// Высота карточки сетки в строках и накопленная прокрутка колесом (в рядах).
+    pub grid_card_h: u16,
+    grid_wheel: f32,
     pub grid_hits: Vec<(ratatui::layout::Rect, usize)>,
     pub search_input: String,
     pub search_editing: bool,
@@ -736,6 +742,8 @@ impl App {
             playlists: Loadable::Loading,
             releases: None,
             grid_cols: 1,
+            grid_card_h: 1,
+            grid_wheel: 0.0,
             grid_hits: Vec::new(),
             search_input: String::new(),
             search_editing: false,
@@ -3773,8 +3781,20 @@ impl App {
                     }
                     return;
                 }
-                MouseEventKind::ScrollUp => return self.move_sel(-(self.grid_cols as isize)),
-                MouseEventKind::ScrollDown => return self.move_sel(self.grid_cols as isize),
+                // Тачпад шлёт много мелких событий: каждое — пара строк, ряд — когда наберётся высота карточки.
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    let d = if m.kind == MouseEventKind::ScrollUp { -1.0 } else { 1.0 };
+                    if self.grid_wheel.signum() != d && self.grid_wheel != 0.0 {
+                        self.grid_wheel = 0.0;
+                    }
+                    self.grid_wheel += d * GRID_WHEEL_LINES / self.grid_card_h.max(1) as f32;
+                    while self.grid_wheel.abs() >= 1.0 {
+                        let step = self.grid_wheel.signum();
+                        self.grid_wheel -= step;
+                        self.move_sel(step as isize * self.grid_cols as isize);
+                    }
+                    return;
+                }
                 _ => {}
             }
         }

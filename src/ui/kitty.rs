@@ -153,13 +153,26 @@ impl Images {
 
     /// Рисует картинку в `area` (квадрат по центру с учётом пропорций ячейки).
     pub fn render(&mut self, key: &str, area: Rect, buf: &mut Buffer, cell_aspect: f32) {
+        self.render_clipped(key, area, area.y as i32, area, buf, cell_aspect);
+    }
+
+    /// Картинка в `area`, верх которой на самом деле на строке `top` (может быть выше
+    /// экрана — при плавной прокрутке); рисуются только клетки внутри `clip`.
+    pub fn render_clipped(&mut self, key: &str, area: Rect, top: i32, clip: Rect, buf: &mut Buffer, cell_aspect: f32) {
         self.tick += 1;
         let tick = self.tick;
         let kitty = self.kitty;
-        let rect = fit_square(area, cell_aspect);
+        let rect = fit_square(Rect { y: 0, ..area }, cell_aspect);
         if rect.width == 0 || rect.height == 0 {
             return;
         }
+        let top = top + rect.y as i32;
+        // Экранная клетка строки `row` картинки, если она внутри `clip`.
+        let at = |row: u16, col: u16| -> Option<(u16, u16)> {
+            let y = top + row as i32;
+            let x = rect.x + col;
+            (y >= clip.y as i32 && y < clip.bottom() as i32 && x >= clip.x && x < clip.right()).then_some((x, y as u16))
+        };
         // id выделяем только под новый размер, а не каждый кадр.
         let size = (rect.width, rect.height);
         let id = match self.by_key.get(key) {
@@ -196,7 +209,7 @@ impl Images {
                     s.push(PLACEHOLDER);
                     s.push(DIACRITICS[row as usize]);
                     s.push(DIACRITICS[col as usize]);
-                    if let Some(cell) = buf.cell_mut((rect.x + col, rect.y + row)) {
+                    if let Some(cell) = at(row, col).and_then(|p| buf.cell_mut(p)) {
                         cell.set_symbol(&s).set_fg(fg).set_bg(Color::Reset);
                         cell.modifier = ratatui::style::Modifier::empty();
                     }
@@ -234,7 +247,7 @@ impl Images {
             for y in 0..size.1 {
                 for x in 0..size.0 {
                     let (fg, bg) = cells[y as usize * size.0 as usize + x as usize];
-                    if let Some(cell) = buf.cell_mut((rect.x + x, rect.y + y)) {
+                    if let Some(cell) = at(y, x).and_then(|p| buf.cell_mut(p)) {
                         cell.set_symbol("▀").set_fg(fg).set_bg(bg);
                     }
                 }

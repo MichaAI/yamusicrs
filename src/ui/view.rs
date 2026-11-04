@@ -1443,46 +1443,76 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let rows_total = albums.len().div_ceil(cols as usize);
     let visible = ((area.height + 1) / card_h).max(1) as usize;
     let sel = app.page().sel.min(albums.len() - 1);
-    let range = animated_window(app, sel / cols as usize, rows_total, visible);
+    app.grid_card_h = card_h;
+    // Плавная прокрутка по строкам: цель — в рядах (ряд с курсором виден целиком),
+    // анимация — дробная, ряды частично уходят за край.
+    let line_off = {
+        let p = app.page_mut();
+        let mut target = p.offset;
+        scroll_window(sel / cols as usize, &mut target, rows_total, visible);
+        p.offset = target;
+        let t = target as f32;
+        p.anim += (t - p.anim) * 0.3;
+        if (t - p.anim).abs() * (card_h as f32) < 0.5 {
+            p.anim = t;
+        }
+        let max = (rows_total as i32 * card_h as i32 - area.height as i32 - 1).max(0);
+        ((p.anim * card_h as f32).round() as i32).clamp(0, max)
+    };
+    let first = (line_off / card_h as i32) as usize;
+    app.page_mut().view_offset = first;
+    let bottom = area.bottom() as i32;
+    let mut last = first;
 
-    for row in range.clone() {
-        let y = area.y + ((row - range.start) as u16) * card_h;
-        if y + card_h > area.y + area.height + 1 {
+    for row in first..rows_total {
+        let y = area.y as i32 + (row as i32) * card_h as i32 - line_off;
+        if y >= bottom {
             break;
         }
+        last = row;
         for c in 0..cols as usize {
             let i = row * cols as usize + c;
             let Some(a) = albums.get(i) else { break };
             let x = area.x + c as u16 * (cw + GAP);
-            let card = Rect {
-                x,
-                y,
-                width: cw,
-                height: card_h - 1,
-            };
-            app.grid_hits.push((card, i));
+            // Видимая часть карточки — для мыши.
+            let (vy0, vy1) = (y.max(area.y as i32), (y + card_h as i32 - 1).min(bottom));
+            if vy1 > vy0 {
+                app.grid_hits.push((
+                    Rect {
+                        x,
+                        y: vy0 as u16,
+                        width: cw,
+                        height: (vy1 - vy0) as u16,
+                    },
+                    i,
+                ));
+            }
             let cover = Rect {
+                x,
+                y: y.max(0) as u16,
+                width: cw,
                 height: cover_h,
-                ..card
             };
             match a.cover_uri() {
                 Some(uri) => {
                     let key = crate::app::thumb_key(uri);
                     if app.images.contains(&key) {
-                        app.images.render(&key, cover, f.buffer_mut(), ctx.cell_aspect);
+                        app.images
+                            .render_clipped(&key, cover, y, area, f.buffer_mut(), ctx.cell_aspect);
                     } else {
                         app.want_thumb(uri);
-                        cover_placeholder(f, cover, ctx, true);
+                        if y >= area.y as i32 && y + cover_h as i32 <= bottom {
+                            cover_placeholder(f, cover, ctx, true);
+                        }
                     }
                 }
-                None => cover_placeholder(f, cover, ctx, false),
+                None => {
+                    if y >= area.y as i32 && y + cover_h as i32 <= bottom {
+                        cover_placeholder(f, cover, ctx, false);
+                    }
+                }
             }
             let selected = i == sel;
-            let text = Rect {
-                y: y + cover_h,
-                height: 3,
-                ..card
-            };
             let badge = if a.explicit() { " Ⓔ" } else { "" };
             let tw = (cw as usize).saturating_sub(badge.width());
             let title_style = if selected {
@@ -1490,7 +1520,7 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             } else {
                 ctx.fg().add_modifier(Modifier::BOLD)
             };
-            let lines = vec![
+            let lines = [
                 Line::from(vec![
                     Span::styled(fit(&a.full_title(), tw), title_style),
                     Span::styled(badge, ctx.dim()),
@@ -1498,9 +1528,22 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 Line::styled(fit(&a.artist_names(), cw as usize), ctx.dim()),
                 Line::styled(a.kind_label(), ctx.dim().add_modifier(Modifier::BOLD)),
             ];
-            f.render_widget(Paragraph::new(lines).style(row_style(ctx, selected)), text);
+            // Подписи — по строке, только те, что на экране.
+            for (k, line) in lines.into_iter().enumerate() {
+                let ly = y + cover_h as i32 + k as i32;
+                if ly >= area.y as i32 && ly < bottom {
+                    let r = Rect {
+                        x,
+                        y: ly as u16,
+                        width: cw,
+                        height: 1,
+                    };
+                    f.render_widget(Paragraph::new(line).style(row_style(ctx, selected)), r);
+                }
+            }
         }
     }
+    let range = first..last + 1;
     // Обложки следующего ряда — заранее, чтобы при прокрутке не мигали заглушки.
     let next = range.end * cols as usize;
     for a in albums.iter().skip(next).take(cols as usize) {
@@ -1513,7 +1556,7 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         ..area
     };
     let ch = card_h as usize;
-    scrollbar(f, full, range.start * ch, area.height as usize, rows_total * ch, ctx);
+    scrollbar(f, full, line_off as usize, area.height as usize, rows_total * ch, ctx);
 }
 
 fn draw_search(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
