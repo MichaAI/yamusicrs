@@ -16,9 +16,6 @@ use crate::library::{Download, Library, codec_rank};
 
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 
-/// Сколько ждать ответа о качестве получше, прежде чем играть файл из библиотеки.
-const UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
 #[derive(Clone)]
 pub struct Fetcher {
     client: Client,
@@ -75,26 +72,9 @@ impl Fetcher {
         if let Some(buf) = self.active.lock().get(&track.id).cloned() {
             return Ok((Source::stream(buf.clone()), Origin::Network { buf }));
         }
-        if let Some((path, entry)) = self.library.lookup(&track.id) {
-            // Файл хуже, чем просим, и давно не проверяли — сперва спрашиваем сервер:
-            // дадут лучше — сразу играем его из сети (файл в библиотеке заменится),
-            // нет или сеть не ответила — играем файл.
-            let want = self.quality();
-            if entry.wants_upgrade(quality_rank(want)) {
-                let ask = self.client.file_info(&track.id, want);
-                match tokio::time::timeout(UPGRADE_TIMEOUT, ask).await {
-                    Ok(Ok(info)) if codec_rank(&info.codec) > codec_rank(&entry.codec) => {
-                        tracing::info!("апгрейд {}: {} → {}", track.id, entry.codec, info.codec);
-                        match self.start_download(track, &info) {
-                            Ok(buf) => return Ok((Source::stream(buf.clone()), Origin::Network { buf })),
-                            Err(e) => tracing::warn!("апгрейд {}: {e}", track.id),
-                        }
-                    }
-                    Ok(Ok(_)) => self.library.mark_checked(&track.id, quality_rank(want)),
-                    Ok(Err(e)) => tracing::warn!("апгрейд {}: {e}", track.id),
-                    Err(_) => tracing::warn!("апгрейд {}: сервер не ответил, играю файл", track.id),
-                }
-            }
+        // Скачанный — играем сразу; если он хуже желаемого, приложение после старта
+        // попросит lossless и подменит источник на ходу, без паузы.
+        if let Some((path, _)) = self.library.lookup(&track.id) {
             return Ok((Source::File(path), Origin::Library));
         }
         let info = self.client.file_info(&track.id, self.quality()).await?;
@@ -107,6 +87,11 @@ impl Fetcher {
         let info = self.client.file_info(&track.id, q).await?;
         let buf = self.start_download(track, &info)?;
         Ok((Source::stream(buf), info.codec))
+    }
+
+    /// Скачанный трек хуже lossless и пора спросить сервер о лучшем (подмена на ходу).
+    pub fn should_upgrade(&self, track: &Track) -> bool {
+        self.quality() == Quality::Lossless && self.library.needs_upgrade(&track.id, quality_rank(Quality::Lossless))
     }
 
     /// Источник получше для играющего трека (горячая подмена на lossless).

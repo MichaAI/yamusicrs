@@ -95,6 +95,8 @@ pub enum Msg {
     /// Источник получше для играющего трека (подмена на ходу); `None` — lossless нет.
     Upgraded {
         token: Token,
+        /// Сами решили после старта трека (а не пользователь нажал Q) — неудачи без тостов.
+        auto: bool,
         result: Result<Option<(audio::Source, Origin)>, String>,
     },
     Mpris(mpris::Command),
@@ -558,7 +560,7 @@ pub struct App {
     /// Не открывшиеся треки очереди (поколение, индекс) — автопереход их пропускает.
     failed: HashSet<(u64, usize)>,
     /// Откуда новый источник, пока идёт подмена на ходу.
-    swap_origin: Option<(Token, Origin)>,
+    swap_origin: Option<(Token, Origin, bool)>,
     pub images: Images,
     pub gfx: crate::render::Gfx,
     /// Кнопки ⏮ ▶ ⏭ (в боковой панели): прямоугольник и действие 0/1/2.
@@ -2118,7 +2120,7 @@ impl App {
         };
         f.set_quality(q);
         if q == Quality::Lossless {
-            self.hot_upgrade();
+            self.hot_upgrade(false);
         }
         self.state.quality = Some(q);
         self.toast(format!("Качество: {} — для следующих треков", quality_label(q)));
@@ -2210,10 +2212,10 @@ impl App {
     }
 
     /// Играющий трек не lossless — попросить FLAC и подменить его на ходу, без паузы.
-    fn hot_upgrade(&mut self) {
+    fn hot_upgrade(&mut self, auto: bool) {
         let Some(n) = &self.now else { return };
         // Подмена этого трека уже идёт (отметки от прошлых треков не в счёт).
-        if matches!(n.info.codec.as_str(), "FLAC" | "ALAC") || self.swap_origin.as_ref().is_some_and(|(t, _)| *t == n.token) {
+        if matches!(n.info.codec.as_str(), "FLAC" | "ALAC") || self.swap_origin.as_ref().is_some_and(|(t, ..)| *t == n.token) {
             return;
         }
         let Some(f) = self.fetcher.clone() else { return };
@@ -2221,26 +2223,29 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = f.upgrade_source(&track).await.map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Msg::Upgraded { token, result });
+            let _ = tx.send(Msg::Upgraded { token, auto, result });
         });
     }
 
-    fn on_upgraded(&mut self, token: Token, result: Result<Option<(audio::Source, Origin)>, String>) {
+    fn on_upgraded(&mut self, token: Token, auto: bool, result: Result<Option<(audio::Source, Origin)>, String>) {
         let playing = self.now.as_ref().is_some_and(|n| n.token == token);
         match result {
             Ok(Some((src, origin))) if playing => {
-                self.swap_origin = Some((token, origin));
+                self.swap_origin = Some((token, origin, auto));
                 self.player.swap(token, src);
             }
             Ok(Some((src, _))) => src.cancel(),
-            Ok(None) if playing => self.toast("У этого трека нет lossless".into()),
-            Err(e) if playing => self.toast_err(format!("Lossless: {e}")),
+            Ok(None) if playing && !auto => self.toast("У этого трека нет lossless".into()),
+            Err(e) if playing && !auto => self.toast_err(format!("Lossless: {e}")),
+            Err(e) => tracing::warn!("lossless для подмены: {e}"),
             _ => {}
         }
     }
 
     fn on_swapped(&mut self, token: Token, result: Result<audio::SourceInfo, String>) {
-        let origin = self.swap_origin.take_if(|(t, _)| *t == token).map(|(_, o)| o);
+        let taken = self.swap_origin.take_if(|(t, ..)| *t == token);
+        let auto = taken.as_ref().is_some_and(|s| s.2);
+        let origin = taken.map(|(_, o, _)| o);
         let Some(n) = self.now.as_mut().filter(|n| n.token == token) else { return };
         match result {
             Ok(info) => {
@@ -2258,7 +2263,9 @@ impl App {
             }
             Err(e) => {
                 tracing::warn!("подмена на ходу: {e}");
-                self.toast_err(format!("Lossless на ходу не вышел: {e} — будет со следующего раза"));
+                if !auto {
+                    self.toast_err(format!("Lossless на ходу не вышел: {e} — будет со следующего раза"));
+                }
             }
         }
     }
@@ -2986,7 +2993,7 @@ impl App {
                 }
             }
             Msg::Audio(ev) => self.on_audio(ev),
-            Msg::Upgraded { token, result } => self.on_upgraded(token, result),
+            Msg::Upgraded { token, auto, result } => self.on_upgraded(token, auto, result),
             Msg::Mpris(c) => match c {
                 mpris::Command::PlayPause => self.toggle_pause(),
                 mpris::Command::Play => {
@@ -3304,6 +3311,12 @@ impl App {
         });
         self.fx_track = Some(Instant::now());
         self.schedule_next();
+        // Скачанный хуже lossless: играет сразу, а FLAC подменит его на ходу, если он есть.
+        if matches!(self.now.as_ref().and_then(|n| n.origin.as_ref()), Some(Origin::Library))
+            && self.fetcher.as_ref().is_some_and(|f| f.should_upgrade(&track))
+        {
+            self.hot_upgrade(true);
+        }
     }
 
     // ── клавиатура ───────────────────────────────────────────────────────────

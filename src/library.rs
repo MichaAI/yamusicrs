@@ -129,6 +129,12 @@ impl Library {
         self.index.lock().tracks.keys().cloned().collect()
     }
 
+    /// Скачан, хуже ранга `want` и давно не проверяли (без отметки «играли»).
+    pub fn needs_upgrade(&self, track_id: &str, want: u8) -> bool {
+        let id = track_id.split(':').next().unwrap_or(track_id);
+        self.index.lock().tracks.get(id).is_some_and(|e| e.wants_upgrade(want))
+    }
+
     /// Кодек скачанного трека.
     pub fn codec_of(&self, track_id: &str) -> Option<String> {
         let id = track_id.split(':').next().unwrap_or(track_id);
