@@ -641,3 +641,12 @@ pub struct Metatag {
     #[serde(default, deserialize_with = "lenient_vec")]
     pub artists: Vec<Artist>,
 }
+
+/// Запись серверной истории поиска: что нашли и открыли (общая для всех устройств).
+#[derive(Debug, Clone)]
+pub enum Found {
+    Track(Track),
+    Album(Album),
+    Artist(Artist),
+    Playlist(Playlist),
+}

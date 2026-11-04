@@ -56,6 +56,7 @@ pub enum Msg {
     EntityFailed { what: Entity, id: String, on: bool, error: String },
     Playlists(Result<Vec<Playlist>, String>),
     Personal(Result<Vec<api::PersonalPlaylist>, String>),
+    Found(Result<Vec<api::Found>, String>),
     Credits { track_id: String, result: Result<Vec<(String, String)>, String> },
     /// Программа офлайн-волны и треки, под которые она собрана.
     OfflineProgram(Result<(Vec<i32>, Vec<i32>), String>),
@@ -625,6 +626,9 @@ pub struct WaveUi {
 /// Сиды «просто Моей волны».
 const MY_WAVE: &str = "user:onyourwave";
 
+const HISTORY_QUERIES: &str = "Недавние запросы";
+const HISTORY_FOUND: &str = "Недавно находили (все устройства)";
+
 /// Строка вкладки «Плейлисты».
 pub enum PlaylistRow<'a> {
     /// «Настроили для вас» (Плейлист дня, Дежавю, Премьера).
@@ -660,6 +664,8 @@ pub struct App {
     pub stack: Vec<Page>,
     pub liked: HashSet<String>,
     pub personal: Vec<api::PersonalPlaylist>,
+    /// Серверная история поиска (найденное на любом устройстве).
+    pub found: Vec<api::Found>,
     /// «О треке»: авторы и лейбл по id трека (грузятся при открытии окна).
     pub credits: HashMap<String, Vec<(String, String)>>,
     /// Лайкнутые альбомы и исполнители, скрытые исполнители (id из `library/all-ids`).
@@ -876,6 +882,7 @@ impl App {
             stack: vec![Page::new(View::Wave)],
             liked: HashSet::new(),
             personal: Vec::new(),
+            found: Vec::new(),
             credits: HashMap::new(),
             liked_albums: HashSet::new(),
             liked_artists: HashSet::new(),
@@ -1278,6 +1285,9 @@ impl App {
         self.spawn(|c, tx| async move {
             let _ = tx.send(Msg::LibraryIds(c.library_ids().await.map_err(err_str)));
         });
+        self.spawn(|c, tx| async move {
+            let _ = tx.send(Msg::Found(c.search_history().await.map_err(err_str)));
+        });
     }
 
     fn load_playlists(&mut self) {
@@ -1477,14 +1487,25 @@ impl App {
         });
     }
 
-    /// Список «Недавние запросы» вместо результатов (или пусто, если истории нет).
+    /// Список «Недавние запросы» (свои) и «Недавно находили» (с сервера, со всех устройств)
+    /// вместо результатов; пусто, если нет ни того, ни другого.
     fn show_search_history(&mut self) {
         let h = &self.state.search_history;
-        self.search = (!h.is_empty()).then(|| {
-            let mut v = vec![SearchItem::Header("Недавние запросы")];
+        let mut v = Vec::new();
+        if !h.is_empty() {
+            v.push(SearchItem::Header(HISTORY_QUERIES));
             v.extend(h.iter().cloned().map(SearchItem::Query));
-            Loadable::Ready(v)
-        });
+        }
+        if !self.found.is_empty() {
+            v.push(SearchItem::Header(HISTORY_FOUND));
+            v.extend(self.found.iter().cloned().map(|f| match f {
+                api::Found::Track(t) => SearchItem::Track(t),
+                api::Found::Album(a) => SearchItem::Album(a),
+                api::Found::Artist(a) => SearchItem::Artist(a),
+                api::Found::Playlist(p) => SearchItem::Playlist(p),
+            }));
+        }
+        self.search = (!v.is_empty()).then_some(Loadable::Ready(v));
         if matches!(self.page().view, View::Search) {
             self.page_mut().sel = 0;
             self.skip_headers(1);
@@ -1493,7 +1514,10 @@ impl App {
 
     /// Сейчас в поиске показана история, а не результаты.
     pub fn search_shows_history(&self) -> bool {
-        matches!(&self.search, Some(Loadable::Ready(v)) if matches!(v.get(1), Some(SearchItem::Query(_))))
+        matches!(
+            &self.search,
+            Some(Loadable::Ready(v)) if matches!(v.first(), Some(SearchItem::Header(h)) if *h == HISTORY_QUERIES || *h == HISTORY_FOUND)
+        )
     }
 
     fn forget_search(&mut self, q: &str) {
@@ -3446,6 +3470,20 @@ impl App {
                     self.credits.insert(track_id, v);
                 }
                 Err(e) => tracing::warn!("credits {track_id}: {e}"),
+            },
+            Msg::Found(r) => match r {
+                Ok(v) => {
+                    self.found = v;
+                    // История уже на экране — перерисовать с серверной частью.
+                    if self.search.is_none() || self.search_shows_history() {
+                        let sel = self.page().sel;
+                        self.show_search_history();
+                        if matches!(self.page().view, View::Search) && sel > 0 {
+                            self.page_mut().sel = sel.min(self.page_len().saturating_sub(1));
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("search-history: {e}"),
             },
             Msg::Personal(r) => match r {
                 Ok(v) => {

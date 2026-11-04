@@ -628,6 +628,25 @@ impl Client {
             .collect())
     }
 
+    /// Серверная история поиска: найденное и открытое на любом устройстве.
+    pub async fn search_history(&self) -> Result<Vec<Found>> {
+        let path = format!("/users/{}/search-history", self.uid);
+        let v: Vec<Value> = self.send(self.req_as(reqwest::Method::GET, &path, DESKTOP_CLIENT)).await?;
+        Ok(v.into_iter()
+            .filter_map(|e| {
+                let kind = e["type"].as_str()?.to_string();
+                let o = e[kind.as_str()].clone();
+                Some(match kind.as_str() {
+                    "track" => Found::Track(serde_json::from_value(o).ok()?),
+                    "album" => Found::Album(serde_json::from_value(o).ok()?),
+                    "artist" => Found::Artist(serde_json::from_value(o).ok()?),
+                    "playlist" => Found::Playlist(serde_json::from_value(o).ok()?),
+                    _ => return None,
+                })
+            })
+            .collect())
+    }
+
     /// «Похожие треки» (как в мобильном клиенте).
     pub async fn similar_tracks(&self, track_id: &str) -> Result<Vec<Track>> {
         let numeric = track_id.split(':').next().unwrap_or(track_id);
