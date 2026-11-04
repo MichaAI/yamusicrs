@@ -1213,6 +1213,32 @@ impl App {
         });
     }
 
+    fn open_similar(&mut self, track: Track) {
+        let id = self.new_view_id();
+        self.push(View::Tracks {
+            id,
+            title: format!("Похожие на «{}»", track.title),
+            subtitle: track.artist_names(),
+            cover: track.cover_uri().map(str::to_owned),
+            tracks: Loadable::Loading,
+            playlist: None,
+        });
+        if let Some(c) = track.cover_uri() {
+            let c = c.to_string();
+            self.fetch_cover(&c);
+        }
+        self.spawn(move |c, tx| async move {
+            let r = c.similar_tracks(&track.id).await.map_err(err_str).and_then(|ts| {
+                if ts.is_empty() {
+                    Err("похожих треков нет".to_string())
+                } else {
+                    Ok(ts)
+                }
+            });
+            let _ = tx.send(Msg::Tracks { view_id: id, result: r });
+        });
+    }
+
     fn open_chart(&mut self) {
         let id = self.new_view_id();
         self.push(View::Tracks {
@@ -2464,7 +2490,32 @@ impl App {
 
     fn load_wheel(&mut self) {
         self.spawn(|c, tx| async move {
-            let _ = tx.send(Msg::Wheel(c.wheel().await.map_err(err_str)));
+            let (wheel, last) = tokio::join!(c.wheel(), c.wave_last());
+            let r = wheel.map(|mut items| {
+                // Последняя волна (например, по исполнителю), если её нет среди пресетов, —
+                // первой на дуге, как «продолжить» в десктопе.
+                if let Ok(last) = last
+                    && !last.seeds.is_empty()
+                    && last.seeds != [MY_WAVE]
+                    && !items.iter().any(|i| i.seeds() == last.seeds)
+                {
+                    items.insert(
+                        0,
+                        api::WheelItem {
+                            style: "LAST".into(),
+                            data: api::WheelData {
+                                wave: Some(api::WheelWave {
+                                    description: Some("продолжить последнюю волну".into()),
+                                    ..last
+                                }),
+                                agent: None,
+                            },
+                        },
+                    );
+                }
+                items
+            });
+            let _ = tx.send(Msg::Wheel(r.map_err(err_str)));
         });
     }
 
@@ -4178,6 +4229,11 @@ impl App {
             KeyCode::Char('P') => self.add_to_playlist(),
             KeyCode::Char('h') => self.open_history(),
             KeyCode::Char('C') => self.open_chart(),
+            KeyCode::Char('m') if !self.offline => {
+                if let Some(t) = self.target_track() {
+                    self.open_similar(t);
+                }
+            }
             KeyCode::Char('c') if matches!(self.page().view, View::Playlists) => {
                 self.popup = Some(Popup::Input {
                     title: " Новый плейлист ",

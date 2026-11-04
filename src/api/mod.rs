@@ -437,6 +437,18 @@ impl Client {
         Ok(serde_json::from_value(v["chart"].clone())?)
     }
 
+    /// «Похожие треки» (как в мобильном клиенте).
+    pub async fn similar_tracks(&self, track_id: &str) -> Result<Vec<Track>> {
+        let numeric = track_id.split(':').next().unwrap_or(track_id);
+        let v: Value = self.get(&format!("/tracks/{numeric}/similar"), &[]).await?;
+        Ok(v["similarTracks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| serde_json::from_value::<Track>(t.clone()).ok())
+            .collect())
+    }
+
     pub async fn album(&self, id: &str) -> Result<Album> {
         self.get(&format!("/albums/{id}/with-tracks"), &[]).await
     }
@@ -506,6 +518,11 @@ impl Client {
             .into_iter()
             .filter(|i| i.data.wave.as_ref().is_some_and(|w| !w.seeds.is_empty()))
             .collect())
+    }
+
+    /// Последняя включённая волна (десктоп так подписывает главную кнопку).
+    pub async fn wave_last(&self) -> Result<WheelWave> {
+        self.send(self.req_as(reqwest::Method::GET, "/rotor/wave/last", DESKTOP_CLIENT)).await
     }
 
     /// Программа офлайн-волны под скачанные треки (как в мобильном клиенте).
