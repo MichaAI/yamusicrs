@@ -19,6 +19,9 @@
         android:theme="@style/Theme.Yamusicrs"
         android:supportsRtl="true">
 
+        <!-- simpleperf по adb и в release-сборке: профиль CPU без debuggable. -->
+        <profileable android:shell="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

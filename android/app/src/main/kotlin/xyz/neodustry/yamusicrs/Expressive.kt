@@ -2,6 +2,8 @@
 
 package xyz.neodustry.yamusicrs
 
+import androidx.compose.ui.graphics.drawscope.rotate
+
 import android.graphics.Bitmap
 import android.graphics.RuntimeShader
 import android.os.Build
@@ -158,8 +160,11 @@ fun PlayButton(playing: Boolean, size: Dp, onClick: () -> Unit, modifier: Modifi
         Box(
             Modifier
                 .fillMaxSize()
-                .graphicsLayer { rotationZ = spin.value * progress }
+                // Вращение — только при отрисовке, не слоем: поворот слоя Compose считает сдвигом
+                // узла и каждый кадр шлёт событие службам специальных возможностей (KDE Connect и т.п.),
+                // а те перечитывают всё дерево — сотня процентов CPU, пока играет.
                 .drawBehind {
+                  rotate(spin.value * progress) {
                     val w = this@drawBehind.size.width
                     val h = this@drawBehind.size.height
                     // halo — тёмный ореол той же формы: кнопка того же цвета, что блоб под ней,
@@ -176,6 +181,7 @@ fun PlayButton(playing: Boolean, size: Dp, onClick: () -> Unit, modifier: Modifi
                     val path = morph.toPath(progress)
                     path.transform(Matrix().apply { scale(w, h) })
                     drawPath(path, color)
+                  }
                 },
         )
         Icon(

@@ -161,6 +161,7 @@ fun PageHost(app: YaApp, nav: Nav) {
         val below = nav.stack.getOrNull(nav.stack.size - 2)
         try {
             progress.collect {
+                android.util.Log.i("yamusicrs", "страница: назад ${it.progress}")
                 edge = it.swipeEdge
                 state.seekTo(it.progress, below)
             }

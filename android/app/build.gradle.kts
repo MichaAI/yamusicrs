@@ -31,6 +31,15 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("debug")
+            // `-Pdebuggable` — тот же release, но к нему цепляется lldb (run-as + lldb-server),
+            // а в .so остаются символы. Только для ловли багов: ART в debuggable-режиме медленнее.
+            isDebuggable = project.hasProperty("debuggable")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            if (project.hasProperty("debuggable")) keepDebugSymbols += "**/*.so"
         }
     }
 

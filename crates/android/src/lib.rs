@@ -720,6 +720,14 @@ fn seeds_of(e: &Engine, p: &Pages, s: &Source) -> Vec<String> {
 
 fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: Cmd) {
     let idle = e.now.is_none() && e.loading_track.is_none();
+    match &c {
+        Cmd::PlayPause | Cmd::Play | Cmd::Pause => tracing::debug!(
+            "команда {}; idle={idle}, пауза={}",
+            match &c { Cmd::PlayPause => "play/pause", Cmd::Play => "play", _ => "pause" },
+            e.player.paused()
+        ),
+        _ => {}
+    }
     match c {
         Cmd::PlayPause => e.toggle_pause(),
         Cmd::Play => {

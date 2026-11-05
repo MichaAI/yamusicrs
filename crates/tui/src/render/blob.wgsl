@@ -5,6 +5,7 @@
 struct Params {
     c: array<vec4<f32>, 4>,   // палитра (0..1), уже пастельная
     p: vec4<f32>,             // phase, energy, aspect (w/h), сила дизеринга в ступенях 1/255 (0 — нет)
+    b: array<vec4<f32>, 7>,   // шары кадра (x, y, r, —) — считаются на CPU (render::balls)
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -23,25 +24,8 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     return o;
 }
 
-// Шар k: центр и радиус в момент t. 0..4 — основные, 5..6 — быстрые капли-спутники.
-fn ball(k: i32, t: f32, e: f32) -> vec3<f32> {
-    let fk = f32(k);
-    if (k < 5) {
-        let amp = 0.26 + 0.10 * e;
-        let c = vec2<f32>(amp * sin(t * (0.23 + 0.06 * fk) + fk * 2.1),
-                          amp * 0.9 * sin(t * (0.17 + 0.05 * fk) + fk * 1.3 + 1.2));
-        return vec3<f32>(c, 0.24 + 0.05 * sin(t * 0.31 + fk * 1.7));
-    }
-    let amp = 0.55 + 0.08 * sin(t * 0.4 + fk);
-    let a = t * (0.45 + 0.1 * fk) + fk * 3.0;
-    return vec3<f32>(amp * cos(a), amp * 0.8 * sin(a * 1.3), 0.09);
-}
-
-
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let t = P.p.x;
-    let e = P.p.y;
     let aspect = P.p.z;
     var q = in.uv * 2.0 - 1.0;
     if (aspect > 1.0) { q.x *= aspect; } else { q.y /= aspect; }
@@ -49,29 +33,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var f = 0.0;
     var wsum = 0.0;
     var acc = vec3<f32>(0.0);
-    // Центры шаров; основные мягко расталкиваются, чтобы не сходились почти вплотную.
-    var bs: array<vec3<f32>, 7>;
-    for (var k = 0; k < 7; k++) { bs[k] = ball(k, t, e); }
-    for (var it = 0; it < 2; it++) {
-        for (var i = 0; i < 5; i++) {
-            var push = vec2<f32>(0.0);
-            for (var j = 0; j < 5; j++) {
-                if (j == i) { continue; }
-                let d = bs[i].xy - bs[j].xy;
-                let l = length(d);
-                let m = 0.75 * (bs[i].z + bs[j].z);
-                if (l < m) {
-                    // В совпавшей точке направление берём по номерам — расходятся всегда в разные стороны.
-                    let dir = select(normalize(vec2<f32>(f32(i - j), 0.5)), d / l, l > 1e-3);
-                    let x = (m - l) / m;
-                    push += dir * (m - l) * 0.5 * x * (2.0 - x);
-                }
-            }
-            bs[i] = vec3<f32>(bs[i].xy + push, bs[i].z);
-        }
-    }
     for (var k = 0; k < 7; k++) {
-        let b = bs[k];
+        let b = P.b[k].xyz;
         let d2 = max(dot(q - b.xy, q - b.xy), 1e-4);
         let v = b.z * b.z / d2;
         f += v;

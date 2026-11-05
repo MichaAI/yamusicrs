@@ -67,11 +67,12 @@ impl Gfx {
 fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
     let aspect = w as f32 / h.max(1) as f32;
     let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let bs = balls(b.phase, b.energy);
     for y in 0..h {
         for x in 0..w {
             let u = (x as f32 + 0.5) / w as f32;
             let v = (y as f32 + 0.5) / h as f32;
-            let p = dither(blob_px(u, v, aspect, b), x, y, b.dither);
+            let p = dither(blob_px(u, v, aspect, b, &bs), x, y, b.dither);
             out.extend(p.map(|c| c as u8));
         }
     }
@@ -112,11 +113,45 @@ fn ball(k: usize, t: f32, e: f32) -> [f32; 3] {
     }
 }
 
+/// Шары кадра: (x, y, r) × 7. Основные пять мягко расталкиваются, чтобы не сходились почти
+/// вплотную. Одни на весь кадр — считаются раз, а не в шейдере на каждый пиксель.
+pub fn balls(t: f32, e: f32) -> [[f32; 3]; 7] {
+    let mut bs: [[f32; 3]; 7] = std::array::from_fn(|k| ball(k, t, e));
+    for _ in 0..2 {
+        for i in 0..5 {
+            let mut push = [0.0f32; 2];
+            for j in 0..5 {
+                if i == j {
+                    continue;
+                }
+                let (dx, dy) = (bs[i][0] - bs[j][0], bs[i][1] - bs[j][1]);
+                let l = (dx * dx + dy * dy).sqrt();
+                let m = 0.75 * (bs[i][2] + bs[j][2]);
+                if l < m {
+                    let (ux, uy) = if l > 1e-3 {
+                        (dx / l, dy / l)
+                    } else {
+                        let (a, b) = ((i as f32) - (j as f32), 0.5);
+                        let n = (a * a + b * b).sqrt();
+                        (a / n, b / n)
+                    };
+                    let x = (m - l) / m;
+                    let p = (m - l) * 0.5 * x * (2.0 - x);
+                    push[0] += ux * p;
+                    push[1] += uy * p;
+                }
+            }
+            bs[i][0] += push[0];
+            bs[i][1] += push[1];
+        }
+    }
+    bs
+}
+
 /// Пиксель блоба в точке (u, v) ∈ [0,1]² холста с пропорциями `aspect`: RGBA 0..255.
-/// Повторяет шейдер blob.wgsl.
-pub fn blob_px(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
+/// Повторяет шейдер blob.wgsl; `bs` — шары кадра из [`balls`].
+pub fn blob_px(u: f32, v: f32, aspect: f32, b: &Blob, bs: &[[f32; 3]; 7]) -> [f32; 4] {
     let c = b.pastel();
-    let (t, e) = (b.phase, b.energy);
     let (mut qx, mut qy) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
     if aspect > 1.0 {
         qx *= aspect;
@@ -124,8 +159,7 @@ pub fn blob_px(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
         qy /= aspect;
     }
     let (mut f, mut wsum, mut acc) = (0.0f32, 0.0f32, [0.0f32; 3]);
-    for k in 0..7 {
-        let [bx, by, r] = ball(k, t, e);
+    for (k, &[bx, by, r]) in bs.iter().enumerate() {
         let d2 = ((qx - bx).powi(2) + (qy - by).powi(2)).max(1e-4);
         let val = r * r / d2;
         f += val;
@@ -145,7 +179,7 @@ pub fn blob_px(u: f32, v: f32, aspect: f32, b: &Blob) -> [f32; 4] {
 
 /// Квадратный холст, (u, v) ∈ [-1,1]² — для фолбэка полублоками и подбора контраста.
 pub fn blob_pixel(u: f32, v: f32, b: &Blob) -> [f32; 4] {
-    blob_px((u + 1.0) / 2.0, (v + 1.0) / 2.0, 1.0, b)
+    blob_px((u + 1.0) / 2.0, (v + 1.0) / 2.0, 1.0, b, &balls(b.phase, b.energy))
 }
 
 async fn init_gpu() -> Option<Gpu> {
@@ -231,7 +265,7 @@ async fn init_gpu() -> Option<Gpu> {
 
 impl Gpu {
     fn render(&self, w: u32, h: u32, b: &Blob) -> Option<Vec<u8>> {
-        let mut u = Vec::with_capacity(80);
+        let mut u = Vec::with_capacity(192);
         for c in b.pastel() {
             for v in [c[0], c[1], c[2], 1.0] {
                 u.extend_from_slice(&v.to_le_bytes());
@@ -239,6 +273,11 @@ impl Gpu {
         }
         for v in [b.phase, b.energy, w as f32 / h.max(1) as f32, b.dither] {
             u.extend_from_slice(&v.to_le_bytes());
+        }
+        for [x, y, r] in balls(b.phase, b.energy) {
+            for v in [x, y, r, 0.0] {
+                u.extend_from_slice(&v.to_le_bytes());
+            }
         }
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,

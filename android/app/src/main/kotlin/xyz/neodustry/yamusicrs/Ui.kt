@@ -207,34 +207,62 @@ private fun scheme(p: Pal): ColorScheme {
     )
 }
 
-/** Тема плавно перетекает к новой обложке за 0,9 с — как ThemeAnim в TUI. */
+/**
+ * Тема перетекает к новой обложке за 0,9 с — как ThemeAnim в TUI, но ступенями (15 шагов):
+ * каждая смена цветов перекомпоновывает и перерисовывает почти весь экран, и плавная анимация
+ * на 120 Гц делала из переключения трека ~108 полных кадров. Блоб меняет цвета плавно сам.
+ */
 @Composable
 fun YaTheme(pal: Pal, content: @Composable () -> Unit) {
-    val target = scheme(pal)
-    @Composable
-    fun Color.anim() = animateColorAsState(this, tween(900), label = "theme").value
-    val s = target.copy(
-        primary = target.primary.anim(),
-        primaryContainer = target.primaryContainer.anim(),
-        secondary = target.secondary.anim(),
-        secondaryContainer = target.secondaryContainer.anim(),
-        tertiary = target.tertiary.anim(),
-        background = target.background.anim(),
-        surface = target.surface.anim(),
-        onSurface = target.onSurface.anim(),
-        onSurfaceVariant = target.onSurfaceVariant.anim(),
-        surfaceContainerLow = target.surfaceContainerLow.anim(),
-        surfaceContainer = target.surfaceContainer.anim(),
-        surfaceContainerHigh = target.surfaceContainerHigh.anim(),
-        surfaceContainerHighest = target.surfaceContainerHighest.anim(),
-        outline = target.outline.anim(),
-        outlineVariant = target.outlineVariant.anim(),
-    )
+    // Схема — по палитре: новый объект на каждую перекомпоновку перезапускал бы анимацию.
+    val target = remember(pal) { scheme(pal) }
+    var from by remember { mutableStateOf(target) }
+    var to by remember { mutableStateOf(target) }
+    val k = remember { Animatable(1f) }
+    // Шаг анимации, а не её значение: перекомпоновка — только когда шаг сменился.
+    val step by remember { derivedStateOf { (k.value * STEPS).roundToInt() } }
+    LaunchedEffect(target) {
+        if (target === to) return@LaunchedEffect
+        from = lerpScheme(from, to, step / STEPS.toFloat())
+        to = target
+        k.snapTo(0f)
+        k.animateTo(1f, tween(900))
+    }
+    val s = remember(from, to, step) { lerpScheme(from, to, step / STEPS.toFloat()) }
     MaterialExpressiveTheme(
         colorScheme = s,
         motionScheme = MotionScheme.expressive(),
         typography = remember { typography() },
         content = content,
+    )
+}
+
+private const val STEPS = 15
+
+private fun lerpScheme(a: ColorScheme, b: ColorScheme, f: Float): ColorScheme {
+    if (f >= 1f) return b
+    if (f <= 0f) return a
+    fun l(x: Color, y: Color) = lerp(x, y, f)
+    return b.copy(
+        primary = l(a.primary, b.primary),
+        onPrimary = l(a.onPrimary, b.onPrimary),
+        primaryContainer = l(a.primaryContainer, b.primaryContainer),
+        secondary = l(a.secondary, b.secondary),
+        onSecondary = l(a.onSecondary, b.onSecondary),
+        secondaryContainer = l(a.secondaryContainer, b.secondaryContainer),
+        tertiary = l(a.tertiary, b.tertiary),
+        background = l(a.background, b.background),
+        onBackground = l(a.onBackground, b.onBackground),
+        surface = l(a.surface, b.surface),
+        onSurface = l(a.onSurface, b.onSurface),
+        onSurfaceVariant = l(a.onSurfaceVariant, b.onSurfaceVariant),
+        surfaceContainerLowest = l(a.surfaceContainerLowest, b.surfaceContainerLowest),
+        surfaceContainerLow = l(a.surfaceContainerLow, b.surfaceContainerLow),
+        surfaceContainer = l(a.surfaceContainer, b.surfaceContainer),
+        surfaceContainerHigh = l(a.surfaceContainerHigh, b.surfaceContainerHigh),
+        surfaceContainerHighest = l(a.surfaceContainerHighest, b.surfaceContainerHighest),
+        outline = l(a.outline, b.outline),
+        outlineVariant = l(a.outlineVariant, b.outlineVariant),
     )
 }
 
@@ -395,6 +423,9 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     }
     // «Назад» со сцены — предиктивный: сцену за пальцем сжимает сама Stage (PredictiveBackHandler в ней).
     val now = NowMark(s.track?.id, !s.paused)
+    // Непрозрачное поверх блобов: у экрана волны и у сцены — свои.
+    val waveHoles = remember { BlobHoles() }
+    val stageHoles = remember { BlobHoles() }
     CompositionLocalProvider(LocalNav provides nav, LocalNow provides now) {
     SharedTransitionLayout(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -410,7 +441,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                 ) { page ->
                     Box(Modifier.fillMaxSize().nestedScroll(KeepHorizontal)) {
                     when (Tab.entries[page]) {
-                        Tab.Wave -> WaveTab(app, pal, s)
+                        Tab.Wave -> WaveTab(app, pal, s, waveHoles)
                         Tab.Library -> LibraryTab(app, nav, s.likesLoading)
                         Tab.Search -> SearchTab(app, nav)
                         Tab.Releases -> ReleasesTab(app, nav)
@@ -434,7 +465,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                     enter = fadeIn(),
                     exit = fadeOut(),
                 ) {
-                    MiniPlayer(app, s, clock, this@SharedTransitionLayout, this) { nav.stage = true }
+                    MiniPlayer(app, s, clock, this@SharedTransitionLayout, this, waveHoles) { nav.stage = true }
                 }
             }
             ShortNavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
@@ -463,7 +494,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
             }
         }
         stageTr.AnimatedVisibility({ it && hasTrack }, enter = fadeIn(), exit = fadeOut(tween(easing = LateFade))) {
-            Stage(app, pal, s, clock, this@SharedTransitionLayout, this) { nav.stage = false }
+            Stage(app, pal, s, clock, this@SharedTransitionLayout, this, stageHoles) { nav.stage = false }
         }
     }
     QueueSheet(app, nav, s.queuePos?.toInt())
@@ -477,13 +508,13 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
 // ── Моя волна ────────────────────────────────────────────────────────────────
 
 @Composable
-private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
+private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState, holes: BlobHoles) {
     val presets by app.wheel.collectAsStateWithLifecycle()
     val waveOn = s.wave
     // Играет что угодно (волна, «Мне нравится», плейлист) — главный экран показывает это потоком.
     val playing = s.track != null && !s.paused
     Box(Modifier.fillMaxSize()) {
-        Blob(pal.blob, playing, Modifier.fillMaxSize())
+        Blob(pal.blob, playing, Modifier.fillMaxSize(), holes = holes)
         Box(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(0.55f to Color.Transparent, 1f to MaterialTheme.colorScheme.background),
@@ -492,7 +523,7 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
         Column(Modifier.fillMaxSize().statusBarsPadding().padding(top = 24.dp, bottom = 120.dp)) {
             val now = s.track
             if (now != null && !s.waveLoading) {
-                WaveNow(app, s, now, Modifier.weight(1f))
+                WaveNow(app, s, now, Modifier.weight(1f), holes)
             } else {
             Column(Modifier.padding(horizontal = 24.dp)) {
                 ScrambleText(
@@ -542,7 +573,7 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
  * под ними пауза, название трека (тап — сцена) и «нравится».
  */
 @Composable
-private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier) {
+private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier, holes: BlobHoles) {
     val card by app.artist.collectAsStateWithLifecycle()
     val artist = card?.takeIf { it.artistId == t.artistId }
     val nav = LocalNav.current
@@ -551,6 +582,7 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
     val dx = remember { Animatable(0f) }
     val skip = with(LocalDensity.current) { 56.dp.toPx() }
     val (canNext, canPrev) = skipBounds(app, s)
+    val still by remember { derivedStateOf { dx.value == 0f } }
     Column(
         modifier.fillMaxWidth().pointerInput(Unit) {
             detectHorizontalDragGestures(
@@ -625,12 +657,12 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                     )
                 } else {
                     // Фото исполнителя (или обложка, если фото нет); концентрично: 48 снаружи.
-                    Art(app, artist?.photo ?: t.cover, Modifier.size(side), corner = 48.dp)
+                    Art(app, artist?.photo ?: t.cover, Modifier.size(side).blobHole(holes, 48.dp, still), corner = 48.dp)
                 }
                 // Обложка трека наполовину на фото, в ободке цвета фона — читается как отдельный слой.
                 // Фото нет — крупно и так обложка, второй раз её не показываем.
                 if (cutout != null || artist?.photo != null) Box(
-                    Modifier.align(Alignment.BottomCenter).size(small + 8.dp).clip(RoundedCornerShape(28.dp))
+                    Modifier.align(Alignment.BottomCenter).size(small + 8.dp).blobHole(holes, 28.dp, still).clip(RoundedCornerShape(28.dp))
                         .background(MaterialTheme.colorScheme.background).padding(4.dp),
                 ) {
                     Art(app, t.cover, Modifier.fillMaxSize(), corner = 24.dp)
@@ -885,9 +917,12 @@ private fun MiniPlayer(
     clock: PlayClock,
     shared: SharedTransitionScope,
     visibility: AnimatedVisibilityScope,
+    holes: BlobHoles,
     open: () -> Unit,
 ) {
     val t = s.track ?: return
+    // Пока проявляется или гаснет (и пока перелетает в сцену) — полупрозрачна, вырезать нельзя.
+    val settled = !visibility.transition.isRunning
     val scope = rememberCoroutineScope()
     val dx = remember { Animatable(0f) }
     val density = LocalDensity.current
@@ -903,6 +938,7 @@ private fun MiniPlayer(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 10.dp)
+                .blobHole(holes, 32.dp, settled)
                 .sharedBounds(
                     rememberSharedContentState(KEY_PLAYER),
                     visibility,
@@ -1027,6 +1063,7 @@ private fun Stage(
     clock: PlayClock,
     shared: SharedTransitionScope,
     visibility: AnimatedVisibilityScope,
+    holes: BlobHoles,
     close: () -> Unit,
 ) {
     val t = s.track ?: return
@@ -1071,10 +1108,13 @@ private fun Stage(
     var backEdge by remember { mutableIntStateOf(androidx.activity.BackEventCompat.EDGE_LEFT) }
     PredictiveBackHandler(enabled = true) { progress ->
         try {
+            android.util.Log.i("yamusicrs", "сцена: жест назад начался")
             progress.collect {
+                android.util.Log.i("yamusicrs", "сцена: назад ${it.progress}")
                 backEdge = it.swipeEdge
                 back.snapTo(it.progress)
             }
+            android.util.Log.i("yamusicrs", "сцена: назад — свернуть")
             close()
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             scope.launch { back.animateTo(0f, spring(dampingRatio = 0.8f)) }
@@ -1181,7 +1221,7 @@ private fun Stage(
                     }
                 },
         ) {
-            Blob(pal.blob, !s.paused, Modifier.fillMaxSize())
+            Blob(pal.blob, !s.paused, Modifier.fillMaxSize(), holes = holes)
             // Под текстом песни блоб приглушается, иначе строки теряются на ярких пятнах.
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(alpha = scrim)))
             Box(
@@ -1218,7 +1258,7 @@ private fun Stage(
                             if (lyricsOn && lyrics != null) {
                                 LyricsView(app, lyrics, clock)
                             } else {
-                                CoverCarousel(app, t, items, pos, pages, pager, maxWidth, maxHeight, shared, visibility)
+                                CoverCarousel(app, t, items, pos, pages, pager, maxWidth, maxHeight, shared, visibility, holes)
                             }
                         }
                     }
@@ -1298,13 +1338,18 @@ private fun CoverCarousel(
     height: Dp,
     shared: SharedTransitionScope,
     visibility: AnimatedVisibilityScope,
+    holes: BlobHoles,
 ) {
     // Обложка почти во всю ширину; соседние всё равно выглядывают.
     val side = minOf(width * 0.88f, height, 600.dp)
+    // Сцена не перелетает из мини-плеера и обратно — обложка на месте и непрозрачна.
+    val still = !visibility.transition.isRunning
     if (!carousel || pos == null) {
-        SwipeCover(app, t, side, shared, visibility)
+        SwipeCover(app, t, side, shared, visibility, holes, still)
         return
     }
+    // Карусель стоит: у текущей обложки альфа 1 (в движении — меньше, у соседних — всегда меньше).
+    val settled by remember(pager) { derivedStateOf { pager.currentPageOffsetFraction == 0f && !pager.isScrollInProgress } }
     // Карусель шире колонки сцены (её отступы по 24) — соседние обложки доходят до края экрана.
     val full = width + 48.dp
     HorizontalPager(
@@ -1331,7 +1376,7 @@ private fun CoverCarousel(
             // Одна и та же обложка на странице, меняется только модификатор: когда играющий
             // сменился, обложка не пересоздаётся (иначе мигает), а лишь становится общим элементом.
             val m = if (page == pos) with(shared) { Modifier.sharedElement(rememberSharedContentState(KEY_COVER), visibility) } else Modifier
-            Art(app, it.cover, m.size(side), corner = 36.dp)
+            Art(app, it.cover, m.size(side).blobHole(holes, 36.dp, still && settled && page == pos && pager.currentPage == page), corner = 36.dp)
         }
     }
 }
@@ -1339,10 +1384,11 @@ private fun CoverCarousel(
 /** Обложка сцены: свайп вбок — соседний трек (улетает и возвращается уже новой). */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransitionScope, visibility: AnimatedVisibilityScope) {
+private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransitionScope, visibility: AnimatedVisibilityScope, holes: BlobHoles, still: Boolean) {
     val scope = rememberCoroutineScope()
     val dx = remember { Animatable(0f) }
     val skip = with(LocalDensity.current) { 56.dp.toPx() }
+    val flat by remember { derivedStateOf { dx.value == 0f } }
     with(shared) {
         Art(
             app,
@@ -1350,6 +1396,7 @@ private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransit
             Modifier
                 .sharedElement(rememberSharedContentState(KEY_COVER), visibility)
                 .size(side)
+                .blobHole(holes, 36.dp, still && flat)
                 .graphicsLayer {
                     translationX = dx.value
                     rotationZ = dx.value / size.width * 6f
@@ -1468,9 +1515,8 @@ private fun ColumnScope.StageInfo(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
         ) {
-            Icon(Ic.Queue, null, Modifier.size(20.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Очередь", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+            Icon(Ic.Queue, "Очередь", Modifier.size(20.dp))
+            // Без слова «Очередь» — иконки хватает, и «128 из 1949» помещается целиком.
             if (s.queueLen > 0u) {
                 Spacer(Modifier.width(8.dp))
                 Text(
