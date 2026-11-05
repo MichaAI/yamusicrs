@@ -49,6 +49,11 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
         .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "yamusicrs:playback")
         .apply { setReferenceCounted(false) }
 
+    /** Wi-Fi не засыпает, пока играет: трек докачивается потоком, обрыв — тишина. */
+    private val wifi = app.getSystemService(android.net.wifi.WifiManager::class.java)
+        .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "yamusicrs:stream")
+        .apply { setReferenceCounted(false) }
+
     private val noisy = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) app.core.pause()
@@ -84,12 +89,14 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
                 noisyRegistered = true
             }
             wake.acquire(6 * 60 * 60 * 1000L)
+            if (!wifi.isHeld) wifi.acquire()
         } else {
             if (noisyRegistered) {
                 app.unregisterReceiver(noisy)
                 noisyRegistered = false
             }
             if (wake.isHeld) wake.release()
+            if (wifi.isHeld) wifi.release()
         }
     }
 

@@ -61,6 +61,18 @@ impl From<&Track> for TrackItem {
     }
 }
 
+/// Исполнитель играющего трека для главного экрана волны: фото и ближайший концерт.
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct ArtistCard {
+    pub artist_id: String,
+    pub name: String,
+    pub photo: Option<String>,
+    /// «15 ноября, 19:00, Москва».
+    pub concert: Option<String>,
+    /// Билеты на Афише.
+    pub concert_url: Option<String>,
+}
+
 /// Пресет «колеса» Моей волны.
 #[derive(uniffi::Record, Clone, PartialEq, Debug)]
 pub struct WavePreset {
@@ -188,6 +200,8 @@ pub trait CoreListener: Send + Sync {
     /// Свои плейлисты и «Настроили для вас».
     fn on_playlists(&self, own: Vec<PlaylistItem>, personal: Vec<PlaylistItem>);
     fn on_settings(&self, settings: SettingsData);
+    /// Карточка исполнителя играющего трека (приходит после `on_state` с этим треком).
+    fn on_artist(&self, card: ArtistCard);
 }
 
 enum Cmd {
@@ -503,6 +517,9 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
     engine.yn_title = Some(format!("yamusicrs · {device_name}"));
     let mut publisher = Publisher::default();
     let mut pages = Pages::default();
+    // Карточки исполнителей: один запрос на исполнителя за запуск.
+    let mut artist_cache: std::collections::HashMap<String, std::sync::Arc<parking_lot::Mutex<Option<ArtistCard>>>> =
+        std::collections::HashMap::new();
     let (ptx, mut prx) = unbounded_channel::<Reply>();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -532,7 +549,10 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
                         listener.on_wheel(items.iter().map(preset).collect());
                     }
                 }
-                Effect::TrackStarted { track, .. } => load_lyrics(&engine, track, listener.clone()),
+                Effect::TrackStarted { track, .. } => {
+                    load_artist(&engine, &track, &mut artist_cache, listener.clone());
+                    load_lyrics(&engine, track, listener.clone());
+                }
                 _ => {}
             }
         }
@@ -548,6 +568,59 @@ fn preset(i: &api::WheelItem) -> WavePreset {
         color: i.color().map(|(r, g, b)| (r as u32) << 16 | (g as u32) << 8 | b as u32),
         seeds: i.seeds(),
     }
+}
+
+/// Фото и ближайший концерт первого исполнителя трека — в фоне, с кешем по исполнителю.
+fn load_artist(
+    e: &Engine,
+    t: &Track,
+    cache: &mut std::collections::HashMap<String, Arc<parking_lot::Mutex<Option<ArtistCard>>>>,
+    l: Arc<dyn CoreListener>,
+) {
+    let Some(a) = t.artists.iter().find(|a| !a.id.is_empty()) else { return };
+    if let Some(slot) = cache.get(&a.id) {
+        if let Some(card) = slot.lock().clone() {
+            l.on_artist(card);
+        }
+        return;
+    }
+    let Some(c) = e.client() else { return };
+    let slot = Arc::new(parking_lot::Mutex::new(None));
+    cache.insert(a.id.clone(), slot.clone());
+    let (id, name) = (a.id.clone(), a.name.clone());
+    tokio::spawn(async move {
+        let (info, concerts) = match c.artist_card(&id).await {
+            Ok(r) => r,
+            Err(err) => return tracing::debug!("карточка исполнителя {id}: {err}"),
+        };
+        let now = chrono::Utc::now();
+        let next = concerts
+            .iter()
+            .filter_map(|c| Some((chrono::DateTime::parse_from_rfc3339(c.datetime.as_deref()?).ok()?, c)))
+            .filter(|(d, _)| *d > now)
+            .min_by_key(|(d, _)| *d);
+        let card = ArtistCard {
+            artist_id: id,
+            name,
+            photo: info.as_ref().and_then(|i| i.cover_uri()).map(|u| api::cover_url(u, 1000)),
+            concert: next.map(|(d, c)| {
+                const M: [&str; 12] = [
+                    "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
+                    "ноября", "декабря",
+                ];
+                use chrono::{Datelike, Timelike};
+                let mut s = format!("{} {}, {}:{:02}", d.day(), M[d.month0() as usize], d.hour(), d.minute());
+                if let Some(city) = c.city.as_deref().filter(|x| !x.is_empty()) {
+                    s.push_str(", ");
+                    s.push_str(city);
+                }
+                s
+            }),
+            concert_url: next.and_then(|(_, c)| c.afisha_url.clone()),
+        };
+        *slot.lock() = Some(card.clone());
+        l.on_artist(card);
+    });
 }
 
 /// Текст зазвучавшего трека — в фоне; ответ уходит в Kotlin сам.

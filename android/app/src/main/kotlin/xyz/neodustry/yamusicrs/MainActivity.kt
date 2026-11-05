@@ -24,6 +24,7 @@ class MainActivity : ComponentActivity() {
             registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
                 .launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        askBackground(this, onlyOnce = true)
         val app = application as YaApp
         setContent {
             AppScreen(app, openUrl = { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) })
@@ -41,5 +42,28 @@ class MainActivity : ComponentActivity() {
         controller?.let(MediaController::releaseFuture)
         controller = null
         super.onStop()
+    }
+}
+
+/** Система не ограничивает приложение в фоне (исключено из оптимизации батареи). */
+fun unrestricted(ctx: android.content.Context): Boolean =
+    ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
+
+/**
+ * Попросить исключение из оптимизации батареи: без него оболочки вроде vivo/MIUI убивают
+ * игру в фоне. `onlyOnce` — при запуске спрашиваем один раз, из настроек — всегда.
+ */
+@android.annotation.SuppressLint("BatteryLife")
+fun askBackground(ctx: android.content.Context, onlyOnce: Boolean) {
+    if (unrestricted(ctx)) return
+    val prefs = ctx.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE)
+    if (onlyOnce && prefs.getBoolean("asked_background", false)) return
+    prefs.edit().putBoolean("asked_background", true).apply()
+    runCatching {
+        ctx.startActivity(
+            Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName)),
+        )
+    }.onFailure {
+        runCatching { ctx.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
     }
 }

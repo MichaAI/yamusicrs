@@ -20,7 +20,7 @@ pub struct Config {
     pub normalize: bool,
     /// Целевая громкость нормализации, LUFS.
     pub normalize_target_lufs: f32,
-    /// Кроссфейд между треками разных альбомов, сек; 0 — встык. Клавиша x перебирает 0/3/6/10.
+    /// Кроссфейд между треками, сек; 0 — встык. Клавиша x перебирает 0/3/6/10.
     pub crossfade_secs: f32,
     /// Рисовать обложки через kitty graphics protocol (auto определяется по $TERM).
     pub kitty_images: Option<bool>,
@@ -54,7 +54,7 @@ impl Default for Config {
             volume: 0.8,
             normalize: true,
             normalize_target_lufs: -14.0,
-            crossfade_secs: 0.0,
+            crossfade_secs: 3.0,
             kitty_images: None,
             gpu: true,
             blob_dither: 1,

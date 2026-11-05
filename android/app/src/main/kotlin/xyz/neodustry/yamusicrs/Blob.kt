@@ -31,6 +31,7 @@ private const val BLOB_AGSL = """
 uniform float2 size;
 uniform float t;
 uniform float e;
+uniform float z;
 uniform half4 c0;
 uniform half4 c1;
 uniform half4 c2;
@@ -62,6 +63,7 @@ half4 main(float2 p) {
     float aspect = size.x / size.y;
     float2 q = uv * 2.0 - 1.0;
     if (aspect > 1.0) { q.x *= aspect; } else { q.y /= aspect; }
+    q /= z;
     float f = 0.0;
     float wsum = 0.0;
     float3 acc = float3(0.0);
@@ -83,9 +85,13 @@ half4 main(float2 p) {
 }
 """
 
-/** Живой фон из цветов обложки (`Pal.blob`); `playing` — быстрее и с большим размахом. */
+/**
+ * Живой фон из цветов обложки (`Pal.blob`); `playing` — быстрее и с большим размахом.
+ * `zoom` растягивает сами шары, а не картинку: шейдер считает каждый пиксель экрана, так что
+ * крупнее — без потери чёткости.
+ */
 @Composable
-fun Blob(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier) {
+fun Blob(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier, zoom: Float = 1.25f) {
     val c = colors.take(4).map { animateColorAsState(it, tween(900), label = "blob").value }
     var phase by remember { mutableFloatStateOf(0f) }
     var speed by remember { mutableFloatStateOf(0.3f) }
@@ -106,9 +112,9 @@ fun Blob(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier) {
         }
     }
     if (Build.VERSION.SDK_INT >= 33) {
-        ShaderBlob(c, phase, energy, modifier)
+        ShaderBlob(c, phase, energy, zoom, modifier)
     } else {
-        GradientBlob(c, phase, energy, modifier)
+        GradientBlob(c, phase, energy, zoom, modifier)
     }
 }
 
@@ -125,7 +131,7 @@ private object BlobShaders {
 
 @RequiresApi(33)
 @Composable
-private fun ShaderBlob(c: List<Color>, phase: Float, energy: Float, modifier: Modifier) {
+private fun ShaderBlob(c: List<Color>, phase: Float, energy: Float, zoom: Float, modifier: Modifier) {
     // Компиляция шейдера заметна по времени — берём готовый из пула (их нужно два:
     // вкладка «Волна» и сцена видны одновременно во время перехода).
     val shader = remember { BlobShaders.take() }
@@ -135,6 +141,7 @@ private fun ShaderBlob(c: List<Color>, phase: Float, energy: Float, modifier: Mo
         shader.setFloatUniform("size", size.width, size.height)
         shader.setFloatUniform("t", phase)
         shader.setFloatUniform("e", energy)
+        shader.setFloatUniform("z", zoom)
         listOf("c0", "c1", "c2", "c3").forEachIndexed { i, n ->
             val col = c[i % c.size]
             shader.setFloatUniform(n, col.red, col.green, col.blue, 1f)
@@ -145,9 +152,9 @@ private fun ShaderBlob(c: List<Color>, phase: Float, energy: Float, modifier: Mo
 
 /** Без AGSL (Android < 13): те же основные шары мягкими радиальными пятнами. */
 @Composable
-private fun GradientBlob(c: List<Color>, phase: Float, energy: Float, modifier: Modifier) {
+private fun GradientBlob(c: List<Color>, phase: Float, energy: Float, zoom: Float, modifier: Modifier) {
     Canvas(modifier) {
-        val unit = min(size.width, size.height) / 2f
+        val unit = min(size.width, size.height) / 2f * zoom
         val center = Offset(size.width / 2f, size.height / 2f)
         for (k in 0 until 5) {
             val amp = 0.26f + 0.10f * energy

@@ -30,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
@@ -107,9 +108,27 @@ val LocalNow = compositionLocalOf { NowMark(null, false) }
 
 // ── хост страниц ─────────────────────────────────────────────────────────────
 
-/** Верх стека — поверх вкладок; въезжает справа, уезжает вправо. */
+/**
+ * Верх стека — поверх вкладок; въезжает справа, уезжает вправо. Жест «назад» предиктивный:
+ * страница уменьшается, скругляется и отъезжает за пальцем, отпустили — закрывается.
+ */
 @Composable
 fun PageHost(app: YaApp, nav: Nav) {
+    var back by remember { mutableFloatStateOf(0f) }
+    var edge by remember { mutableIntStateOf(androidx.activity.BackEventCompat.EDGE_LEFT) }
+    androidx.activity.compose.PredictiveBackHandler(enabled = nav.stack.isNotEmpty() && !nav.stage) { progress ->
+        try {
+            progress.collect {
+                back = it.progress
+                edge = it.swipeEdge
+            }
+            nav.back()
+            back = 0f
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            androidx.compose.animation.core.animate(back, 0f) { v, _ -> back = v }
+            throw e
+        }
+    }
     AnimatedContent(
         nav.stack.lastOrNull(),
         transitionSpec = {
@@ -120,7 +139,19 @@ fun PageHost(app: YaApp, nav: Nav) {
         label = "page",
     ) { route ->
         if (route != null) {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            val dir = if (edge == androidx.activity.BackEventCompat.EDGE_LEFT) 1f else -1f
+            Box(
+                Modifier.fillMaxSize()
+                    .graphicsLayer {
+                        val k = 1f - 0.1f * back
+                        scaleX = k
+                        scaleY = k
+                        translationX = dir * back * 32.dp.toPx()
+                        shape = RoundedCornerShape((back * 36).dp)
+                        clip = back > 0f
+                    }
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
                 PageView(app, nav, route)
             }
         } else {
@@ -655,7 +686,7 @@ fun SettingsTab(app: YaApp) {
                 app.core.setQuality(QUALITIES[it].first)
             }, Modifier.fillMaxWidth())
         }
-        Group("Плавный переход", "Между треками разных альбомов; альбом играет встык") {
+        Group("Плавный переход", "Наплыв из одного трека в другой; «Выкл» — встык") {
             Segments(
                 CROSSFADES.map { if (it == 0f) "Выкл" else "${it.toInt()} с" },
                 CROSSFADES.indexOfFirst { kotlin.math.abs(it - s.crossfadeSecs) < 0.5f }.coerceAtLeast(0),
@@ -690,6 +721,21 @@ fun SettingsTab(app: YaApp) {
             Toggle("Слушать на других устройствах", s.ynisonStatus.replaceFirstChar { it.uppercase() }.let {
                 if (s.ynison) "Ynison: $it" else "Телефон или компьютер с Яндекс Музыкой включает музыку здесь, а отсюда — там"
             }, s.ynison) { app.core.setYnison(it) }
+        }
+        Group(null, null) {
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            // Проверяем заново при каждом возвращении на экран (решение принимается в системном окне).
+            var free by remember { mutableStateOf(unrestricted(ctx)) }
+            androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+                free = unrestricted(ctx)
+                onPauseOrDispose {}
+            }
+            Toggle(
+                "Работа в фоне",
+                if (free) "Система не ограничивает приложение — музыку в фоне не прервёт"
+                else "Система может остановить музыку в фоне ради батареи. Включите, чтобы этого не было",
+                free,
+            ) { if (!free) askBackground(ctx, onlyOnce = false) }
         }
         Group(null, null) {
             Toggle("История прослушиваний", "Отправлять в Яндекс: так точнее рекомендации волны", s.reportPlays) { app.core.setReportPlays(it) }

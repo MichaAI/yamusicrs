@@ -46,6 +46,8 @@ class YaApp : Application(), CoreListener {
     /** Свои плейлисты и «Настроили для вас». */
     val playlists = MutableStateFlow<Pair<List<PlaylistItem>, List<PlaylistItem>>>(emptyList<PlaylistItem>() to emptyList())
     val settings = MutableStateFlow<SettingsData?>(null)
+    /** Исполнитель играющего трека: фото и ближайший концерт (для экрана волны). */
+    val artist = MutableStateFlow<uniffi.yamusic_android.ArtistCard?>(null)
     /** Страница «Новые релизы» вкладки «Новинки» (запрашивается один раз). */
     var releasesId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
     /** Палитра под обложку играющего трека, как тема TUI. */
@@ -107,6 +109,10 @@ class YaApp : Application(), CoreListener {
 
     override fun onPlaylists(own: List<PlaylistItem>, personal: List<PlaylistItem>) {
         playlists.value = own to personal
+    }
+
+    override fun onArtist(card: uniffi.yamusic_android.ArtistCard) {
+        artist.value = card
     }
 
     override fun onSettings(settings: SettingsData) {

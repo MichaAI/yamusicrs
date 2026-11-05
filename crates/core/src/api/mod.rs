@@ -747,6 +747,26 @@ impl Client {
         Ok(brief)
     }
 
+    /// Лёгкая карточка исполнителя для экрана волны: фото и концерты, без дискографии.
+    pub async fn artist_card(&self, id: &str) -> Result<(Option<ArtistInfo>, Vec<Concert>)> {
+        let (bp, cp) = (format!("/artists/{id}/brief-info"), format!("/artists/{id}/concerts"));
+        let (brief, concerts) = tokio::join!(
+            self.get::<ArtistBrief>(&bp, &[]),
+            self.send::<Value>(self.req_as(reqwest::Method::GET, &cp, DESKTOP_CLIENT)),
+        );
+        let concerts = concerts
+            .map(|v| {
+                v["concerts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| serde_json::from_value::<Concert>(c.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((brief?.artist, concerts))
+    }
+
     pub async fn search(&self, text: &str) -> Result<SearchResult> {
         self.get(
             "/search",

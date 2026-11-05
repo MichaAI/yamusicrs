@@ -1224,7 +1224,7 @@ impl Engine {
         self.state.crossfade = Some(next);
         self.player.set_crossfade(next);
         self.toast(if next > 0.0 {
-            format!("Плавный переход: {next:.0} с (кроме треков одного альбома)")
+            format!("Плавный переход: {next:.0} с")
         } else {
             "Плавный переход: выкл (встык)".into()
         });
@@ -1968,12 +1968,8 @@ impl Engine {
                 if next {
                     if self.next_loaded == Some(token) {
                         self.origins_insert(token, origin);
-                        // Треки одного альбома подряд (концерт, сюита) сводить нельзя — только встык.
-                        let album = |t: &Track| t.full_id().split_once(':').map(|(_, a)| a.to_string());
-                        let cur = self.now.as_ref().and_then(|n| album(&n.track));
-                        let crossfade = !self.repeat_one
-                            && track.as_ref().map(album).is_none_or(|a| a.is_none() || a != cur);
-                        self.player.enqueue_next(token, src, gain, crossfade);
+                        // Наплыв — между любыми треками (кроме повтора одного).
+                        self.player.enqueue_next(token, src, gain, !self.repeat_one);
                     } else {
                         src.cancel();
                     }

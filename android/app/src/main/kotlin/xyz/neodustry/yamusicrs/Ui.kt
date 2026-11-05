@@ -2,7 +2,8 @@
 
 package xyz.neodustry.yamusicrs
 
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
@@ -13,6 +14,11 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerDefaults
@@ -129,24 +135,32 @@ import uniffi.yamusic_android.PlayerState
 import uniffi.yamusic_android.TrackItem
 import uniffi.yamusic_android.WavePreset
 
-/** Заголовки: Unbounded (OFL) — широкий и округлый, рифмуется с блобом и морфингом форм. */
-private val Display = FontFamily(
-    listOf(500, 600, 700, 800, 900).map { w ->
-        Font(R.font.unbounded, FontWeight(w), variationSettings = FontVariation.Settings(FontVariation.weight(w)))
+/** Nunito (OFL): округлый гротеск с кириллицей — один шрифт на всё, рифмуется с блобом и формами MD3E. */
+private val Rounded = FontFamily(
+    listOf(400, 500, 600, 700, 800, 900, 1000).map { w ->
+        Font(R.font.nunito, FontWeight(w), variationSettings = FontVariation.Settings(FontVariation.weight(w)))
     },
 )
 
 private fun typography(): Typography {
     val t = Typography()
-    fun TextStyle.display(tracking: Float) = copy(fontFamily = Display, letterSpacing = tracking.sp)
+    fun TextStyle.r(tracking: Float = letterSpacing.value) = copy(fontFamily = Rounded, letterSpacing = tracking.sp)
     return t.copy(
-        displayLarge = t.displayLarge.display(-1.5f),
-        displayMedium = t.displayMedium.display(-1f),
-        displaySmall = t.displaySmall.display(-0.5f),
-        headlineLarge = t.headlineLarge.display(-0.5f),
-        headlineMedium = t.headlineMedium.display(-0.3f),
-        headlineSmall = t.headlineSmall.display(-0.2f),
-        titleLarge = t.titleLarge.display(0f),
+        displayLarge = t.displayLarge.r(-1f),
+        displayMedium = t.displayMedium.r(-0.6f),
+        displaySmall = t.displaySmall.r(-0.3f),
+        headlineLarge = t.headlineLarge.r(-0.3f),
+        headlineMedium = t.headlineMedium.r(-0.2f),
+        headlineSmall = t.headlineSmall.r(),
+        titleLarge = t.titleLarge.r(),
+        titleMedium = t.titleMedium.r(),
+        titleSmall = t.titleSmall.r(),
+        bodyLarge = t.bodyLarge.r(),
+        bodyMedium = t.bodyMedium.r(),
+        bodySmall = t.bodySmall.r(),
+        labelLarge = t.labelLarge.r(),
+        labelMedium = t.labelMedium.r(),
+        labelSmall = t.labelSmall.r(),
     )
 }
 
@@ -342,8 +356,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     val scope = rememberCoroutineScope()
     val nav = remember { Nav(app) }
     // Позже объявленный обработчик главнее: сначала сворачивается сцена, потом страницы.
-    BackHandler(nav.stack.isNotEmpty()) { nav.back() }
-    BackHandler(nav.stage) { nav.stage = false }
+    // «Назад» со страниц и сцены — предиктивный (PredictiveBackHandler в PageHost и Stage).
     val clock = rememberPlayClock(s)
     val hasTrack = s.track != null
     val now = NowMark(s.track?.id, !s.paused)
@@ -435,6 +448,10 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
             ),
         )
         Column(Modifier.fillMaxSize().statusBarsPadding().padding(top = 24.dp, bottom = 120.dp)) {
+            val now = s.track
+            if (waveOn && now != null && !s.waveLoading) {
+                WaveNow(app, s, now, Modifier.weight(1f))
+            } else {
             Column(Modifier.padding(horizontal = 24.dp)) {
                 ScrambleText(
                     if (waveOn) s.waveName.ifEmpty { "Моя волна" } else "Моя волна",
@@ -461,6 +478,7 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
                     })
                 }
             }
+            }
             if (presets.isNotEmpty()) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 20.dp),
@@ -474,6 +492,93 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
                 }
             }
         }
+    }
+}
+
+/**
+ * Играет волна: в центре — исполнитель (имя крупно, его фото), обложка трека поверх фото,
+ * под ними пауза, название трека (тап — сцена) и «нравится», ниже — ближайший концерт.
+ */
+@Composable
+private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier) {
+    val card by app.artist.collectAsStateWithLifecycle()
+    val artist = card?.takeIf { it.artistId == t.artistId }
+    val nav = LocalNav.current
+    val uri = androidx.compose.ui.platform.LocalUriHandler.current
+    Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        // Какая волна играет — тихой подписью, главное на экране — исполнитель.
+        Text(
+            s.waveName.ifEmpty { "Моя волна" },
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        ScrambleText(
+            artist?.name ?: t.artists,
+            MaterialTheme.typography.displayMedium.copy(fontWeight = FontWeight.Black, textAlign = TextAlign.Center),
+            MaterialTheme.colorScheme.onSurface,
+            Modifier.padding(horizontal = 24.dp).basicMarquee(initialDelayMillis = 2000),
+        )
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+            val side = minOf(maxWidth - 64.dp, maxHeight - 48.dp, 360.dp).coerceAtLeast(120.dp)
+            val small = (side * 0.34f).coerceIn(72.dp, 120.dp)
+            Box(Modifier.size(side, side + small / 2), contentAlignment = Alignment.TopCenter) {
+                // Фото исполнителя (или обложка, если фото нет); концентрично: 48 снаружи.
+                Art(app, artist?.photo ?: t.cover, Modifier.size(side), corner = 48.dp)
+                // Обложка трека наполовину на фото, в ободке цвета фона — читается как отдельный слой.
+                // Фото нет — крупно и так обложка, второй раз её не показываем.
+                if (artist?.photo != null) Box(
+                    Modifier.align(Alignment.BottomCenter).size(small + 8.dp).clip(RoundedCornerShape(28.dp))
+                        .background(MaterialTheme.colorScheme.background).padding(4.dp),
+                ) {
+                    Art(app, t.cover, Modifier.fillMaxSize(), corner = 24.dp)
+                }
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            PlayButton(!s.paused, 64.dp, onClick = { app.core.playPause() })
+            // Название трека — пилюлей той же высоты; тап открывает сцену.
+            Column(
+                Modifier.weight(1f).height(64.dp).clip(RoundedCornerShape(32.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.8f))
+                    .clickable { nav.stage = true }.padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(t.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1,
+                    modifier = Modifier.basicMarquee(initialDelayMillis = 2000))
+                if (artist != null && t.album.isNotEmpty()) {
+                    Text(t.album, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            ShapeIconButton(
+                if (s.liked) Ic.Heart else Ic.HeartOutline,
+                "Нравится",
+                { app.core.toggleLike() },
+                size = 64.dp,
+                container = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.8f),
+                tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        val concert = artist?.concert
+        if (concert != null) {
+            val url = artist.concertUrl
+            Column(
+                Modifier.padding(top = 14.dp).clip(RoundedCornerShape(20.dp))
+                    .clickable(enabled = url != null) { url?.let(uri::openUri) }.padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("Концерт $concert", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                if (url != null) {
+                    Text("Билеты на Афише", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -804,11 +909,48 @@ private fun Stage(
     val scope = rememberCoroutineScope()
     val dy = remember { Animatable(0f) }
     val density = LocalDensity.current
-    val dismiss = with(density) { 80.dp.toPx() }
+    // Палец ушёл вниз на столько — сворачиваемся сразу, не дожидаясь, пока отпустят.
+    val dismiss = with(density) { 72.dp.toPx() }
+    val skip = with(density) { 56.dp.toPx() }
+    // Карусель очереди: её листает свайп по всей сцене, а не только по обложке.
+    val q by app.queue.collectAsStateWithLifecycle()
+    val items = q.second
+    val pos = s.queuePos?.toInt()
+    val carousel = pos != null && pos in items.indices && items[pos].id == t.id
+    val pager = rememberPagerState(initialPage = pos?.coerceIn(0, (items.size - 1).coerceAtLeast(0)) ?: 0) { items.size }
+    val current by rememberUpdatedState(pos)
+    var auto by remember { mutableStateOf(false) }
+    // Трек сменился не свайпом (кнопка, конец трека) — карусель догоняет.
+    LaunchedEffect(pos, items.size, carousel) {
+        if (carousel && pos != null && pager.currentPage != pos) {
+            auto = true
+            try {
+                if (kotlin.math.abs(pager.currentPage - pos) > 3) pager.scrollToPage(pos) else pager.animateScrollToPage(pos)
+            } finally {
+                auto = false
+            }
+        }
+    }
+    LaunchedEffect(pager) {
+        snapshotFlow { pager.settledPage }.collect { p ->
+            if (!auto && p != current && p in items.indices) app.core.playFrom(uniffi.yamusic_android.Source.Queue, p.toUInt())
+        }
+    }
     val lyricsOn = showLyrics && lyrics != null
     val scrim by animateFloatAsState(if (lyricsOn) 0.62f else 0f, tween(400), label = "scrim")
     // Чем дальше утянули, тем сильнее скругление и меньше масштаб — видно, что сворачивается.
-    val pull = (dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f)
+    // Предиктивный «назад»: сцена уменьшается и скругляется за жестом, отпустили — сворачивается.
+    var back by remember { mutableFloatStateOf(0f) }
+    PredictiveBackHandler { progress ->
+        try {
+            progress.collect { back = it.progress }
+            close()
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            androidx.compose.animation.core.animate(back, 0f) { v, _ -> back = v }
+            throw e
+        }
+    }
+    val pull = maxOf((dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f), back * 0.6f)
     with(shared) {
         Box(
             Modifier
@@ -827,17 +969,63 @@ private fun Stage(
                     clip = pull > 0f
                 }
                 .background(MaterialTheme.colorScheme.background)
-                .pointerInput(Unit) {
-                    detectVerticalDragGestures(
-                        onDragEnd = {
-                            scope.launch {
-                                if (dy.value > dismiss) close() else dy.animateTo(0f, spring(dampingRatio = 0.75f))
+                .pointerInput(carousel, items.size) {
+                    // Один жест на всю сцену: вбок — соседний трек (карусель едет за пальцем),
+                    // вниз — свернуть. Что уже забрал ребёнок (перемотка, текст песни), не трогаем.
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val vt = VelocityTracker()
+                        vt.addPosition(down.uptimeMillis, down.position)
+                        var axis = 0
+                        var total = Offset.Zero
+                        var closed = false
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!ch.pressed) break
+                            if (ch.isConsumed && axis == 0) return@awaitEachGesture
+                            val d = ch.positionChange()
+                            total += d
+                            vt.addPosition(ch.uptimeMillis, ch.position)
+                            if (axis == 0 && total.getDistance() > viewConfiguration.touchSlop) {
+                                axis = if (kotlin.math.abs(total.x) > kotlin.math.abs(total.y)) 1 else 2
                             }
-                        },
-                        onDragCancel = { scope.launch { dy.animateTo(0f) } },
-                    ) { change, d ->
-                        change.consume()
-                        scope.launch { dy.snapTo((dy.value + d).coerceAtLeast(0f)) }
+                            when (axis) {
+                                1 -> {
+                                    if (carousel) pager.dispatchRawDelta(-d.x)
+                                    ch.consume()
+                                }
+                                2 -> {
+                                    ch.consume()
+                                    if (!closed) {
+                                        // Экран почти не едет за пальцем — сразу сворачивается в пилюлю.
+                                        scope.launch { dy.snapTo((total.y * 0.35f).coerceAtLeast(0f)) }
+                                        if (total.y > dismiss) {
+                                            closed = true
+                                            close()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        val v = vt.calculateVelocity()
+                        when {
+                            axis == 1 && carousel -> {
+                                val f = pager.currentPageOffsetFraction
+                                val target = when {
+                                    v.x < -600f -> pager.currentPage + if (f > -0.2f) 1 else 0
+                                    v.x > 600f -> pager.currentPage - if (f < 0.2f) 1 else 0
+                                    f > 0.15f -> pager.currentPage + 1
+                                    f < -0.15f -> pager.currentPage - 1
+                                    else -> pager.currentPage
+                                }.coerceIn(0, (items.size - 1).coerceAtLeast(0))
+                                scope.launch { pager.animateScrollToPage(target) }
+                            }
+                            axis == 1 && total.x < -skip -> app.core.next()
+                            axis == 1 && total.x > skip -> app.core.prev()
+                            axis == 2 && !closed && v.y > 1400f -> close()
+                            axis == 2 && !closed -> scope.launch { dy.animateTo(0f, spring(dampingRatio = 0.75f)) }
+                        }
                     }
                 },
         ) {
@@ -892,7 +1080,7 @@ private fun Stage(
                             if (lyricsOn && lyrics != null) {
                                 LyricsView(app, lyrics, clock)
                             } else {
-                                CoverCarousel(app, s, t, maxWidth, maxHeight, shared, visibility)
+                                CoverCarousel(app, t, items, pos, carousel, pager, maxWidth, maxHeight, shared, visibility)
                             }
                         }
                     }
@@ -918,47 +1106,28 @@ private fun Stage(
 }
 
 /**
- * Обложки очереди каруселью: соседние выглядывают по краям, свайп листает и включает трек.
+ * Обложки очереди каруселью: соседние выглядывают по краям, листает её свайп по всей сцене.
  * Если очередь ещё не пришла или не совпадает с играющим — одна обложка со свайпом.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun CoverCarousel(
     app: YaApp,
-    s: PlayerState,
     t: TrackItem,
+    items: List<TrackItem>,
+    pos: Int?,
+    carousel: Boolean,
+    pager: androidx.compose.foundation.pager.PagerState,
     width: Dp,
     height: Dp,
     shared: SharedTransitionScope,
     visibility: AnimatedVisibilityScope,
 ) {
-    val q by app.queue.collectAsStateWithLifecycle()
-    val items = q.second
-    val pos = s.queuePos?.toInt()
-    // Обложка поуже экрана, чтобы соседние были видны.
-    val side = minOf(width * 0.8f, height, 560.dp)
-    if (pos == null || pos !in items.indices || items[pos].id != t.id) {
+    // Обложка почти во всю ширину; соседние всё равно выглядывают.
+    val side = minOf(width * 0.88f, height, 600.dp)
+    if (!carousel || pos == null) {
         SwipeCover(app, t, side, shared, visibility)
         return
-    }
-    val pager = rememberPagerState(initialPage = pos) { items.size }
-    val current by rememberUpdatedState(pos)
-    var auto by remember { mutableStateOf(false) }
-    // Трек сменился не свайпом (кнопка, конец трека) — карусель догоняет.
-    LaunchedEffect(pos, items.size) {
-        if (pager.currentPage != pos) {
-            auto = true
-            try {
-                if (kotlin.math.abs(pager.currentPage - pos) > 3) pager.scrollToPage(pos) else pager.animateScrollToPage(pos)
-            } finally {
-                auto = false
-            }
-        }
-    }
-    LaunchedEffect(pager) {
-        snapshotFlow { pager.settledPage }.collect { p ->
-            if (!auto && p != current && p in items.indices) app.core.playFrom(uniffi.yamusic_android.Source.Queue, p.toUInt())
-        }
     }
     // Карусель шире колонки сцены (её отступы по 24) — соседние обложки доходят до края экрана.
     val full = width + 48.dp
@@ -966,7 +1135,7 @@ private fun CoverCarousel(
         pager,
         Modifier.requiredWidth(full),
         contentPadding = PaddingValues(horizontal = (full - side) / 2),
-        pageSpacing = 12.dp,
+        pageSpacing = 10.dp,
         beyondViewportPageCount = 1,
         verticalAlignment = Alignment.CenterVertically,
         flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.15f),

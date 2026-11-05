@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Монохромная версия для тематических значков (Material You): система красит её в цвета обоев. Адаптивная иконка: буква — в безопасных центральных 66dp, лучи уходят за край. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FF000000" android:pathData="M49.84,69.41L5.70,98.74L1.30,91.12L48.77,67.56Z M45.16,66.71L15.01,77.44L13.63,72.93L44.63,64.97Z M47.15,62.25L-5.39,69.26L-6.00,60.49L47.00,60.12Z M44.12,57.77L12.32,54.20L13.06,49.54L44.41,55.98Z M47.87,54.63L-2.42,37.90L0.87,29.75L48.67,52.65Z M47.11,49.28L20.09,32.14L22.80,28.27L48.15,47.80Z M51.85,48.11L13.99,11.02L20.52,5.14L53.44,46.68Z M53.52,42.97L36.75,15.71L40.88,13.42L55.11,42.09Z M58.30,43.99L40.52,-5.94L48.97,-8.37L60.35,43.40Z M62.05,40.10L58.93,8.25L63.64,8.00L63.86,40.00Z M65.89,43.11L71.80,-9.56L80.46,-8.04L68.00,43.48Z M70.97,41.25L82.13,11.26L86.47,13.10L72.64,41.96Z" />
+    <path
+        android:pathData="M57,77L57,53L63,53A6,6 0,0 1,63,65L57,65M63,65L70,77"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="6.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>
