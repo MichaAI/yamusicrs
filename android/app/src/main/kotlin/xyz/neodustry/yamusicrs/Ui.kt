@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.foundation.MutatePriority
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.derivedStateOf
@@ -355,6 +357,10 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     val pager = rememberPagerState { Tab.entries.size }
     val scope = rememberCoroutineScope()
     val nav = remember { Nav(app) }
+    // Со вкладки, кроме первой, «назад» ведёт на «Волну», а не закрывает приложение.
+    androidx.activity.compose.BackHandler(!nav.stage && nav.stack.isEmpty() && pager.currentPage != 0) {
+        scope.launch { pager.animateScrollToPage(0) }
+    }
     // Позже объявленный обработчик главнее: сначала сворачивается сцена, потом страницы.
     // «Назад» со страниц и сцены — предиктивный (PredictiveBackHandler в PageHost и Stage).
     val clock = rememberPlayClock(s)
@@ -785,7 +791,7 @@ private fun MiniPlayer(
                                         dx.animateTo(0f, spring(dampingRatio = 0.8f))
                                     }
                                     x > skip -> {
-                                        app.core.prev()
+                                        app.core.prevTrack()
                                         dx.animateTo(size.width.toFloat(), tween(160))
                                         dx.snapTo(-size.width.toFloat() * 0.4f)
                                         dx.animateTo(0f, spring(dampingRatio = 0.8f))
@@ -903,25 +909,22 @@ private fun Stage(
     val pos = s.queuePos?.toInt()
     val carousel = pos != null && pos in items.indices && items[pos].id == t.id
     val pager = rememberPagerState(initialPage = pos?.coerceIn(0, (items.size - 1).coerceAtLeast(0)) ?: 0) { items.size }
-    val current by rememberUpdatedState(pos)
-    var auto by remember { mutableStateOf(false) }
-    // Трек сменился не свайпом (кнопка, конец трека) — карусель догоняет.
-    LaunchedEffect(pos, items.size, carousel) {
-        if (carousel && pos != null && pager.currentPage != pos) {
-            auto = true
-            try {
-                if (kotlin.math.abs(pager.currentPage - pos) > 3) pager.scrollToPage(pos) else pager.animateScrollToPage(pos)
-            } finally {
-                auto = false
-            }
-        }
-    }
-    LaunchedEffect(pager) {
-        snapshotFlow { pager.settledPage }.collect { p ->
-            if (!auto && p != current && p in items.indices) app.core.playFrom(uniffi.yamusic_android.Source.Queue, p.toUInt())
-        }
-    }
     val lyricsOn = showLyrics && lyrics != null
+    // Под текстом песни карусели нет — свайп вбок просто листает треки.
+    val pages = carousel && !lyricsOn
+    // Жест живёт дольше одной рекомпозиции (волна дописывает очередь посреди свайпа),
+    // поэтому читает свежие значения отсюда, а не перезапускается.
+    val curPos by rememberUpdatedState(pos)
+    val curItems by rememberUpdatedState(items)
+    val curPages by rememberUpdatedState(pages)
+    val swipe = remember { SwipeState() }
+    // Трек сменился не свайпом (кнопка, конец трека) — карусель догоняет. Пока палец
+    // на сцене или карусель доезжает после свайпа, не вмешиваемся.
+    LaunchedEffect(pos, pages, swipe.active) {
+        if (!pages || pos == null || swipe.active) return@LaunchedEffect
+        if (pager.currentPage == pos && pager.currentPageOffsetFraction == 0f) return@LaunchedEffect
+        if (kotlin.math.abs(pager.currentPage - pos) > 3) pager.scrollToPage(pos) else pager.animateScrollToPage(pos)
+    }
     val scrim by animateFloatAsState(if (lyricsOn) 0.62f else 0f, tween(400), label = "scrim")
     // Чем дальше утянули, тем сильнее скругление и меньше масштаб — видно, что сворачивается.
     // Предиктивный «назад»: сцена уменьшается и скругляется за жестом, отпустили — сворачивается.
@@ -935,7 +938,7 @@ private fun Stage(
             throw e
         }
     }
-    val pull = maxOf((dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f), back * 0.6f)
+    val pull = maxOf((dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f), back)
     with(shared) {
         Box(
             Modifier
@@ -947,14 +950,16 @@ private fun Stage(
                     clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(32.dp)),
                 )
                 .graphicsLayer {
-                    val k = 1f - pull * 0.08f
+                    val k = 1f - pull * 0.1f
                     scaleX = k
                     scaleY = k
+                    // «Назад» тянет сцену вниз, к мини-плееру, куда она и свернётся.
+                    translationY = back * 64.dp.toPx()
                     shape = RoundedCornerShape((pull * 40).dp)
                     clip = pull > 0f
                 }
                 .background(MaterialTheme.colorScheme.background)
-                .pointerInput(carousel, items.size) {
+                .pointerInput(Unit) {
                     // Один жест на всю сцену: вбок — соседний трек (карусель едет за пальцем),
                     // вниз — свернуть. Что уже забрал ребёнок (перемотка, текст песни), не трогаем.
                     awaitEachGesture {
@@ -964,6 +969,7 @@ private fun Stage(
                         var axis = 0
                         var total = Offset.Zero
                         var closed = false
+                        var start = pager.currentPage
                         while (true) {
                             val ev = awaitPointerEvent()
                             val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
@@ -974,10 +980,17 @@ private fun Stage(
                             vt.addPosition(ch.uptimeMillis, ch.position)
                             if (axis == 0 && total.getDistance() > viewConfiguration.touchSlop) {
                                 axis = if (kotlin.math.abs(total.x) > kotlin.math.abs(total.y)) 1 else 2
+                                if (axis == 1 && curPages) {
+                                    // Перехватываем карусель, где бы она ни была: доезд прошлого
+                                    // свайпа и догонялка останавливаются, листаем от видимой страницы.
+                                    swipe.grab()
+                                    scope.launch { pager.stopScroll(MutatePriority.UserInput) }
+                                    start = kotlin.math.round(pager.currentPage + pager.currentPageOffsetFraction).toInt()
+                                }
                             }
                             when (axis) {
                                 1 -> {
-                                    if (carousel) pager.dispatchRawDelta(-d.x)
+                                    if (curPages) pager.dispatchRawDelta(-d.x)
                                     ch.consume()
                                 }
                                 2 -> {
@@ -995,22 +1008,31 @@ private fun Stage(
                         }
                         val v = vt.calculateVelocity()
                         when {
-                            axis == 1 && carousel -> {
-                                val f = pager.currentPageOffsetFraction
+                            axis == 1 && curPages -> {
+                                val n = curItems.size
+                                // Где карусель сейчас, считая от страницы, с которой начали.
+                                val at = pager.currentPage + pager.currentPageOffsetFraction
                                 val target = when {
-                                    v.x < -600f -> pager.currentPage + if (f > -0.2f) 1 else 0
-                                    v.x > 600f -> pager.currentPage - if (f < 0.2f) 1 else 0
-                                    f > 0.15f -> pager.currentPage + 1
-                                    f < -0.15f -> pager.currentPage - 1
-                                    else -> pager.currentPage
-                                }.coerceIn(0, (items.size - 1).coerceAtLeast(0))
-                                scope.launch { pager.animateScrollToPage(target) }
+                                    v.x < -600f -> kotlin.math.floor(at).toInt() + 1
+                                    v.x > 600f -> kotlin.math.ceil(at).toInt() - 1
+                                    else -> start + pageStep(at - start)
+                                }.coerceIn(0, (n - 1).coerceAtLeast(0))
+                                val playing = curPos
+                                when {
+                                    // Дальше очереди некуда: у волны это «догрузи ещё».
+                                    target == start && start == n - 1 && total.x < -skip -> app.core.next()
+                                    // Вернули на место — ничего не трогаем (играющий мог смениться сам).
+                                    target != start && target != playing && target in curItems.indices ->
+                                        app.core.playFrom(uniffi.yamusic_android.Source.Queue, target.toUInt())
+                                }
+                                swipe.settle(scope) { pager.animateScrollToPage(target) }
                             }
                             axis == 1 && total.x < -skip -> app.core.next()
-                            axis == 1 && total.x > skip -> app.core.prev()
+                            axis == 1 && total.x > skip -> app.core.prevTrack()
                             axis == 2 && !closed && v.y > 1400f -> close()
                             axis == 2 && !closed -> scope.launch { dy.animateTo(0f, spring(dampingRatio = 0.75f)) }
                         }
+                        if (axis == 1 && !curPages) swipe.drop()
                     }
                 },
         ) {
@@ -1065,7 +1087,7 @@ private fun Stage(
                             if (lyricsOn && lyrics != null) {
                                 LyricsView(app, lyrics, clock)
                             } else {
-                                CoverCarousel(app, t, items, pos, carousel, pager, maxWidth, maxHeight, shared, visibility)
+                                CoverCarousel(app, t, items, pos, pages, pager, maxWidth, maxHeight, shared, visibility)
                             }
                         }
                     }
@@ -1087,6 +1109,52 @@ private fun Stage(
                 }
             }
         }
+    }
+}
+
+/** На сколько страниц листать по сдвигу `d` (в страницах): хватает 15% страницы. */
+private fun pageStep(d: Float): Int {
+    val a = kotlin.math.abs(d)
+    val whole = kotlin.math.floor(a).toInt()
+    val n = whole + if (a - whole > 0.15f) 1 else 0
+    return if (d < 0) -n else n
+}
+
+/**
+ * Свайп по карусели: палец на сцене или карусель доезжает до выбранной страницы.
+ * Новый свайп отменяет доезд прошлого; сброс флага — только от последнего.
+ */
+private class SwipeState {
+    var active by mutableStateOf(false)
+        private set
+    private var job: kotlinx.coroutines.Job? = null
+
+    fun grab() {
+        job?.cancel()
+        job = null
+        active = true
+    }
+
+    fun settle(scope: kotlinx.coroutines.CoroutineScope, block: suspend () -> Unit) {
+        job?.cancel()
+        val j = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                block()
+            } finally {
+                if (job === coroutineContext[kotlinx.coroutines.Job]) {
+                    job = null
+                    active = false
+                }
+            }
+        }
+        job = j
+        active = true
+        j.start()
+    }
+
+    /** Свайп кончился без доезда (карусель пропала посреди жеста). */
+    fun drop() {
+        if (job == null) active = false
     }
 }
 
@@ -1122,6 +1190,8 @@ private fun CoverCarousel(
         contentPadding = PaddingValues(horizontal = (full - side) / 2),
         pageSpacing = 10.dp,
         beyondViewportPageCount = 1,
+        // Листает её жест сцены — один на всю сцену, с одними порогами.
+        userScrollEnabled = false,
         verticalAlignment = Alignment.CenterVertically,
         flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.15f),
     ) { page ->
@@ -1177,7 +1247,7 @@ private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransit
                                         dx.animateTo(0f, spring(dampingRatio = 0.8f))
                                     }
                                     dx.value > skip -> {
-                                        app.core.prev()
+                                        app.core.prevTrack()
                                         dx.animateTo(w * 1.2f, tween(180))
                                         dx.snapTo(-w * 0.5f)
                                         dx.animateTo(0f, spring(dampingRatio = 0.8f))

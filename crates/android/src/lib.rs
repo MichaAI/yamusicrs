@@ -210,6 +210,7 @@ enum Cmd {
     Pause,
     Next,
     Prev,
+    PrevTrack,
     Seek(u64),
     PlayLikes(u32),
     PlayQueue(u32),
@@ -306,6 +307,11 @@ impl Core {
 
     pub fn prev(&self) {
         self.send(Cmd::Prev);
+    }
+
+    /// Предыдущий трек, даже если текущий играет дольше 4 с (свайп).
+    pub fn prev_track(&self) {
+        self.send(Cmd::PrevTrack);
     }
 
     pub fn seek(&self, position_ms: u64) {
@@ -682,6 +688,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
         }
         Cmd::Next => e.next(),
         Cmd::Prev => e.prev(),
+        Cmd::PrevTrack => e.prev_track(),
         Cmd::Seek(ms) => e.seek_to(ms as f64 / 1000.0),
         Cmd::PlayLikes(i) => {
             if let Loadable::Ready(v) = &e.likes {

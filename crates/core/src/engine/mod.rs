@@ -1151,6 +1151,9 @@ impl Engine {
         self.requested = Some(token);
         self.start_paused = paused.then_some(token);
         self.next_loaded = None;
+        // Заранее загруженный следующий больше не следующий: иначе, если текущий успеет
+        // доиграть до загрузки выбранного, наплыв уйдёт в него.
+        self.player.clear_next();
         self.queue.pos = Some(idx);
         let track = self.queue.items[idx].clone();
         self.loading_track = Some(track.clone());
@@ -1532,10 +1535,16 @@ impl Engine {
     }
 
     pub fn prev(&mut self) {
-        if self.now.as_ref().is_some_and(|n| n.pos > 4.0) {
+        // Пока грузится выбранный трек, `now` — ещё прежний: его не перематываем, а листаем дальше назад.
+        if self.loading_track.is_none() && self.now.as_ref().is_some_and(|n| n.pos > 4.0) {
             self.seek_to(0.0);
             return;
         }
+        self.prev_track();
+    }
+
+    /// Предыдущий трек очереди без «сначала в начало текущего» — для свайпа.
+    pub fn prev_track(&mut self) {
         if let Some(p) = self.queue.pos
             && let Some(i) = (0..p).rev().find(|&i| self.playable(i))
         {

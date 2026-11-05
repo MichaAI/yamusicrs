@@ -3,6 +3,12 @@
 package xyz.neodustry.yamusicrs
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.SeekableTransitionState
+import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.rememberTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -110,46 +116,56 @@ val LocalNow = compositionLocalOf { NowMark(null, false) }
 
 /**
  * Верх стека — поверх вкладок; въезжает справа, уезжает вправо. Жест «назад» предиктивный:
- * страница уменьшается, скругляется и отъезжает за пальцем, отпустили — закрывается.
+ * переход к странице под ней идёт за пальцем — верхняя уменьшается, скругляется и отъезжает,
+ * нижняя (или вкладки) проступает. Отпустили — доезжает, передумали — возвращается.
  */
 @Composable
 fun PageHost(app: YaApp, nav: Nav) {
-    var back by remember { mutableFloatStateOf(0f) }
+    val top = nav.stack.lastOrNull()
+    val state = remember { SeekableTransitionState(top) }
+    val pageTransition = rememberTransition(state, label = "page")
+    // С какого края тянут: от правого страница уезжает влево.
     var edge by remember { mutableIntStateOf(androidx.activity.BackEventCompat.EDGE_LEFT) }
+    // Открыли, закрыли кнопкой, сменили вкладку — обычный переход.
+    LaunchedEffect(top) {
+        if (state.currentState != top || state.targetState != top) state.animateTo(top)
+    }
     androidx.activity.compose.PredictiveBackHandler(enabled = nav.stack.isNotEmpty() && !nav.stage) { progress ->
+        val below = nav.stack.getOrNull(nav.stack.size - 2)
         try {
             progress.collect {
-                back = it.progress
                 edge = it.swipeEdge
+                state.seekTo(it.progress, below)
             }
+            // Сначала доезжаем, потом выкидываем страницу: иначе уходящая мигнёт пустой.
+            state.animateTo(below)
             nav.back()
-            back = 0f
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            androidx.compose.animation.core.animate(back, 0f) { v, _ -> back = v }
+            state.animateTo(state.currentState)
             throw e
         }
     }
-    AnimatedContent(
-        nav.stack.lastOrNull(),
+    pageTransition.AnimatedContent(
         transitionSpec = {
             val fwd = (targetState?.id ?: 0u) > (initialState?.id ?: 0u)
-            (slideInHorizontally { if (fwd) it / 3 else -it / 3 } + fadeIn()) togetherWith
-                (slideOutHorizontally { if (fwd) -it / 3 else it / 3 } + fadeOut())
+            if (fwd) {
+                (slideInHorizontally { it / 3 } + fadeIn()) togetherWith (slideOutHorizontally { -it / 3 } + fadeOut())
+            } else {
+                val dir = if (edge == androidx.activity.BackEventCompat.EDGE_RIGHT) -1 else 1
+                (slideInHorizontally { -dir * it / 4 } + fadeIn()) togetherWith
+                    (slideOutHorizontally { dir * it / 4 } + scaleOut(targetScale = 0.88f) + fadeOut(tween(easing = { f -> (f * 1.6f - 0.6f).coerceIn(0f, 1f) })))
+            }.using(SizeTransform(clip = false))
         },
-        label = "page",
+        contentKey = { it?.id },
     ) { route ->
         if (route != null) {
-            val dir = if (edge == androidx.activity.BackEventCompat.EDGE_LEFT) 1f else -1f
+            // Уходящая назад страница скругляется, пока едет.
+            val corner by this.transition.animateDp(label = "corner") {
+                if (it == androidx.compose.animation.EnterExitState.PostExit && !fwdOf(pageTransition)) 36.dp else 0.dp
+            }
             Box(
                 Modifier.fillMaxSize()
-                    .graphicsLayer {
-                        val k = 1f - 0.1f * back
-                        scaleX = k
-                        scaleY = k
-                        translationX = dir * back * 32.dp.toPx()
-                        shape = RoundedCornerShape((back * 36).dp)
-                        clip = back > 0f
-                    }
+                    .clip(RoundedCornerShape(corner))
                     .background(MaterialTheme.colorScheme.background),
             ) {
                 PageView(app, nav, route)
@@ -160,11 +176,19 @@ fun PageHost(app: YaApp, nav: Nav) {
     }
 }
 
+/** Переход вглубь стека (а не назад). */
+private fun fwdOf(t: androidx.compose.animation.core.Transition<Route?>) =
+    (t.targetState?.id ?: 0u) > (t.currentState?.id ?: 0u)
+
 @Composable
 private fun PageView(app: YaApp, nav: Nav, route: Route) {
     val pages by app.pages.collectAsStateWithLifecycle()
     val src = Source.Page(route.id)
-    when (val p = pages[route.id]) {
+    // Закрытая страница ещё уезжает — держим последний ответ, а не спиннер.
+    var last by remember(route.id) { mutableStateOf<Page?>(null) }
+    val fresh = pages[route.id]
+    if (fresh != null && fresh !== last) last = fresh
+    when (val p = fresh ?: last) {
         null -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
             TopBar(route.title, nav)
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator(Modifier.size(72.dp)) }
