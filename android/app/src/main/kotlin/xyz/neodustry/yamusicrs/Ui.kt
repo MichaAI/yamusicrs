@@ -497,14 +497,13 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
 
 /**
  * Играет волна: в центре — исполнитель (имя крупно, его фото), обложка трека поверх фото,
- * под ними пауза, название трека (тап — сцена) и «нравится», ниже — ближайший концерт.
+ * под ними пауза, название трека (тап — сцена) и «нравится».
  */
 @Composable
 private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier) {
     val card by app.artist.collectAsStateWithLifecycle()
     val artist = card?.takeIf { it.artistId == t.artistId }
     val nav = LocalNav.current
-    val uri = androidx.compose.ui.platform.LocalUriHandler.current
     Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         // Какая волна играет — тихой подписью, главное на экране — исполнитель.
         Text(
@@ -563,20 +562,6 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                 container = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.8f),
                 tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             )
-        }
-        val concert = artist?.concert
-        if (concert != null) {
-            val url = artist.concertUrl
-            Column(
-                Modifier.padding(top = 14.dp).clip(RoundedCornerShape(20.dp))
-                    .clickable(enabled = url != null) { url?.let(uri::openUri) }.padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text("Концерт $concert", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                if (url != null) {
-                    Text("Билеты на Афише", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-                }
-            }
         }
         Spacer(Modifier.height(16.dp))
     }
