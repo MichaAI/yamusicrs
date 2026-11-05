@@ -57,7 +57,7 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
     private val noisy = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
-                android.util.Log.i("yamusicrs", "наушники отключились — пауза")
+                ylog("наушники отключились — пауза")
                 app.core.pause()
             }
         }
@@ -104,7 +104,7 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
     }
 
     private fun onFocus(change: Int) {
-        android.util.Log.i("yamusicrs", "аудиофокус: $change")
+        ylog("аудиофокус: $change")
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 hasFocus = false
@@ -165,7 +165,7 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
-        android.util.Log.i("yamusicrs", "медиасессия: playWhenReady=$playWhenReady")
+        ylog("медиасессия: playWhenReady=$playWhenReady")
         if (playWhenReady) app.core.play() else app.core.pause()
         return Futures.immediateVoidFuture()
     }
@@ -180,7 +180,7 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
     }
 
     override fun handleStop(): ListenableFuture<*> {
-        android.util.Log.i("yamusicrs", "медиасессия: stop")
+        ylog("медиасессия: stop")
         app.core.pause()
         return Futures.immediateVoidFuture()
     }

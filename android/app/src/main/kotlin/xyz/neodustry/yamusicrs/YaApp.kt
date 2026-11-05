@@ -32,6 +32,12 @@ import uniffi.yamusic_android.WavePreset
 /** Текст играющего трека: `lyrics == null` — текста нет. */
 data class TrackLyrics(val trackId: String, val lyrics: LyricsData?)
 
+/** Строка в общий лог (logcat + файл …/files/logs/yamusicrs.log, его adb читает всегда). */
+fun ylog(text: String) {
+    android.util.Log.i("yamusicrs", text)
+    YaApp.instance?.takeIf { it.ready }?.core?.log(text)
+}
+
 /** Ядро на весь процесс: его делят экран и медиасервис. Колбэки приходят из потока движка. */
 class YaApp : Application(), CoreListener {
     val state = MutableStateFlow<PlayerState?>(null)
@@ -54,6 +60,14 @@ class YaApp : Application(), CoreListener {
     lateinit var core: Core
         private set
 
+    internal val ready get() = ::core.isInitialized
+
+    companion object {
+        @Volatile
+        var instance: YaApp? = null
+            private set
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     /** Обложки и миниатюры в памяти: четверть кучи (48–192 МБ) — листание не выталкивает соседей. */
@@ -65,6 +79,7 @@ class YaApp : Application(), CoreListener {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         val music = getExternalFilesDir("music") ?: File(filesDir, "music")
         val name = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
             .filter { it.isNotBlank() }.distinct().joinToString(" ")

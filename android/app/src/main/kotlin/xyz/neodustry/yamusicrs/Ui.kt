@@ -1108,13 +1108,10 @@ private fun Stage(
     var backEdge by remember { mutableIntStateOf(androidx.activity.BackEventCompat.EDGE_LEFT) }
     PredictiveBackHandler(enabled = true) { progress ->
         try {
-            android.util.Log.i("yamusicrs", "сцена: жест назад начался")
             progress.collect {
-                android.util.Log.i("yamusicrs", "сцена: назад ${it.progress}")
                 backEdge = it.swipeEdge
                 back.snapTo(it.progress)
             }
-            android.util.Log.i("yamusicrs", "сцена: назад — свернуть")
             close()
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             scope.launch { back.animateTo(0f, spring(dampingRatio = 0.8f)) }

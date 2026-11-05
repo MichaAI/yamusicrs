@@ -292,6 +292,11 @@ impl Core {
         device_name: String,
         listener: Arc<dyn CoreListener>,
     ) -> Arc<Self> {
+        // Лог-файл рядом со скачанной музыкой: …/files/logs (adb читает без root).
+        #[cfg(target_os = "android")]
+        if let Some(files) = std::path::Path::new(&music_dir).parent() {
+            logcat::open_file(&files.join("logs"));
+        }
         init_logging();
         let (tx, rx) = unbounded_channel();
         let files = PathBuf::from(files_dir);
@@ -506,6 +511,11 @@ impl Core {
 
     pub fn forget_search(&self, query: String) {
         self.send(Cmd::ForgetSearch(query));
+    }
+
+    /// Строка от Kotlin в общий лог (logcat + файл).
+    pub fn log(&self, text: String) {
+        tracing::info!("{text}");
     }
 
     /// Сохранить сессию и остановить звук (приложение закрывается).
