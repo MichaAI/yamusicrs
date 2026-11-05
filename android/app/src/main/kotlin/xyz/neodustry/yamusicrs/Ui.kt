@@ -82,6 +82,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -615,9 +616,10 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                 val cutout = artist?.cutout
                 if (cutout != null) {
                     // Вырезанное фото — без рамки, прямо на блобе; низ растворяется к обложке.
+                    // Вырезка шире квадрата — на всю ширину экрана, низом к обложке, без обрезки.
                     Art(
                         app, cutout,
-                        Modifier.size(side).graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                        Modifier.requiredSize(this@BoxWithConstraints.maxWidth, side).graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
                             .drawWithContent {
                                 drawContent()
                                 drawRect(
@@ -626,6 +628,7 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                                 )
                             },
                         plain = true,
+                        align = Alignment.BottomCenter,
                     )
                 } else {
                     // Фото исполнителя (или обложка, если фото нет); концентрично: 48 снаружи.

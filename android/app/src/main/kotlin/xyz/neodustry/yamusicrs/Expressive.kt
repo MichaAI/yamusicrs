@@ -452,7 +452,7 @@ fun WavySeek(clock: PlayClock, durationMs: Long, playing: Boolean, onSeek: (Long
 
 /** Картинка по https; пока грузится — тонированная подложка. */
 @Composable
-fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain: Boolean = false) {
+fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain: Boolean = false, align: Alignment = Alignment.Center) {
     val bmp by produceState<Bitmap?>(app.cached(url), url) { value = url?.let { app.cover(it) } }
     val img = remember(bmp) { bmp?.asImageBitmap() }
     // plain — картинка как есть (иконки агентов волны с прозрачностью): без подложки и скругления.
@@ -465,7 +465,7 @@ fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain:
     }
     Box(box) {
         img?.let {
-            Image(it, null, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            Image(it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
     }
 }

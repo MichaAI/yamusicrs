@@ -67,7 +67,7 @@ pub struct ArtistCard {
     pub artist_id: String,
     pub name: String,
     pub photo: Option<String>,
-    /// Вырезанное фото с прозрачным фоном (PNG, 1000×1000); есть не у всех.
+    /// Вырезанное фото с прозрачным фоном (PNG до 1000 px, пропорции как в оригинале); есть не у всех.
     pub cutout: Option<String>,
 }
 
@@ -616,7 +616,8 @@ fn load_artist(
 ) {
     let Some(a) = t.artists.iter().find(|a| !a.id.is_empty()) else { return };
     // Вырезка приходит в самом треке (в /artists/{id}/info её нет) — берём оттуда.
-    let cutout = a.cutout_cover.as_ref().and_then(|c| c.uri.as_deref()).map(|u| api::cover_url(u, 1000));
+    // Размер с «m» вписывает в 1000×1000 без обрезки: «1000x1000» режет 1600×1280 до квадрата.
+    let cutout = a.cutout_cover.as_ref().and_then(|c| c.uri.as_deref()).map(|u| api::cover_url(u, 1000).replacen("1000x1000", "m1000x1000", 1));
     if let Some(slot) = cache.get(&a.id) {
         let mut slot = slot.lock();
         if let Some(card) = slot.as_mut() {
