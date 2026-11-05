@@ -1717,12 +1717,26 @@ impl Engine {
     pub fn load_wheel(&mut self) {
         self.spawn(|c, tx| async move {
             let (wheel, last) = tokio::join!(c.wheel(), c.wave_last());
+            // Последняя волна по исполнителю, альбому, треку или плейлисту, если её нет среди
+            // пресетов, — первой на дуге, как «продолжить» в десктопе. Служебные («Встряхнуть»,
+            // настройки характера) сюда не берём: их сиды каждый раз новые, а иконки у них нет.
+            let last = last.ok().filter(|l| {
+                let [seed] = l.seeds.as_slice() else { return false };
+                ["artist:", "album:", "track:", "playlist:"].iter().any(|p| seed.starts_with(p))
+            });
+            // Иконка — фото исполнителя или обложка альбома/трека.
+            let icon = match last.as_ref().map(|l| l.seeds[0].split_once(':').unwrap_or_default()) {
+                Some(("artist", id)) => c.artist_photo(id).await.ok().flatten(),
+                Some(("album", id)) => c.album(id).await.ok().and_then(|a| a.cover_uri().map(str::to_string)),
+                Some(("track", id)) => c
+                    .tracks(&[id.to_string()])
+                    .await
+                    .ok()
+                    .and_then(|v| v.first().and_then(|t| t.cover_uri().map(str::to_string))),
+                _ => None,
+            };
             let r = wheel.map(|mut items| {
-                // Последняя волна (например, по исполнителю), если её нет среди пресетов, —
-                // первой на дуге, как «продолжить» в десктопе.
-                if let Ok(last) = last
-                    && !last.seeds.is_empty()
-                    && last.seeds != [MY_WAVE]
+                if let Some(last) = last
                     && !items.iter().any(|i| i.seeds() == last.seeds)
                 {
                     items.insert(
@@ -1734,7 +1748,9 @@ impl Engine {
                                     description: Some("продолжить последнюю волну".into()),
                                     ..last
                                 }),
-                                agent: None,
+                                agent: icon.map(|uri| api::WheelAgent {
+                                    cover: Some(api::AgentCover { uri: Some(uri), color: None }),
+                                }),
                             },
                         },
                     );

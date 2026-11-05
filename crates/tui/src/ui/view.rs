@@ -1941,7 +1941,9 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
 /// Правая часть: блоб в цвете пресета, название поверх, кнопки управления.
 fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate::api::WheelItem>, ctx: &Ctx) {
     let wave_on = matches!(app.engine.queue.kind, QueueKind::Wave { .. });
-    let playing = wave_on && app.engine.now.is_some() && !app.engine.player.paused();
+    // Играет что угодно (волна, «Мне нравится», плейлист) — сцена показывает это потоком.
+    let flowing = app.engine.now.is_some();
+    let playing = flowing && !app.engine.player.paused();
     let [stage, hint] = Layout::vertical([Constraint::Min(6), Constraint::Length(2)]).areas(area);
 
     // Палитра блоба — только из обложки (до четырёх разных цветов).
@@ -1957,6 +1959,10 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate
 
     let title = if wave_on {
         app.engine.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
+    } else if flowing && !app.engine.queue.title.is_empty() {
+        app.engine.queue.title.clone()
+    } else if flowing {
+        "Сейчас играет".into()
     } else {
         "Моя волна".into()
     };
@@ -2008,7 +2014,7 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate
             },
         );
     }
-    if let Some(n) = app.engine.now.as_ref().filter(|_| wave_on) {
+    if let Some(n) = app.engine.now.as_ref() {
         f.render_widget(
             Paragraph::new(Line::styled(
                 format!("{} — {}", n.track.full_title(), n.track.artist_names()),

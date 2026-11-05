@@ -748,23 +748,12 @@ impl Client {
     }
 
     /// Лёгкая карточка исполнителя для экрана волны: фото и концерты, без дискографии.
-    pub async fn artist_card(&self, id: &str) -> Result<(Option<ArtistInfo>, Vec<Concert>)> {
-        let (bp, cp) = (format!("/artists/{id}/brief-info"), format!("/artists/{id}/concerts"));
-        let (brief, concerts) = tokio::join!(
-            self.get::<ArtistBrief>(&bp, &[]),
-            self.send::<Value>(self.req_as(reqwest::Method::GET, &cp, DESKTOP_CLIENT)),
-        );
-        let concerts = concerts
-            .map(|v| {
-                v["concerts"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| serde_json::from_value::<Concert>(c.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok((brief?.artist, concerts))
+    /// Шапка исполнителя, как у экрана волны официального клиента (`/artists/{id}/info`):
+    /// его фото (`artist.cover`), а нет — первое из `covers`. Ответ без обёртки `result`.
+    pub async fn artist_photo(&self, id: &str) -> Result<Option<String>> {
+        let v: Value = self.get(&format!("/artists/{id}/info"), &[]).await?;
+        let uri = |c: &Value| c["uri"].as_str().filter(|u| !u.is_empty()).map(str::to_string);
+        Ok(uri(&v["artist"]["cover"]).or_else(|| v["covers"].as_array()?.iter().find_map(uri)))
     }
 
     pub async fn search(&self, text: &str) -> Result<SearchResult> {

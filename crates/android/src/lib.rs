@@ -61,16 +61,12 @@ impl From<&Track> for TrackItem {
     }
 }
 
-/// Исполнитель играющего трека для главного экрана волны: фото и ближайший концерт.
+/// Исполнитель играющего трека для главного экрана: его фото.
 #[derive(uniffi::Record, Clone, PartialEq, Debug)]
 pub struct ArtistCard {
     pub artist_id: String,
     pub name: String,
     pub photo: Option<String>,
-    /// «15 ноября, 19:00, Москва».
-    pub concert: Option<String>,
-    /// Билеты на Афише.
-    pub concert_url: Option<String>,
 }
 
 /// Пресет «колеса» Моей волны.
@@ -581,7 +577,7 @@ fn preset(i: &api::WheelItem) -> WavePreset {
     }
 }
 
-/// Фото и ближайший концерт первого исполнителя трека — в фоне, с кешем по исполнителю.
+/// Фото первого исполнителя трека — в фоне, с кешем по исполнителю.
 fn load_artist(
     e: &Engine,
     t: &Track,
@@ -600,34 +596,14 @@ fn load_artist(
     cache.insert(a.id.clone(), slot.clone());
     let (id, name) = (a.id.clone(), a.name.clone());
     tokio::spawn(async move {
-        let (info, concerts) = match c.artist_card(&id).await {
-            Ok(r) => r,
-            Err(err) => return tracing::debug!("карточка исполнителя {id}: {err}"),
+        let photo = match c.artist_photo(&id).await {
+            Ok(p) => p,
+            Err(err) => return tracing::debug!("фото исполнителя {id}: {err}"),
         };
-        let now = chrono::Utc::now();
-        let next = concerts
-            .iter()
-            .filter_map(|c| Some((chrono::DateTime::parse_from_rfc3339(c.datetime.as_deref()?).ok()?, c)))
-            .filter(|(d, _)| *d > now)
-            .min_by_key(|(d, _)| *d);
         let card = ArtistCard {
             artist_id: id,
             name,
-            photo: info.as_ref().and_then(|i| i.cover_uri()).map(|u| api::cover_url(u, 1000)),
-            concert: next.map(|(d, c)| {
-                const M: [&str; 12] = [
-                    "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
-                    "ноября", "декабря",
-                ];
-                use chrono::{Datelike, Timelike};
-                let mut s = format!("{} {}, {}:{:02}", d.day(), M[d.month0() as usize], d.hour(), d.minute());
-                if let Some(city) = c.city.as_deref().filter(|x| !x.is_empty()) {
-                    s.push_str(", ");
-                    s.push_str(city);
-                }
-                s
-            }),
-            concert_url: next.and_then(|(_, c)| c.afisha_url.clone()),
+            photo: photo.map(|u| api::cover_url(&u, 1000)),
         };
         *slot.lock() = Some(card.clone());
         l.on_artist(card);

@@ -24,6 +24,10 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.MutatePriority
+import androidx.compose.animation.core.SeekableTransitionState
+import androidx.compose.animation.core.rememberTransition
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.pager.rememberPagerState
@@ -347,6 +351,21 @@ private enum class Tab(val title: String) {
     Wave("Волна"), Library("Коллекция"), Search("Поиск"), Releases("Новинки"), Settings("Настройки"),
 }
 
+/**
+ * Горизонтальный список внутри вкладки, докрученный до края, не отдаёт остаток свайпа
+ * пейджеру вкладок — иначе в конце списка начинает листаться экран.
+ */
+private object KeepHorizontal : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+    override fun onPostScroll(consumed: Offset, available: Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource) =
+        Offset(available.x, 0f)
+
+    override suspend fun onPostFling(consumed: androidx.compose.ui.unit.Velocity, available: androidx.compose.ui.unit.Velocity) =
+        androidx.compose.ui.unit.Velocity(available.x, 0f)
+}
+
+/** Затухание к концу перехода: пока жест «назад» в начале, уходящее ещё видно. */
+val LateFade = androidx.compose.animation.core.Easing { f -> (f * 1.6f - 0.6f).coerceIn(0f, 1f) }
+
 /** Ключи общих элементов: мини-плеер вырастает в сцену, обложка перелетает. */
 private const val KEY_PLAYER = "player"
 private const val KEY_COVER = "cover"
@@ -365,6 +384,23 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     // «Назад» со страниц и сцены — предиктивный (PredictiveBackHandler в PageHost и Stage).
     val clock = rememberPlayClock(s)
     val hasTrack = s.track != null
+    // Сцена ⇄ мини-плеер — один переход, который «назад» перематывает за пальцем:
+    // сцена по ходу жеста сжимается в пилюлю, отпустили — доезжает, передумали — раскрывается.
+    val stageState = remember { SeekableTransitionState(false) }
+    val stageTr = rememberTransition(stageState, label = "stage")
+    LaunchedEffect(nav.stage) {
+        if (stageState.currentState != nav.stage || stageState.targetState != nav.stage) stageState.animateTo(nav.stage)
+    }
+    PredictiveBackHandler(enabled = nav.stage) { progress ->
+        try {
+            progress.collect { stageState.seekTo(it.progress, false) }
+            stageState.animateTo(false)
+            nav.stage = false
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            stageState.animateTo(true)
+            throw e
+        }
+    }
     val now = NowMark(s.track?.id, !s.paused)
     CompositionLocalProvider(LocalNav provides nav, LocalNow provides now) {
     SharedTransitionLayout(Modifier.fillMaxSize()) {
@@ -377,12 +413,14 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                     key = { it },
                     flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.2f),
                 ) { page ->
+                    Box(Modifier.fillMaxSize().nestedScroll(KeepHorizontal)) {
                     when (Tab.entries[page]) {
                         Tab.Wave -> WaveTab(app, pal, s)
                         Tab.Library -> LibraryTab(app, nav, s.likesLoading)
                         Tab.Search -> SearchTab(app, nav)
                         Tab.Releases -> ReleasesTab(app, nav)
                         Tab.Settings -> SettingsTab(app)
+                    }
                     }
                 }
                 PageHost(app, nav)
@@ -395,8 +433,8 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                 ) {
                     remote?.let { RemotePill(app, nav, it) }
                 }
-                androidx.compose.animation.AnimatedVisibility(
-                    !nav.stage && hasTrack && remote == null,
+                stageTr.AnimatedVisibility(
+                    { !it && hasTrack && remote == null },
                     Modifier.align(Alignment.BottomCenter),
                     enter = fadeIn(),
                     exit = fadeOut(),
@@ -429,7 +467,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                 }
             }
         }
-        AnimatedVisibility(nav.stage && hasTrack, enter = fadeIn(), exit = fadeOut()) {
+        stageTr.AnimatedVisibility({ it && hasTrack }, enter = fadeIn(), exit = fadeOut(tween(easing = LateFade))) {
             Stage(app, pal, s, clock, this@SharedTransitionLayout, this) { nav.stage = false }
         }
     }
@@ -445,7 +483,8 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
 private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
     val presets by app.wheel.collectAsStateWithLifecycle()
     val waveOn = s.wave
-    val playing = waveOn && s.track != null && !s.paused
+    // Играет что угодно (волна, «Мне нравится», плейлист) — главный экран показывает это потоком.
+    val playing = s.track != null && !s.paused
     Box(Modifier.fillMaxSize()) {
         Blob(pal.blob, playing, Modifier.fillMaxSize())
         Box(
@@ -455,7 +494,7 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
         )
         Column(Modifier.fillMaxSize().statusBarsPadding().padding(top = 24.dp, bottom = 120.dp)) {
             val now = s.track
-            if (waveOn && now != null && !s.waveLoading) {
+            if (now != null && !s.waveLoading) {
                 WaveNow(app, s, now, Modifier.weight(1f))
             } else {
             Column(Modifier.padding(horizontal = 24.dp)) {
@@ -502,7 +541,7 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState) {
 }
 
 /**
- * Играет волна: в центре — исполнитель (имя крупно, его фото), обложка трека поверх фото,
+ * Что-то играет (волна или любой список): в центре — исполнитель (имя крупно, его фото), обложка трека поверх фото,
  * под ними пауза, название трека (тап — сцена) и «нравится».
  */
 @Composable
@@ -511,9 +550,9 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
     val artist = card?.takeIf { it.artistId == t.artistId }
     val nav = LocalNav.current
     Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        // Какая волна играет — тихой подписью, главное на экране — исполнитель.
+        // Что играет (волна или список) — тихой подписью, главное на экране — исполнитель.
         Text(
-            s.waveName.ifEmpty { "Моя волна" },
+            if (s.wave) s.waveName.ifEmpty { "Моя волна" } else s.queueTitle.ifEmpty { "Сейчас играет" },
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary,
@@ -918,6 +957,8 @@ private fun Stage(
     val curItems by rememberUpdatedState(items)
     val curPages by rememberUpdatedState(pages)
     val swipe = remember { SwipeState() }
+    // Порог — 15% ширины: свайпы лёгкие.
+    val fling = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.15f)
     // Трек сменился не свайпом (кнопка, конец трека) — карусель догоняет. Пока палец
     // на сцене или карусель доезжает после свайпа, не вмешиваемся.
     LaunchedEffect(pos, pages, swipe.active) {
@@ -927,18 +968,8 @@ private fun Stage(
     }
     val scrim by animateFloatAsState(if (lyricsOn) 0.62f else 0f, tween(400), label = "scrim")
     // Чем дальше утянули, тем сильнее скругление и меньше масштаб — видно, что сворачивается.
-    // Предиктивный «назад»: сцена уменьшается и скругляется за жестом, отпустили — сворачивается.
-    var back by remember { mutableFloatStateOf(0f) }
-    PredictiveBackHandler { progress ->
-        try {
-            progress.collect { back = it.progress }
-            close()
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            androidx.compose.animation.core.animate(back, 0f) { v, _ -> back = v }
-            throw e
-        }
-    }
-    val pull = maxOf((dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f), back)
+    // («Назад» сворачивает сцену в мини-плеер за пальцем — это переход в Main.)
+    val pull = (dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f)
     with(shared) {
         Box(
             Modifier
@@ -953,8 +984,6 @@ private fun Stage(
                     val k = 1f - pull * 0.1f
                     scaleX = k
                     scaleY = k
-                    // «Назад» тянет сцену вниз, к мини-плееру, куда она и свернётся.
-                    translationY = back * 64.dp.toPx()
                     shape = RoundedCornerShape((pull * 40).dp)
                     clip = pull > 0f
                 }
@@ -985,7 +1014,7 @@ private fun Stage(
                                     // свайпа и догонялка останавливаются, листаем от видимой страницы.
                                     swipe.grab()
                                     scope.launch { pager.stopScroll(MutatePriority.UserInput) }
-                                    start = kotlin.math.round(pager.currentPage + pager.currentPageOffsetFraction).toInt()
+                                    start = pager.currentPage
                                 }
                             }
                             when (axis) {
@@ -1009,23 +1038,24 @@ private fun Stage(
                         val v = vt.calculateVelocity()
                         when {
                             axis == 1 && curPages -> {
-                                val n = curItems.size
-                                // Где карусель сейчас, считая от страницы, с которой начали.
-                                val at = pager.currentPage + pager.currentPageOffsetFraction
-                                val target = when {
-                                    v.x < -600f -> kotlin.math.floor(at).toInt() + 1
-                                    v.x > 600f -> kotlin.math.ceil(at).toInt() - 1
-                                    else -> start + pageStep(at - start)
-                                }.coerceIn(0, (n - 1).coerceAtLeast(0))
-                                val playing = curPos
-                                when {
-                                    // Дальше очереди некуда: у волны это «догрузи ещё».
-                                    target == start && start == n - 1 && total.x < -skip -> app.core.next()
-                                    // Вернули на место — ничего не трогаем (играющий мог смениться сам).
-                                    target != start && target != playing && target in curItems.indices ->
-                                        app.core.playFrom(uniffi.yamusic_android.Source.Queue, target.toUInt())
+                                // Отпустили — карусель докатывается штатным снапом пейджера со скоростью
+                                // пальца (без рывка на стыке), трек меняется, когда она встала.
+                                val end = start == curItems.size - 1 && total.x < -skip
+                                swipe.settle(scope) {
+                                    pager.scroll(MutatePriority.UserInput) { with(fling) { performFling(-v.x) } }
+                                    val p = pager.currentPage
+                                    when {
+                                        // Дальше очереди некуда: у волны это «догрузи ещё».
+                                        end && p == start -> app.core.next()
+                                        p != start && p != curPos && p in curItems.indices -> {
+                                            app.core.playFrom(uniffi.yamusic_android.Source.Queue, p.toUInt())
+                                            // Догонялка не должна вернуть карусель, пока ядро не ответило.
+                                            kotlinx.coroutines.withTimeoutOrNull(2000) {
+                                                snapshotFlow { curPos }.first { it == p }
+                                            }
+                                        }
+                                    }
                                 }
-                                swipe.settle(scope) { pager.animateScrollToPage(target) }
                             }
                             axis == 1 && total.x < -skip -> app.core.next()
                             axis == 1 && total.x > skip -> app.core.prevTrack()
@@ -1110,14 +1140,6 @@ private fun Stage(
             }
         }
     }
-}
-
-/** На сколько страниц листать по сдвигу `d` (в страницах): хватает 15% страницы. */
-private fun pageStep(d: Float): Int {
-    val a = kotlin.math.abs(d)
-    val whole = kotlin.math.floor(a).toInt()
-    val n = whole + if (a - whole > 0.15f) 1 else 0
-    return if (d < 0) -n else n
 }
 
 /**
