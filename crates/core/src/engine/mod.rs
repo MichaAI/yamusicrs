@@ -851,6 +851,7 @@ impl Engine {
             self.toast("Сеть вернулась — снова онлайн".into());
         }
         let fetcher = Fetcher::new(client.clone(), self.library.clone(), self.cfg.quality);
+        fetcher.set_fast_start(self.cfg.fast_start);
         if let Some(q) = self.state.quality {
             fetcher.set_quality(q);
         }
@@ -2148,12 +2149,32 @@ impl Engine {
         });
         self.yn_track_started();
         self.schedule_next();
+        self.warm_ahead(idx);
         // Скачанный хуже lossless: играет сразу, а FLAC подменит его на ходу, если он есть.
-        if matches!(self.now.as_ref().and_then(|n| n.origin.as_ref()), Some(Origin::Library))
-            && self.fetcher.as_ref().is_some_and(|f| f.should_upgrade(&track))
+        // Так же и быстрый старт из сети: начали с AAC — просим lossless.
+        let origin = self.now.as_ref().and_then(|n| n.origin.as_ref());
+        let lossy = self.now.as_ref().is_some_and(|n| !matches!(n.info.codec.as_str(), "FLAC" | "ALAC"));
+        if let Some(f) = &self.fetcher
+            && (matches!(origin, Some(Origin::Library)) && f.should_upgrade(&track)
+                || matches!(origin, Some(Origin::Network { .. }))
+                    && lossy
+                    && f.fast_start()
+                    && f.quality() == Quality::Lossless
+                    && !self.library.checked_no_lossless(&track.id))
         {
             self.hot_upgrade(true);
         }
+    }
+
+    /// Прогреть следующие треки очереди после `cur` (ссылка и начало файла).
+    pub fn warm_ahead(&self, cur: usize) {
+        let n = self.cfg.warm_ahead;
+        if n == 0 || self.offline {
+            return;
+        }
+        let Some(f) = &self.fetcher else { return };
+        let ahead: Vec<Track> = self.queue.items.iter().skip(cur + 1).take(n).filter(|t| t.available).cloned().collect();
+        f.warm(&ahead);
     }
 
     pub fn quality(&self) -> Quality {

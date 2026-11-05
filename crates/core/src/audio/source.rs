@@ -112,6 +112,11 @@ impl StreamBuffer {
         self.cv.notify_all();
     }
 
+    /// Сколько байт уже есть.
+    pub fn len(&self) -> u64 {
+        self.inner.lock().len
+    }
+
     /// Доля скачанного, 0..=1.
     pub fn progress(&self) -> f32 {
         let g = self.inner.lock();

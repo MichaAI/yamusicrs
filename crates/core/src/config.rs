@@ -35,6 +35,11 @@ pub struct Config {
     /// Ynison: телефон видит yamusicrs в «Слушать на…» и управляет им; включённое здесь
     /// забирает воспроизведение у других устройств.
     pub ynison: bool,
+    /// Быстрый старт: трек из сети начинает играть в AAC, lossless подменяет его на ходу;
+    /// следующие треки очереди прогреваются заранее.
+    pub fast_start: bool,
+    /// Сколько следующих треков прогревать.
+    pub warm_ahead: usize,
 }
 
 impl Default for Config {
@@ -56,6 +61,8 @@ impl Default for Config {
             fps: 30,
             report_plays: true,
             ynison: true,
+            fast_start: true,
+            warm_ahead: 5,
         }
     }
 }

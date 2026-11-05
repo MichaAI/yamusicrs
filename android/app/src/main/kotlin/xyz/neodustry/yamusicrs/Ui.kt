@@ -15,6 +15,9 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,6 +42,12 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -56,6 +65,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -317,7 +327,9 @@ private fun Login(app: YaApp, pal: Pal, p: Phase.Login, openUrl: (String) -> Uni
 
 // ── главный экран ────────────────────────────────────────────────────────────
 
-private enum class Tab(val title: String) { Wave("Волна"), Library("Коллекция"), Queue("Очередь") }
+private enum class Tab(val title: String) {
+    Wave("Волна"), Library("Коллекция"), Search("Поиск"), Releases("Новинки"), Settings("Настройки"),
+}
 
 /** Ключи общих элементов: мини-плеер вырастает в сцену, обложка перелетает. */
 private const val KEY_PLAYER = "player"
@@ -328,41 +340,58 @@ private const val KEY_COVER = "cover"
 private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     val pager = rememberPagerState { Tab.entries.size }
     val scope = rememberCoroutineScope()
-    var stage by rememberSaveable { mutableStateOf(false) }
-    BackHandler(stage) { stage = false }
+    val nav = remember { Nav(app) }
+    // Позже объявленный обработчик главнее: сначала сворачивается сцена, потом страницы.
+    BackHandler(nav.stack.isNotEmpty()) { nav.back() }
+    BackHandler(nav.stage) { nav.stage = false }
     val clock = rememberPlayClock(s)
     val hasTrack = s.track != null
+    val now = NowMark(s.track?.id, !s.paused)
+    CompositionLocalProvider(LocalNav provides nav, LocalNow provides now) {
     SharedTransitionLayout(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) {
                 // Вкладки листаются свайпом вбок.
-                HorizontalPager(pager, key = { it }) { page ->
+                // Вкладка переключается уже с пятой части ширины, а не с половины.
+                HorizontalPager(
+                    pager,
+                    key = { it },
+                    flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.2f),
+                ) { page ->
                     when (Tab.entries[page]) {
                         Tab.Wave -> WaveTab(app, pal, s)
-                        Tab.Library -> LibraryTab(app, s.track?.id, !s.paused, s.likesLoading)
-                        Tab.Queue -> QueueTab(app, s.track?.id, s.queuePos?.toInt(), !s.paused)
+                        Tab.Library -> LibraryTab(app, nav, s.likesLoading)
+                        Tab.Search -> SearchTab(app, nav)
+                        Tab.Releases -> ReleasesTab(app, nav)
+                        Tab.Settings -> SettingsTab(app)
                     }
                 }
+                PageHost(app, nav)
                 androidx.compose.animation.AnimatedVisibility(
-                    !stage && hasTrack,
+                    !nav.stage && hasTrack,
                     Modifier.align(Alignment.BottomCenter),
                     enter = fadeIn(),
                     exit = fadeOut(),
                 ) {
-                    MiniPlayer(app, s, clock, this@SharedTransitionLayout, this) { stage = true }
+                    MiniPlayer(app, s, clock, this@SharedTransitionLayout, this) { nav.stage = true }
                 }
             }
             ShortNavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                 Tab.entries.forEachIndexed { i, t ->
                     ShortNavigationBarItem(
                         selected = pager.currentPage == i,
-                        onClick = { scope.launch { pager.animateScrollToPage(i) } },
+                        onClick = {
+                            nav.clear()
+                            scope.launch { pager.animateScrollToPage(i) }
+                        },
                         icon = {
                             Icon(
                                 when (t) {
                                     Tab.Wave -> Ic.Wave
                                     Tab.Library -> Ic.Library
-                                    Tab.Queue -> Ic.Queue
+                                    Tab.Search -> Ic.Search
+                                    Tab.Releases -> Ic.Releases
+                                    Tab.Settings -> Ic.Settings
                                 },
                                 null,
                             )
@@ -372,9 +401,12 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                 }
             }
         }
-        AnimatedVisibility(stage && hasTrack, enter = fadeIn(), exit = fadeOut()) {
-            Stage(app, pal, s, clock, this@SharedTransitionLayout, this) { stage = false }
+        AnimatedVisibility(nav.stage && hasTrack, enter = fadeIn(), exit = fadeOut()) {
+            Stage(app, pal, s, clock, this@SharedTransitionLayout, this) { nav.stage = false }
         }
+    }
+    QueueSheet(app, nav, s.queuePos?.toInt())
+    TrackMenu(app, nav)
     }
 }
 
@@ -469,59 +501,46 @@ private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () ->
 // ── коллекция и очередь ──────────────────────────────────────────────────────
 
 @Composable
-private fun LibraryTab(app: YaApp, currentId: String?, playing: Boolean, loading: Boolean) {
+private fun LibraryTab(app: YaApp, nav: Nav, loading: Boolean) {
+    var mode by rememberSaveable { mutableIntStateOf(0) }
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        Header("Коллекция", "") {}
+        Segments(listOf("Мне нравится", "Плейлисты"), mode, { mode = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
+        if (mode == 0) Likes(app, nav, loading) else PlaylistsGrid(app, nav)
+    }
+}
+
+@Composable
+private fun Likes(app: YaApp, nav: Nav, loading: Boolean) {
     val likes by app.likes.collectAsStateWithLifecycle()
+    val now = LocalNow.current
     var filter by rememberSaveable { mutableStateOf("") }
     val shown = remember(likes, filter) {
         val q = filter.trim().lowercase()
         likes.withIndex().filter { (_, t) -> q.isEmpty() || t.title.lowercase().contains(q) || t.artists.lowercase().contains(q) }
     }
-    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Header("Мне нравится", if (likes.isEmpty()) "" else "${likes.size} треков") {
-            if (likes.isNotEmpty()) PlayButton(false, 56.dp, onClick = { app.core.playLikes(0u) })
+    if (likes.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (loading) LoadingIndicator() else Text("Здесь появятся треки, которые вы лайкнете")
         }
-        SearchPill(filter, { filter = it }, "Поиск по коллекции")
-        if (likes.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                if (loading) LoadingIndicator() else Text("Здесь появятся треки, которые вы лайкнете")
-            }
-            return@Column
+        return
+    }
+    SearchPill(filter, { filter = it }, "Поиск среди ${tracksWord(likes.size)}")
+    Box(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+        itemsIndexed(shown, key = { _, it -> it.index }, contentType = { _, _ -> "track" }) { _, (i, t) ->
+            TrackRow(
+                app, t, current = now.id == t.id, playing = now.playing,
+                onLongClick = { nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Likes, i) },
+            ) { app.core.playLikes(i.toUInt()) }
         }
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
-            itemsIndexed(shown, key = { _, it -> it.index }, contentType = { _, _ -> "track" }) { _, (i, t) ->
-                TrackRow(app, t, current = currentId == t.id, playing = playing) { app.core.playLikes(i.toUInt()) }
-            }
-        }
+    }
+    FloatingPlay { app.core.playLikes(0u) }
     }
 }
 
 @Composable
-private fun QueueTab(app: YaApp, currentId: String?, queuePos: Int?, playing: Boolean) {
-    val q by app.queue.collectAsStateWithLifecycle()
-    val (title, items) = q
-    val list = rememberLazyListState()
-    LaunchedEffect(title, items.size) { queuePos?.let { list.scrollToItem((it - 2).coerceAtLeast(0)) } }
-    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Header("Очередь", title) {}
-        if (items.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Включите волну или трек из коллекции", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            return@Column
-        }
-        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
-            itemsIndexed(items, contentType = { _, _ -> "track" }) { i, t ->
-                val cur = queuePos == i && currentId == t.id
-                TrackRow(app, t, current = cur, playing = playing, dim = queuePos?.let { i < it } == true) {
-                    app.core.playQueue(i.toUInt())
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun Header(title: String, subtitle: String, action: @Composable () -> Unit) {
+fun Header(title: String, subtitle: String, action: @Composable () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 16.dp, top = 20.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
@@ -534,7 +553,7 @@ private fun Header(title: String, subtitle: String, action: @Composable () -> Un
 }
 
 @Composable
-private fun SearchPill(value: String, onChange: (String) -> Unit, hint: String) {
+fun SearchPill(value: String, onChange: (String) -> Unit, hint: String, onSubmit: (() -> Unit)? = null) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(RoundedCornerShape(28.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(horizontal = 18.dp, vertical = 14.dp),
@@ -550,14 +569,25 @@ private fun SearchPill(value: String, onChange: (String) -> Unit, hint: String) 
                 singleLine = true,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = if (onSubmit != null) ImeAction.Search else ImeAction.Done),
+                keyboardActions = KeyboardActions(onSearch = { onSubmit?.invoke() }),
                 modifier = Modifier.fillMaxWidth(),
             )
         }
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun TrackRow(app: YaApp, t: TrackItem, current: Boolean, playing: Boolean, dim: Boolean = false, onClick: () -> Unit) {
+fun TrackRow(
+    app: YaApp,
+    t: TrackItem,
+    current: Boolean,
+    playing: Boolean,
+    dim: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val alpha = when {
         !t.available -> 0.35f
         dim -> 0.55f
@@ -567,7 +597,8 @@ private fun TrackRow(app: YaApp, t: TrackItem, current: Boolean, playing: Boolea
     Row(
         // Концентрично миниатюре: 14 + 10 (отступ) = 24.
         Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(24.dp)).background(bg)
-            .clickable(enabled = t.available, onClick = onClick).padding(horizontal = 10.dp, vertical = 8.dp),
+            .combinedClickable(onLongClick = onLongClick, onClick = { if (t.available) onClick() })
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(contentAlignment = Alignment.Center) {
@@ -619,8 +650,8 @@ private fun MiniPlayer(
     val scope = rememberCoroutineScope()
     val dx = remember { Animatable(0f) }
     val density = LocalDensity.current
-    val skip = with(density) { 96.dp.toPx() }
-    val up = with(density) { 48.dp.toPx() }
+    val skip = with(density) { 56.dp.toPx() }
+    val up = with(density) { 28.dp.toPx() }
     with(shared) {
         Surface(
             shape = RoundedCornerShape(32.dp),
@@ -763,7 +794,7 @@ private fun Stage(
     val scope = rememberCoroutineScope()
     val dy = remember { Animatable(0f) }
     val density = LocalDensity.current
-    val dismiss = with(density) { 140.dp.toPx() }
+    val dismiss = with(density) { 80.dp.toPx() }
     val lyricsOn = showLyrics && lyrics != null
     val scrim by animateFloatAsState(if (lyricsOn) 0.62f else 0f, tween(400), label = "scrim")
     // Чем дальше утянули, тем сильнее скругление и меньше масштаб — видно, что сворачивается.
@@ -835,6 +866,12 @@ private fun Stage(
                         container = if (showLyrics) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
                         tint = if (showLyrics) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
                     )
+                    Spacer(Modifier.width(8.dp))
+                    val nav = LocalNav.current
+                    ShapeIconButton(Ic.More, "Ещё", {
+                        val i = s.queuePos?.toInt()
+                        if (i != null) nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Queue, i)
+                    }, size = 48.dp)
                 }
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     val wide = maxWidth > maxHeight * 1.2f
@@ -843,8 +880,7 @@ private fun Stage(
                             if (lyricsOn && lyrics != null) {
                                 LyricsView(app, lyrics, clock)
                             } else {
-                                val side = minOf(maxWidth, maxHeight, 560.dp)
-                                SwipeCover(app, t, side, shared, visibility)
+                                CoverCarousel(app, s, t, maxWidth, maxHeight, shared, visibility)
                             }
                         }
                     }
@@ -860,10 +896,85 @@ private fun Stage(
                         Column(Modifier.fillMaxSize()) {
                             art(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp))
                             StageInfo(app, s, t, clock)
-                            Spacer(Modifier.height(72.dp))
+                            Spacer(Modifier.height(24.dp))
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Обложки очереди каруселью: соседние выглядывают по краям, свайп листает и включает трек.
+ * Если очередь ещё не пришла или не совпадает с играющим — одна обложка со свайпом.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun CoverCarousel(
+    app: YaApp,
+    s: PlayerState,
+    t: TrackItem,
+    width: Dp,
+    height: Dp,
+    shared: SharedTransitionScope,
+    visibility: AnimatedVisibilityScope,
+) {
+    val q by app.queue.collectAsStateWithLifecycle()
+    val items = q.second
+    val pos = s.queuePos?.toInt()
+    // Обложка поуже экрана, чтобы соседние были видны.
+    val side = minOf(width * 0.8f, height, 560.dp)
+    if (pos == null || pos !in items.indices || items[pos].id != t.id) {
+        SwipeCover(app, t, side, shared, visibility)
+        return
+    }
+    val pager = rememberPagerState(initialPage = pos) { items.size }
+    val current by rememberUpdatedState(pos)
+    var auto by remember { mutableStateOf(false) }
+    // Трек сменился не свайпом (кнопка, конец трека) — карусель догоняет.
+    LaunchedEffect(pos, items.size) {
+        if (pager.currentPage != pos) {
+            auto = true
+            try {
+                if (kotlin.math.abs(pager.currentPage - pos) > 3) pager.scrollToPage(pos) else pager.animateScrollToPage(pos)
+            } finally {
+                auto = false
+            }
+        }
+    }
+    LaunchedEffect(pager) {
+        snapshotFlow { pager.settledPage }.collect { p ->
+            if (!auto && p != current && p in items.indices) app.core.playFrom(uniffi.yamusic_android.Source.Queue, p.toUInt())
+        }
+    }
+    // Карусель шире колонки сцены (её отступы по 24) — соседние обложки доходят до края экрана.
+    val full = width + 48.dp
+    HorizontalPager(
+        pager,
+        Modifier.requiredWidth(full),
+        contentPadding = PaddingValues(horizontal = (full - side) / 2),
+        pageSpacing = 12.dp,
+        beyondViewportPageCount = 1,
+        verticalAlignment = Alignment.CenterVertically,
+        flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.15f),
+    ) { page ->
+        val it = items[page]
+        Box(
+            Modifier.graphicsLayer {
+                val off = kotlin.math.abs(pager.currentPage - page + pager.currentPageOffsetFraction).coerceIn(0f, 1f)
+                val k = 1f - 0.1f * off
+                scaleX = k
+                scaleY = k
+                alpha = 1f - 0.35f * off
+            },
+        ) {
+            if (page == pos) {
+                with(shared) {
+                    Art(app, it.cover, Modifier.sharedElement(rememberSharedContentState(KEY_COVER), visibility).size(side), corner = 36.dp)
+                }
+            } else {
+                Art(app, it.cover, Modifier.size(side), corner = 36.dp)
             }
         }
     }
@@ -875,7 +986,7 @@ private fun Stage(
 private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransitionScope, visibility: AnimatedVisibilityScope) {
     val scope = rememberCoroutineScope()
     val dx = remember { Animatable(0f) }
-    val skip = with(LocalDensity.current) { 96.dp.toPx() }
+    val skip = with(LocalDensity.current) { 56.dp.toPx() }
     with(shared) {
         Art(
             app,
@@ -921,7 +1032,7 @@ private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransit
 
 /** Название, исполнитель, перемотка и кнопки сцены. */
 @Composable
-private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem, clock: PlayClock) {
+private fun ColumnScope.StageInfo(app: YaApp, s: PlayerState, t: TrackItem, clock: PlayClock) {
     // Длинное название бежит строкой, как marquee в TUI.
     ScrambleText(
         t.title,
@@ -929,11 +1040,15 @@ private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem, clock: PlayClock
         MaterialTheme.colorScheme.onSurface,
         Modifier.basicMarquee(initialDelayMillis = 2000),
     )
+    val nav = LocalNav.current
+    // Исполнитель и альбом — ссылки на свои страницы.
     Text(t.artists, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
-        maxLines = 1, overflow = TextOverflow.Ellipsis)
+        maxLines = 1, overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(enabled = t.artistId != null) { nav.artist(t.artistId, t.artists) })
     if (t.album.isNotEmpty() && t.album != t.title) {
         Text(t.album, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(enabled = t.albumId != null) { nav.album(t.albumId, t.album) })
     }
     Spacer(Modifier.height(12.dp))
     WavySeek(clock, t.durationMs.toLong(), !s.paused && !s.loading, { app.core.seek(it.toULong()) })
@@ -952,6 +1067,22 @@ private fun StageInfo(app: YaApp, s: PlayerState, t: TrackItem, clock: PlayClock
             container = Color.Transparent,
             tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+    Spacer(Modifier.height(16.dp))
+    // Очередь — пилюля под кнопками, в зоне большого пальца.
+    Row(
+        Modifier.align(Alignment.CenterHorizontally).clip(RoundedCornerShape(24.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f))
+            .clickable { nav.queue = true }.padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Ic.Queue, null, Modifier.size(20.dp))
+        Spacer(Modifier.width(10.dp))
+        Text("Очередь", style = MaterialTheme.typography.labelLarge)
+        if (s.queueLen > 0u) {
+            Spacer(Modifier.width(10.dp))
+            Text("${(s.queuePos?.toInt() ?: 0) + 1} из ${s.queueLen}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        }
     }
     Spacer(Modifier.height(8.dp))
 }

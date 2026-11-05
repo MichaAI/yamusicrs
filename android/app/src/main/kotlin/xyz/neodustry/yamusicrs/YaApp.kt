@@ -4,6 +4,8 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import java.io.File
 import java.net.URL
 import kotlinx.coroutines.CoroutineScope
@@ -14,12 +16,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.yamusic_android.Core
 import uniffi.yamusic_android.CoreListener
 import uniffi.yamusic_android.LyricsData
+import uniffi.yamusic_android.Page
 import uniffi.yamusic_android.PlayerState
+import uniffi.yamusic_android.PlaylistItem
+import uniffi.yamusic_android.SettingsData
 import uniffi.yamusic_android.TrackItem
 import uniffi.yamusic_android.WavePreset
 
@@ -35,6 +41,13 @@ class YaApp : Application(), CoreListener {
     val queue = MutableStateFlow<Pair<String, List<TrackItem>>>("" to emptyList())
     val wheel = MutableStateFlow<List<WavePreset>>(emptyList())
     val lyrics = MutableStateFlow<TrackLyrics?>(null)
+    /** Ответы на открытые страницы по id; нет ключа — ещё грузится. */
+    val pages = MutableStateFlow<Map<ULong, Page>>(emptyMap())
+    /** Свои плейлисты и «Настроили для вас». */
+    val playlists = MutableStateFlow<Pair<List<PlaylistItem>, List<PlaylistItem>>>(emptyList<PlaylistItem>() to emptyList())
+    val settings = MutableStateFlow<SettingsData?>(null)
+    /** Страница «Новые релизы» вкладки «Новинки» (запрашивается один раз). */
+    var releasesId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
     /** Палитра под обложку играющего трека, как тема TUI. */
     val palette = MutableStateFlow(Pal.Default)
     val toasts = MutableSharedFlow<Toast>(extraBufferCapacity = 16)
@@ -83,6 +96,24 @@ class YaApp : Application(), CoreListener {
 
     override fun onLyrics(trackId: String, lyrics: LyricsData?) {
         this.lyrics.value = TrackLyrics(trackId, lyrics)
+    }
+
+    override fun onPage(id: ULong, page: Page) {
+        pages.update { it + (id to page) }
+    }
+
+    override fun onPlaylists(own: List<PlaylistItem>, personal: List<PlaylistItem>) {
+        playlists.value = own to personal
+    }
+
+    override fun onSettings(settings: SettingsData) {
+        this.settings.value = settings
+    }
+
+    /** Страница больше не нужна: забыть и ответ, и треки в ядре. */
+    fun closePage(id: ULong) {
+        core.closePage(id)
+        pages.update { it - id }
     }
 
     /** Картинка по https: из памяти или сети. */

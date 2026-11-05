@@ -135,6 +135,12 @@ impl Library {
         self.index.lock().tracks.get(id).is_some_and(|e| e.wants_upgrade(want))
     }
 
+    /// Скачан не в lossless, и недавно проверяли: lossless у трека нет.
+    pub fn checked_no_lossless(&self, track_id: &str) -> bool {
+        let id = track_id.split(':').next().unwrap_or(track_id);
+        self.index.lock().tracks.get(id).is_some_and(|e| codec_rank(&e.codec) < 3 && !e.wants_upgrade(3))
+    }
+
     /// Кодек скачанного трека.
     pub fn codec_of(&self, track_id: &str) -> Option<String> {
         let id = track_id.split(':').next().unwrap_or(track_id);

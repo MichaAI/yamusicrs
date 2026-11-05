@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -13,10 +14,14 @@ use yamusic_core::api::{self, Track};
 use yamusic_core::config::{Config, Paths};
 use yamusic_core::engine::{self, Effect, Engine, Loadable, MY_WAVE, Screen};
 
+pub use pages::{AlbumItem, ArtistItem, Page, PlaylistItem, Source};
+use pages::{Pages, Reply, Req};
+
 #[cfg(target_os = "android")]
 mod aaudio;
 #[cfg(target_os = "android")]
 mod logcat;
+mod pages;
 
 uniffi::setup_scaffolding!();
 
@@ -32,6 +37,10 @@ pub struct TrackItem {
     pub thumb: Option<String>,
     pub duration_ms: u64,
     pub available: bool,
+    /// Для перехода к альбому и исполнителю (первому с id).
+    pub album_id: Option<String>,
+    pub artist_id: Option<String>,
+    pub explicit: bool,
 }
 
 impl From<&Track> for TrackItem {
@@ -45,6 +54,9 @@ impl From<&Track> for TrackItem {
             thumb: t.cover_uri().map(|u| api::cover_url(u, 200)),
             duration_ms: t.duration_ms.unwrap_or(0),
             available: t.available,
+            album_id: t.album().map(|a| a.id.clone()).filter(|a| !a.is_empty()),
+            artist_id: t.artists.iter().map(|a| a.id.clone()).find(|a| !a.is_empty()),
+            explicit: t.explicit(),
         }
     }
 }
@@ -113,6 +125,23 @@ pub struct PlayerState {
     pub likes_loading: bool,
 }
 
+/// Настройки звука и отчётов (как вкладка «Настройки» в TUI).
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct SettingsData {
+    /// `lossless`, `hq` или `nq`.
+    pub quality: String,
+    pub normalize: bool,
+    /// Целевая громкость выравнивания, LUFS.
+    pub target_lufs: f32,
+    /// Плавный переход, с (0 — встык).
+    pub crossfade_secs: f32,
+    pub report_plays: bool,
+    /// Быстрый старт: из сети сначала AAC, lossless подменяет на ходу; следующие треки прогреваются.
+    pub fast_start: bool,
+    /// Недавние поисковые запросы, свежие первыми.
+    pub search_history: Vec<String>,
+}
+
 #[uniffi::export(with_foreign)]
 pub trait CoreListener: Send + Sync {
     fn on_state(&self, state: PlayerState);
@@ -122,6 +151,11 @@ pub trait CoreListener: Send + Sync {
     fn on_wheel(&self, presets: Vec<WavePreset>);
     /// Текст играющего трека `track_id`; `None` — текста нет.
     fn on_lyrics(&self, track_id: String, lyrics: Option<LyricsData>);
+    /// Ответ на `open_*`, `search`, `releases`, `chart` — по id, который они вернули.
+    fn on_page(&self, id: u64, page: Page);
+    /// Свои плейлисты и «Настроили для вас».
+    fn on_playlists(&self, own: Vec<PlaylistItem>, personal: Vec<PlaylistItem>);
+    fn on_settings(&self, settings: SettingsData);
 }
 
 enum Cmd {
@@ -139,12 +173,25 @@ enum Cmd {
     WaveSeeds(Vec<String>, String),
     SubmitToken(String),
     NewCode,
+    Open(u64, Req),
+    ClosePage(u64),
+    PlayFrom(Source, u32),
+    EnqueueFrom(Source, u32, bool),
+    LikeFrom(Source, u32),
+    Quality(String),
+    Normalize(bool),
+    TargetLufs(f32),
+    Crossfade(f32),
+    ReportPlays(bool),
+    FastStart(bool),
+    ForgetSearch(String),
     Shutdown,
 }
 
 #[derive(uniffi::Object)]
 pub struct Core {
     tx: UnboundedSender<Cmd>,
+    next_page: AtomicU64,
 }
 
 #[uniffi::export]
@@ -177,7 +224,10 @@ impl Core {
                 rt.shutdown_timeout(Duration::from_millis(200));
             })
             .expect("engine thread");
-        Arc::new(Self { tx })
+        Arc::new(Self {
+            tx,
+            next_page: AtomicU64::new(1),
+        })
     }
 
     pub fn play_pause(&self) {
@@ -242,6 +292,87 @@ impl Core {
         self.send(Cmd::NewCode);
     }
 
+    /// Плейлист (свой, «Настроили для вас», найденный).
+    pub fn open_playlist(&self, uid: String, kind: String) -> u64 {
+        self.open(Req::Playlist { uid, kind })
+    }
+
+    pub fn open_album(&self, id: String) -> u64 {
+        self.open(Req::Album(id))
+    }
+
+    pub fn open_artist(&self, id: String) -> u64 {
+        self.open(Req::Artist(id))
+    }
+
+    /// «Похожие треки»; `title` — для заголовка страницы.
+    pub fn open_similar(&self, track_id: String, title: String) -> u64 {
+        self.open(Req::Similar { track_id, title })
+    }
+
+    /// Поиск; запрос запоминается в истории.
+    pub fn search(&self, query: String) -> u64 {
+        self.open(Req::Search(query))
+    }
+
+    /// Новые релизы (страница альбомов).
+    pub fn releases(&self) -> u64 {
+        self.open(Req::Releases)
+    }
+
+    pub fn chart(&self) -> u64 {
+        self.open(Req::Chart)
+    }
+
+    /// Страница закрыта — её треки больше не нужны.
+    pub fn close_page(&self, id: u64) {
+        self.send(Cmd::ClosePage(id));
+    }
+
+    /// Играть список `source` с трека `index` (очередь — перейти к треку).
+    pub fn play_from(&self, source: Source, index: u32) {
+        self.send(Cmd::PlayFrom(source, index));
+    }
+
+    /// В очередь: `next` — следующим, иначе в конец.
+    pub fn enqueue_from(&self, source: Source, index: u32, next: bool) {
+        self.send(Cmd::EnqueueFrom(source, index, next));
+    }
+
+    /// Лайк или снять лайк.
+    pub fn like_from(&self, source: Source, index: u32) {
+        self.send(Cmd::LikeFrom(source, index));
+    }
+
+    /// `lossless`, `hq` или `nq`.
+    pub fn set_quality(&self, quality: String) {
+        self.send(Cmd::Quality(quality));
+    }
+
+    pub fn set_normalize(&self, on: bool) {
+        self.send(Cmd::Normalize(on));
+    }
+
+    pub fn set_target_lufs(&self, lufs: f32) {
+        self.send(Cmd::TargetLufs(lufs));
+    }
+
+    pub fn set_crossfade(&self, secs: f32) {
+        self.send(Cmd::Crossfade(secs));
+    }
+
+    pub fn set_report_plays(&self, on: bool) {
+        self.send(Cmd::ReportPlays(on));
+    }
+
+    pub fn set_fast_start(&self, on: bool) {
+        self.send(Cmd::FastStart(on));
+    }
+
+    pub fn forget_search(&self, query: String) {
+        self.send(Cmd::ForgetSearch(query));
+    }
+
     /// Сохранить сессию и остановить звук (приложение закрывается).
     pub fn shutdown(&self) {
         self.send(Cmd::Shutdown);
@@ -251,6 +382,12 @@ impl Core {
 impl Core {
     fn send(&self, c: Cmd) {
         let _ = self.tx.send(c);
+    }
+
+    fn open(&self, req: Req) -> u64 {
+        let id = self.next_page.fetch_add(1, Ordering::Relaxed);
+        self.send(Cmd::Open(id, req));
+        id
     }
 }
 
@@ -292,6 +429,8 @@ async fn run(paths: Paths, music: PathBuf, mut rx: UnboundedReceiver<Cmd>, liste
         }
     };
     let mut publisher = Publisher::default();
+    let mut pages = Pages::default();
+    let (ptx, mut prx) = unbounded_channel::<Reply>();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -301,9 +440,13 @@ async fn run(paths: Paths, music: PathBuf, mut rx: UnboundedReceiver<Cmd>, liste
                     engine.shutdown();
                     return;
                 }
-                Some(c) => command(&mut engine, c),
+                Some(c) => command(&mut engine, &mut pages, &ptx, c),
             },
             Some(m) = erx.recv() => engine.on_msg(m),
+            Some((id, r)) = prx.recv() => {
+                tracing::debug!("страница {id}: {}", if r.is_ok() { "готова" } else { "ошибка" });
+                listener.on_page(id, pages.accept(id, r));
+            }
             _ = tick.tick() => {}
         }
         engine.tick();
@@ -363,7 +506,16 @@ fn load_lyrics(e: &Engine, t: Track, l: Arc<dyn CoreListener>) {
     });
 }
 
-fn command(e: &mut Engine, c: Cmd) {
+/// Трек источника по индексу (с названием списка для очереди).
+fn source_tracks<'a>(e: &'a Engine, p: &'a Pages, s: &Source) -> Option<(String, &'a [Track])> {
+    match s {
+        Source::Likes => e.likes.ready().map(|v| ("Мне нравится".to_string(), v.as_slice())),
+        Source::Queue => Some((e.queue.title.clone(), e.queue.items.as_slice())),
+        Source::Page { id } => p.tracks.get(id).map(|(t, v)| (t.clone(), v.as_slice())),
+    }
+}
+
+fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: Cmd) {
     let idle = e.now.is_none() && e.loading_track.is_none();
     match c {
         Cmd::PlayPause => e.toggle_pause(),
@@ -412,6 +564,79 @@ fn command(e: &mut Engine, c: Cmd) {
             }
         }
         Cmd::NewCode => e.begin_login(None),
+        Cmd::Open(id, req) => {
+            if let Req::Search(q) = &req {
+                let q = q.trim().to_string();
+                let h = &mut e.state.search_history;
+                h.retain(|x| x.to_lowercase() != q.to_lowercase());
+                h.insert(0, q);
+                h.truncate(30);
+                e.state.save(&e.paths);
+            }
+            tracing::debug!("открываю страницу {id}");
+            pages::open(e, id, req, ptx);
+        }
+        Cmd::ClosePage(id) => {
+            pages.tracks.remove(&id);
+        }
+        Cmd::PlayFrom(Source::Queue, i) => {
+            if (i as usize) < e.queue.items.len() {
+                e.play_index(i as usize);
+            }
+        }
+        Cmd::PlayFrom(s, i) => {
+            if let Some((title, v)) = source_tracks(e, pages, &s) {
+                let v = v.to_vec();
+                e.play_list(v, i as usize, title);
+            }
+        }
+        Cmd::EnqueueFrom(s, i, next) => {
+            if let Some(t) = source_tracks(e, pages, &s).and_then(|(_, v)| v.get(i as usize).cloned()) {
+                e.enqueue(t, next);
+            }
+        }
+        Cmd::LikeFrom(s, i) => {
+            if let Some(t) = source_tracks(e, pages, &s).and_then(|(_, v)| v.get(i as usize).cloned()) {
+                e.toggle_like(t);
+            }
+        }
+        Cmd::Quality(q) => {
+            let q = match q.as_str() {
+                "hq" => api::Quality::Hq,
+                "nq" => api::Quality::Nq,
+                _ => api::Quality::Lossless,
+            };
+            if q != e.quality() {
+                e.set_quality(q);
+            }
+        }
+        Cmd::Normalize(on) => {
+            if on != e.normalize() {
+                e.toggle_normalize();
+            }
+        }
+        Cmd::TargetLufs(v) => e.set_target_lufs(v),
+        Cmd::Crossfade(v) => {
+            if (v - e.crossfade()).abs() > 0.01 {
+                e.set_crossfade(v);
+            }
+        }
+        Cmd::ReportPlays(on) => {
+            if on != e.cfg.report_plays {
+                e.toggle_report_plays();
+            }
+        }
+        Cmd::FastStart(on) => {
+            e.cfg.fast_start = on;
+            e.cfg.save(&e.paths);
+            if let Some(f) = &e.fetcher {
+                f.set_fast_start(on);
+            }
+        }
+        Cmd::ForgetSearch(q) => {
+            e.state.search_history.retain(|h| h != &q);
+            e.state.save(&e.paths);
+        }
         Cmd::Shutdown => {}
     }
 }
@@ -424,6 +649,8 @@ struct Publisher {
     likes_dirty: bool,
     likes_sent: bool,
     queue_mark: Option<(u64, usize)>,
+    playlists_mark: Option<(usize, u64, usize)>,
+    settings: Option<SettingsData>,
 }
 
 impl Publisher {
@@ -451,6 +678,38 @@ impl Publisher {
         if self.queue_mark != Some(mark) {
             self.queue_mark = Some(mark);
             l.on_queue(e.queue.title.clone(), e.queue.items.iter().map(TrackItem::from).collect());
+        }
+        let pls = match &e.playlists {
+            Loadable::Ready(v) => v.as_slice(),
+            _ => e.snapshot.playlists.as_slice(),
+        };
+        let mark = (
+            pls.len(),
+            pls.iter().map(|p| p.revision as u64 + p.track_count.unwrap_or(0) as u64).sum(),
+            e.personal.len(),
+        );
+        if self.playlists_mark != Some(mark) {
+            self.playlists_mark = Some(mark);
+            let (own, personal) = pages::playlists(e);
+            l.on_playlists(own, personal);
+        }
+        let settings = SettingsData {
+            quality: match e.quality() {
+                api::Quality::Lossless => "lossless",
+                api::Quality::Hq => "hq",
+                api::Quality::Nq => "nq",
+            }
+            .into(),
+            normalize: e.normalize(),
+            target_lufs: e.cfg.normalize_target_lufs,
+            crossfade_secs: e.crossfade(),
+            report_plays: e.cfg.report_plays,
+            fast_start: e.cfg.fast_start,
+            search_history: e.state.search_history.clone(),
+        };
+        if self.settings.as_ref() != Some(&settings) {
+            l.on_settings(settings.clone());
+            self.settings = Some(settings);
         }
     }
 }

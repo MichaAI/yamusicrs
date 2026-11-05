@@ -155,6 +155,15 @@ impl Album {
     pub fn explicit(&self) -> bool {
         self.content_warning.as_deref() == Some("explicit")
     }
+
+    /// Треки всех дисков подряд (только у ответа `/albums/{id}/with-tracks`).
+    pub fn volume_tracks(&self) -> Vec<Track> {
+        self.volumes
+            .iter()
+            .flatten()
+            .filter_map(|v| serde_json::from_value::<Track>(v.clone()).ok())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -422,6 +431,8 @@ pub struct Price {
 pub struct ArtistInfo {
     #[serde(default, deserialize_with = "id_or_empty")]
     pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub cover: Option<Cover>,
     pub og_image: Option<String>,
     #[serde(default)]
