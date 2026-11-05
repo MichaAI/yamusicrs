@@ -1236,13 +1236,10 @@ private fun CoverCarousel(
                 alpha = 1f - 0.35f * off
             },
         ) {
-            if (page == pos) {
-                with(shared) {
-                    Art(app, it.cover, Modifier.sharedElement(rememberSharedContentState(KEY_COVER), visibility).size(side), corner = 36.dp)
-                }
-            } else {
-                Art(app, it.cover, Modifier.size(side), corner = 36.dp)
-            }
+            // Одна и та же обложка на странице, меняется только модификатор: когда играющий
+            // сменился, обложка не пересоздаётся (иначе мигает), а лишь становится общим элементом.
+            val m = if (page == pos) with(shared) { Modifier.sharedElement(rememberSharedContentState(KEY_COVER), visibility) } else Modifier
+            Art(app, it.cover, m.size(side), corner = 36.dp)
         }
     }
 }

@@ -59,8 +59,10 @@ class YaApp : Application(), CoreListener {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    /** Обложки и миниатюры в памяти: до 48 МБ. */
-    private val covers = object : LruCache<String, Bitmap>(48 * 1024 * 1024) {
+    /** Обложки и миниатюры в памяти: четверть кучи (48–192 МБ) — листание не выталкивает соседей. */
+    private val covers = object : LruCache<String, Bitmap>(
+        maxOf(48L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 4).coerceAtMost(192L * 1024 * 1024).toInt(),
+    ) {
         override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
     }
 
