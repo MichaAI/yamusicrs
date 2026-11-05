@@ -414,7 +414,7 @@ impl Engine {
             yn_last_sent: Instant::now(),
             yn_fetch_gen: 0,
             yn_title: None,
-            yn_kind: "WEB",
+            yn_kind: "ANDROID",
             yn_state_at: Instant::now(),
             yn_wait_until: None,
             last_session_save: Instant::now(),

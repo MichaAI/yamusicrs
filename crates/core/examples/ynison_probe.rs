@@ -10,7 +10,7 @@ fn main() {
     let token = tok["access_token"].as_str().unwrap().to_string();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let h = yamusic_core::ynison::spawn(token, "yamusicrs-probe".into(), "yamusicrs · проба".into(), "WEB", 0, |e| match e {
+        let h = yamusic_core::ynison::spawn(token, "yamusicrs-probe".into(), "yamusicrs · проба".into(), "ANDROID", 0, |e| match e {
             yamusic_core::ynison::Event::Connected => println!("ПОДКЛЮЧЕНО"),
             yamusic_core::ynison::Event::Lost { error, retry_in } => {
                 println!("ПОТЕРЯНО: {error} (повтор через {retry_in} с)");

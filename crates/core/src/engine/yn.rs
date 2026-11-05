@@ -50,7 +50,7 @@ impl Engine {
             }
         });
         let tx = self.tx.clone();
-        let delay = self.yn_go_away_left();
+        let delay = 0;
         self.ynison = Some(ynison::spawn(token, id, title, self.yn_kind, delay, move |e| {
             let _ = tx.send(Msg::Ynison(e));
         }));
@@ -61,24 +61,6 @@ impl Engine {
         self.yn = None;
         self.yn_active = false;
         self.yn_connected = false;
-    }
-
-    /// Файл с моментом (unix, с), до которого сервер просил не подключаться.
-    fn yn_go_away_file(&self) -> std::path::PathBuf {
-        self.paths
-            .token_file
-            .parent()
-            .map(|d| d.join("ynison-go-away"))
-            .unwrap_or_else(|| "ynison-go-away".into())
-    }
-
-    /// Сколько ещё ждать по go-away прошлых запусков: перезапуск не должен продлевать блокировку.
-    fn yn_go_away_left(&self) -> u64 {
-        let now = chrono::Utc::now().timestamp();
-        std::fs::read_to_string(self.yn_go_away_file())
-            .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .map_or(0, |until| (until - now).max(0) as u64)
     }
 
     /// Постоянный id устройства: телефон видит одно и то же устройство между запусками.
@@ -155,10 +137,6 @@ impl Engine {
                 self.yn_active = false;
                 if was || retry_in >= 600 {
                     tracing::warn!("ynison: {error}; повтор через {retry_in} с");
-                }
-                if retry_in >= 60 {
-                    let until = chrono::Utc::now().timestamp() + retry_in as i64;
-                    let _ = std::fs::write(self.yn_go_away_file(), until.to_string());
                 }
                 self.yn_wait_until = Some(Instant::now() + Duration::from_secs(retry_in));
                 if retry_in >= 600 && was {

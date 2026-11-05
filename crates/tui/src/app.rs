@@ -193,6 +193,8 @@ pub enum Popup {
     },
     /// Подтверждение необратимого: y/Enter — да.
     Confirm { text: String, action: ConfirmAction },
+    /// Ynison «Слушать на»: (id, название, тип, активно); первая строка — этот компьютер (id пустой).
+    Devices { list: Vec<(String, String, String, bool)>, sel: usize },
 }
 
 pub enum InputAction {
@@ -2138,6 +2140,24 @@ impl App {
         self.open_artist(a);
     }
 
+    /// Окно «Слушать на» (Ynison): этот компьютер и устройства аккаунта.
+    fn open_devices(&mut self) {
+        if !self.engine.cfg.ynison {
+            return self.engine.toast("Ynison выключен — включите в настройках «Ynison (Слушать на…)»".into());
+        }
+        let here = self.engine.yn_active || self.engine.yn_other_device().is_none();
+        let mut list = vec![(String::new(), "Этот компьютер".to_string(), "WEB".to_string(), here)];
+        list.extend(
+            self.engine
+                .yn_devices()
+                .into_iter()
+                .filter(|d| d.4)
+                .map(|(id, title, kind, active, _)| (id, if title.is_empty() { "Устройство без имени".into() } else { title }, kind, active)),
+        );
+        let sel = list.iter().position(|d| d.3).unwrap_or(0);
+        self.popup = Some(Popup::Devices { list, sel });
+    }
+
     fn go_album(&mut self, a: api::Album) {
         self.leave_fullscreen();
         self.open_album(a);
@@ -2146,6 +2166,9 @@ impl App {
     fn popup_move(&mut self, d: isize) {
         match &mut self.popup {
             Some(Popup::Artists { list, sel }) => {
+                *sel = (*sel as isize + d).clamp(0, list.len() as isize - 1) as usize;
+            }
+            Some(Popup::Devices { list, sel }) => {
                 *sel = (*sel as isize + d).clamp(0, list.len() as isize - 1) as usize;
             }
             // Последняя строка — «новый плейлист».
@@ -2193,6 +2216,16 @@ impl App {
                 }
             },
             Some(Popup::Confirm { action, .. }) => self.confirm(action),
+            Some(Popup::Devices { list, .. }) => {
+                if let Some((id, ..)) = list.into_iter().nth(i) {
+                    let id = if id.is_empty() {
+                        self.engine.ynison.as_ref().map(|h| h.device_id.clone()).unwrap_or_default()
+                    } else {
+                        id
+                    };
+                    self.engine.yn_transfer(&id);
+                }
+            }
             Some(p @ Popup::Input { .. }) => self.popup = Some(p),
             None => {}
         }
@@ -2229,7 +2262,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.popup_move(-1),
             KeyCode::Down | KeyCode::Char('j') => self.popup_move(1),
             KeyCode::Enter => match &self.popup {
-                Some(Popup::Artists { sel, .. }) | Some(Popup::AddToPlaylist { sel, .. }) => self.popup_activate(*sel),
+                Some(Popup::Artists { sel, .. }) | Some(Popup::AddToPlaylist { sel, .. }) | Some(Popup::Devices { sel, .. }) => {
+                    self.popup_activate(*sel)
+                }
                 _ => self.popup = None,
             },
             KeyCode::Char('i') if matches!(self.popup, Some(Popup::TrackInfo { .. })) => self.popup_activate(0),
@@ -2711,12 +2746,30 @@ impl App {
             KeyCode::PageDown => self.move_sel(page_rows),
             KeyCode::Home | KeyCode::Char('g') => self.move_sel(-(1 << 20)),
             KeyCode::End | KeyCode::Char('G') => self.move_sel(1 << 20),
+            // Музыка на другом устройстве (Ynison) — клавиши плеера управляют им.
+            KeyCode::Left | KeyCode::Right if self.engine.yn_remote().is_some() => {
+                let s = self.engine.yn_remote().map(|r| r.2);
+                if let Some(s) = s {
+                    let d: i64 = match (k.code, shift) {
+                        (KeyCode::Left, true) => -30_000,
+                        (KeyCode::Left, false) => -5_000,
+                        (_, true) => 30_000,
+                        _ => 5_000,
+                    };
+                    let pos = self.engine.yn_remote_pos(s) as i64;
+                    self.engine.yn_remote_seek((pos + d).max(0) as u64);
+                }
+            }
+            KeyCode::Char(' ') if self.engine.yn_remote().is_some() => self.engine.yn_remote_toggle(),
+            KeyCode::Char('n') if self.engine.yn_remote().is_some() => self.engine.yn_remote_skip(1),
+            KeyCode::Char('p') if self.engine.yn_remote().is_some() => self.engine.yn_remote_skip(-1),
             KeyCode::Left => self.engine.seek_by(if shift { -30.0 } else { -5.0 }),
             KeyCode::Right => self.engine.seek_by(if shift { 30.0 } else { 5.0 }),
             KeyCode::Enter => self.activate(),
             KeyCode::Char(' ') => self.engine.toggle_pause(),
             KeyCode::Char('n') => self.engine.next(),
             KeyCode::Char('p') => self.engine.prev(),
+            KeyCode::Char('Y') => self.open_devices(),
             KeyCode::Char('+') | KeyCode::Char('=') => self.engine.set_volume(self.engine.player.volume() + 0.05),
             KeyCode::Char('-') | KeyCode::Char('_') => self.engine.set_volume(self.engine.player.volume() - 0.05),
             KeyCode::Char('l') => {

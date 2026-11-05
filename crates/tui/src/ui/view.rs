@@ -604,6 +604,35 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             let w = (text.width() as u16 + 8).max(44);
             (*title, w)
         }
+        crate::app::Popup::Devices { list, sel } => {
+            for (i, (_, title, kind, active)) in list.iter().enumerate() {
+                clickable.push((lines.len(), i));
+                let on = i == *sel;
+                let icon = match kind.as_str() {
+                    "ANDROID" | "IOS" => "📱",
+                    "SMART_SPEAKER" => "🔊",
+                    "WEB" | "WEB_DESKTOP" => "💻",
+                    _ => "📺",
+                };
+                let mut row = vec![
+                    Span::styled(if on { "  ▶ " } else { "    " }, ctx.accent()),
+                    Span::raw(format!("{icon} ")),
+                    Span::styled(title.clone(), if on { ctx.accent().add_modifier(Modifier::BOLD) } else { ctx.fg() }),
+                ];
+                if *active {
+                    row.push(Span::styled("  ⇄ сейчас здесь", ctx.accent()));
+                }
+                lines.push(Line::from(row));
+            }
+            if list.len() == 1 {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(format!("  Ynison: {}", app.engine.ynison_label()), ctx.dim()));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  Enter — слушать там · Esc — закрыть", ctx.dim()));
+            let w = list.iter().map(|d| d.1.width() + 18).max().unwrap_or(0).max(44) as u16;
+            (" Слушать на ", w)
+        }
         crate::app::Popup::Confirm { text, .. } => {
             lines.push(Line::styled(format!("  {text}"), ctx.fg()));
             lines.push(Line::raw(""));
@@ -660,6 +689,11 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     // Ynison: играем здесь по выбору с другого устройства или музыка сейчас на другом.
     if app.engine.yn_active {
         right.push(Span::styled("⇄ здесь  ", ctx.accent()));
+    } else if let Some((dev, q, st)) = app.engine.yn_remote() {
+        // Пульт: что играет там.
+        let title = usize::try_from(q.index).ok().and_then(|i| q.items.get(i)).map(|p| p.title.clone()).unwrap_or_default();
+        let icon = if st.paused { "⏸" } else { "▶" };
+        right.push(Span::styled(format!("⇄ {icon} {title} на «{dev}»  "), ctx.accent()));
     } else if let Some(t) = app.engine.yn_other_device() {
         right.push(Span::styled(format!("⇄ на «{t}»  "), ctx.dim()));
     }
@@ -3312,6 +3346,7 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("v / клик по обложке", "сцена: обложка крупно + текст"),
         ("r / s", "повтор трека / перемешивание"),
         ("Q", "качество: Lossless → Высокое → Экономия (Lossless — и для играющего, без паузы)"),
+        ("Y", "слушать на… (Ynison): перевести музыку на телефон или колонку; пока играет там, пробел/n/p/←→ управляют им"),
         ("B", "после перехода на lossless с ресемплингом — перезапустить трек bit-perfect"),
         ("N", "выравнивание громкости вкл/выкл"),
         ("x", "плавный переход: выкл → 3 → 6 → 10 с"),

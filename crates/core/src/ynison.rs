@@ -23,7 +23,10 @@ const REDIRECT: &str = "https://ynison.music.yandex.net/ynison_redirect.YnisonRe
 const STATE_PATH: &str = "/ynison_state.YnisonStateService/PutYnisonState";
 /// Как у официального клиента (grpc-okhttp из APK 2026.09.5).
 const USER_AGENT: &str = "grpc-java-okhttp/1.61.1";
-const APP_NAME: &str = "yamusicrs";
+/// Представляемся официальным Android-приложением (см. `oby.c()` в APK 2026.09.5):
+/// с другими именами хаб отвечает 500140000.
+const APP_NAME: &str = "Yandex Music";
+const APP_VERSION: &str = "2026.09.5 #167.1gpr";
 /// Автор статуса, когда сервер сам ставит паузу: активное устройство отключилось или его сменили.
 pub const SERVER_DISCONNECT: &str = "server-paused-on-active-device-disconnecting";
 /// Повторы подключения после обычных ошибок (секунды); go-away и backoff сервера соблюдаются точно.
@@ -171,10 +174,12 @@ async fn run<F: Fn(Event)>(me: Session, mut rx: UnboundedReceiver<Out>, emit: F)
     loop {
         let wait = match session(&me, &mut rx, &emit).await {
             End::Closed => return,
+            // go-away не соблюдаем (решение пользователя): обычная лестница повторов.
             End::GoAway(secs, e) => {
-                step = 0;
-                tracing::warn!("ynison: сервер просит подождать {secs} с: {e}");
-                (secs, e)
+                let s = LADDER[step.min(LADDER.len() - 1)];
+                step += 1;
+                tracing::warn!("ynison: сервер просит подождать {secs} с ({e}); повтор через {s} с");
+                (s, e)
             }
             End::Error(e, healthy) => {
                 if healthy {
@@ -252,7 +257,7 @@ fn headers(me: &Session, ticket: Option<(&str, &str)>) -> HeaderMap {
     put("te", "trailers");
     put("authorization", &format!("OAuth {}", me.token));
     put("ynison-device-id", &me.device_id);
-    put("ynison-device-info", &pb::device_info_header(me.kind, APP_NAME, env!("CARGO_PKG_VERSION")));
+    put("ynison-device-info", &pb::device_info_header(me.kind, APP_NAME, APP_VERSION));
     if let Some((t, s)) = ticket {
         put("ynison-redirect-ticket", t);
         put("ynison-session-id", s);
@@ -407,7 +412,7 @@ async fn session<F: Fn(Event)>(me: &Session, rx: &mut UnboundedReceiver<Out>, em
             "device": {
                 "info": {
                     "device_id": me.device_id, "title": me.title, "type": me.kind,
-                    "app_name": APP_NAME, "app_version": env!("CARGO_PKG_VERSION"),
+                    "app_name": APP_NAME, "app_version": APP_VERSION,
                 },
                 "capabilities": {"can_be_player": true, "can_be_remote_controller": true, "volume_granularity": 16},
                 "volume_info": {"volume": 1.0},
