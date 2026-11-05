@@ -384,6 +384,13 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     // «Назад» со страниц и сцены — предиктивный (PredictiveBackHandler в PageHost и Stage).
     val clock = rememberPlayClock(s)
     val hasTrack = s.track != null
+    // Ушли со строки поиска (страница, сцена, другая вкладка, меню трека) — клавиатура прячется.
+    val focus = androidx.compose.ui.platform.LocalFocusManager.current
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    LaunchedEffect(nav.stack.size, nav.stage, pager.currentPage, nav.menu != null, nav.devices, nav.queue) {
+        focus.clearFocus(force = true)
+        keyboard?.hide()
+    }
     // Сцена ⇄ мини-плеер — один переход, который «назад» перематывает за пальцем:
     // сцена по ходу жеста сжимается в пилюлю, отпустили — доезжает, передумали — раскрывается.
     val stageState = remember { SeekableTransitionState(false) }
@@ -699,6 +706,7 @@ fun Header(title: String, subtitle: String, action: @Composable () -> Unit) {
 
 @Composable
 fun SearchPill(value: String, onChange: (String) -> Unit, hint: String, onSubmit: (() -> Unit)? = null) {
+    val focus = androidx.compose.ui.platform.LocalFocusManager.current
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(RoundedCornerShape(28.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(horizontal = 18.dp, vertical = 14.dp),
@@ -715,7 +723,8 @@ fun SearchPill(value: String, onChange: (String) -> Unit, hint: String, onSubmit
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 keyboardOptions = KeyboardOptions(imeAction = if (onSubmit != null) ImeAction.Search else ImeAction.Done),
-                keyboardActions = KeyboardActions(onSearch = { onSubmit?.invoke() }),
+                // Искать — клавиатура уходит, видно результаты.
+                keyboardActions = KeyboardActions(onSearch = { focus.clearFocus(); onSubmit?.invoke() }),
                 modifier = Modifier.fillMaxWidth(),
             )
         }
