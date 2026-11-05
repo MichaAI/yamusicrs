@@ -879,10 +879,11 @@ fn snapshot(e: &Engine) -> PlayerState {
         },
         Screen::Main => Phase::Main,
     };
-    let track = e.now.as_ref().map(|n| &n.track).or(e.loading_track.as_ref());
-    let format = e
-        .now
-        .as_ref()
+    // Пока грузится выбранный, показываем уже его: `now` — ещё прежний, а позиция в очереди
+    // новая, и экран на миг рассогласовывался (в карусели мелькала прошлая обложка).
+    let track = e.loading_track.as_ref().or(e.now.as_ref().map(|n| &n.track));
+    let now = e.now.as_ref().filter(|_| e.loading_track.is_none());
+    let format = now
         .filter(|n| n.info.rate > 0)
         .map(|n| match n.info.bits {
             Some(b) => format!("{} {b}/{}", n.info.codec, khz(n.info.rate)),
@@ -895,7 +896,7 @@ fn snapshot(e: &Engine) -> PlayerState {
         track: track.map(TrackItem::from),
         loading: e.loading_track.is_some(),
         paused: e.player.paused() || (e.now.is_none() && e.loading_track.is_none()),
-        position_ms: e.now.as_ref().map_or(0, |n| (n.pos * 1000.0) as u64),
+        position_ms: now.map_or(0, |n| (n.pos * 1000.0) as u64),
         liked: track.is_some_and(|t| e.is_liked(t)),
         format,
         queue_title: e.queue.title.clone(),
