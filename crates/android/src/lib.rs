@@ -182,12 +182,31 @@ pub struct SettingsData {
     pub search_history: Vec<String>,
 }
 
+/// Кнопка в тосте.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Debug)]
+pub enum ToastAction {
+    /// «Играть» — продолжить восстановленную сессию.
+    Resume,
+    /// «Bit-perfect» — перезапустить ресемплящийся трек в родном формате.
+    BitPerfect,
+}
+
+impl From<engine::ToastAction> for ToastAction {
+    fn from(a: engine::ToastAction) -> Self {
+        match a {
+            engine::ToastAction::Resume => Self::Resume,
+            engine::ToastAction::RestartBitPerfect => Self::BitPerfect,
+        }
+    }
+}
+
 #[uniffi::export(with_foreign)]
 pub trait CoreListener: Send + Sync {
     fn on_state(&self, state: PlayerState);
     fn on_likes(&self, likes: Vec<TrackItem>);
     fn on_queue(&self, title: String, items: Vec<TrackItem>);
-    fn on_toast(&self, text: String, error: bool);
+    /// `action` — кнопка в тосте; нажатие → `Core::toast_action`.
+    fn on_toast(&self, text: String, error: bool, action: Option<ToastAction>);
     fn on_wheel(&self, presets: Vec<WavePreset>);
     /// Текст играющего трека `track_id`; `None` — текста нет.
     fn on_lyrics(&self, track_id: String, lyrics: Option<LyricsData>);
@@ -204,6 +223,7 @@ enum Cmd {
     PlayPause,
     Play,
     Pause,
+    BitPerfect,
     Next,
     Prev,
     PrevTrack,
@@ -295,6 +315,14 @@ impl Core {
 
     pub fn pause(&self) {
         self.send(Cmd::Pause);
+    }
+
+    /// Нажата кнопка в тосте.
+    pub fn toast_action(&self, action: ToastAction) {
+        self.send(match action {
+            ToastAction::Resume => Cmd::Play,
+            ToastAction::BitPerfect => Cmd::BitPerfect,
+        });
     }
 
     pub fn next(&self) {
@@ -516,7 +544,7 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
         Ok(e) => e,
         Err(e) => {
             tracing::error!("движок не запустился: {e:#}");
-            listener.on_toast(format!("Движок не запустился: {e:#}"), true);
+            listener.on_toast(format!("Движок не запустился: {e:#}"), true, None);
             return;
         }
     };
@@ -549,7 +577,7 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
         engine.tick();
         for e in engine.take_effects() {
             match e {
-                Effect::Toast { text, error } => listener.on_toast(text, error),
+                Effect::Toast { text, error, action } => listener.on_toast(text, error, action.map(Into::into)),
                 Effect::LikesChanged => publisher.likes_dirty = true,
                 Effect::Wheel { .. } => {
                     if let Loadable::Ready(items) = &engine.wave.items {
@@ -662,6 +690,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
                 e.toggle_pause();
             }
         }
+        Cmd::BitPerfect => e.restart_bit_perfect(),
         Cmd::Next => e.next(),
         Cmd::Prev => e.prev(),
         Cmd::PrevTrack => e.prev_track(),

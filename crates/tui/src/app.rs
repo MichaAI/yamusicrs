@@ -1989,8 +1989,12 @@ impl App {
 
     fn on_effect(&mut self, e: Effect) {
         match e {
-            Effect::Toast { text, error } => self.toasts.push(Toast {
-                text,
+            Effect::Toast { text, error, action } => self.toasts.push(Toast {
+                text: match action {
+                    None => text,
+                    Some(engine::ToastAction::Resume) => format!("{text} — Space"),
+                    Some(engine::ToastAction::RestartBitPerfect) => format!("{text} · B — перезапустить bit-perfect"),
+                },
                 at: Instant::now(),
                 error,
             }),

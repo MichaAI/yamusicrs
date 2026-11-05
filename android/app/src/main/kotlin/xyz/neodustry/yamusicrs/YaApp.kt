@@ -26,10 +26,11 @@ import uniffi.yamusic_android.Page
 import uniffi.yamusic_android.PlayerState
 import uniffi.yamusic_android.PlaylistItem
 import uniffi.yamusic_android.SettingsData
+import uniffi.yamusic_android.ToastAction
 import uniffi.yamusic_android.TrackItem
 import uniffi.yamusic_android.WavePreset
 
-data class Toast(val text: String, val error: Boolean)
+data class Toast(val text: String, val error: Boolean, val action: ToastAction?)
 
 /** Текст играющего трека: `lyrics == null` — текста нет. */
 data class TrackLyrics(val trackId: String, val lyrics: LyricsData?)
@@ -93,8 +94,8 @@ class YaApp : Application(), CoreListener {
         queue.value = title to items
     }
 
-    override fun onToast(text: String, error: Boolean) {
-        toasts.tryEmit(Toast(text, error))
+    override fun onToast(text: String, error: Boolean, action: ToastAction?) {
+        toasts.tryEmit(Toast(text, error, action))
     }
 
     override fun onWheel(presets: List<WavePreset>) {

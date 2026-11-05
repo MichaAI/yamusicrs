@@ -90,10 +90,20 @@ pub enum Msg {
     LikeFailed { track: Track, like: bool, error: String },
 }
 
+/// Действие, которое предлагает тост.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastAction {
+    /// Продолжить восстановленную сессию (стоит на паузе).
+    Resume,
+    /// Перезапустить ресемплящийся трек в родном формате.
+    RestartBitPerfect,
+}
+
 /// Что движок просит сделать интерфейс.
 #[derive(Debug, Clone)]
 pub enum Effect {
-    Toast { text: String, error: bool },
+    /// `action` — что тост предлагает сделать: TUI подписывает клавишу, телефон рисует кнопку.
+    Toast { text: String, error: bool, action: Option<ToastAction> },
     /// Подгрузить обложку заранее (трек открывается).
     Cover(String),
     /// Трек зазвучал (или встал на паузу в начале при восстановлении).
@@ -287,7 +297,7 @@ pub struct Engine {
     /// Откуда новый источник, пока идёт подмена на ходу.
     swap_origin: Option<(Token, Origin, bool)>,
     /// Подмена склеена, но ещё не зазвучала (декодер впереди): сообщение покажем, когда дойдёт.
-    swap_toast: Option<(Token, String)>,
+    swap_toast: Option<(Token, String, Option<ToastAction>)>,
     pub repeat_one: bool,
     pub shuffle: bool,
     /// Очередь правок плейлистов (исполняются по одной).
@@ -443,11 +453,15 @@ impl Engine {
     }
 
     pub fn toast(&mut self, text: String) {
-        self.emit(Effect::Toast { text, error: false });
+        self.emit(Effect::Toast { text, error: false, action: None });
+    }
+
+    pub fn toast_with(&mut self, text: String, action: ToastAction) {
+        self.emit(Effect::Toast { text, error: false, action: Some(action) });
     }
 
     pub fn toast_err(&mut self, text: String) {
-        self.emit(Effect::Toast { text, error: true });
+        self.emit(Effect::Toast { text, error: true, action: None });
     }
 
     /// Остановить звук совсем (MPRIS Stop).
@@ -509,8 +523,8 @@ impl Engine {
                 n.pos = pos.secs;
                 let changed = n.info.codec != pos.info.codec;
                 n.info = pos.info;
-                if changed && let Some((_, text)) = self.swap_toast.take_if(|(t, _)| *t == pos.token) {
-                    self.toast(text);
+                if changed && let Some((_, text, action)) = self.swap_toast.take_if(|(t, ..)| *t == pos.token) {
+                    self.emit(Effect::Toast { text, error: false, action });
                 }
             }
             _ => self.on_track_started(pos),
@@ -569,7 +583,7 @@ impl Engine {
                         let pos = resume.pos.min(tracks.len() - 1);
                         self.replace_queue(tracks, kind, resume.title);
                         self.play_index_at(pos, resume.secs, true);
-                        self.toast("Продолжаем с того же места — Space".into());
+                        self.toast_with("Продолжаем с того же места".into(), ToastAction::Resume);
                     }
                     Ok(_) => {}
                     Err(e) => tracing::warn!("не удалось восстановить сессию: {e}"),
@@ -939,7 +953,7 @@ impl Engine {
             match self.resume_at.take() {
                 Some((pos, secs)) => {
                     self.play_index_at(pos, secs, true);
-                    self.toast("Продолжаем с того же места — Space".into());
+                    self.toast_with("Продолжаем с того же места".into(), ToastAction::Resume);
                 }
                 None => self.schedule_next(),
             }
@@ -1664,11 +1678,11 @@ impl Engine {
                     Some(b) => format!("{} {b}/{}", info.codec, khz(info.rate)),
                     None => format!("{} {}", info.codec, khz(info.rate)),
                 };
-                let text = match info.resampled_to {
-                    Some(to) => format!("{fmt} без паузы, ресемплинг в {} · B — перезапустить bit-perfect", khz(to)),
-                    None => format!("{fmt} без паузы"),
+                let (text, action) = match info.resampled_to {
+                    Some(to) => (format!("{fmt} без паузы, ресемплинг в {}", khz(to)), Some(ToastAction::RestartBitPerfect)),
+                    None => (format!("{fmt} без паузы"), None),
                 };
-                self.swap_toast = Some((token, text));
+                self.swap_toast = Some((token, text, action));
             }
             Err(e) => {
                 tracing::warn!("подмена на ходу: {e}");

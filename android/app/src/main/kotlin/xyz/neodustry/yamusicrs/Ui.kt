@@ -99,9 +99,6 @@ import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ShortNavigationBar
 import androidx.compose.material3.ShortNavigationBarItem
-import androidx.compose.material3.Snackbar
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
@@ -239,8 +236,6 @@ fun YaTheme(pal: Pal, content: @Composable () -> Unit) {
 fun AppScreen(app: YaApp, openUrl: (String) -> Unit) {
     val state by app.state.collectAsStateWithLifecycle()
     val pal by app.palette.collectAsStateWithLifecycle()
-    val snack = remember { SnackbarHostState() }
-    LaunchedEffect(Unit) { app.toasts.collect { snack.showSnackbar(it.text) } }
     YaTheme(pal) {
         // Surface задаёт и цвет текста по умолчанию (иначе он чёрный — чёрным по тёмному).
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background, contentColor = MaterialTheme.colorScheme.onSurface) {
@@ -250,14 +245,7 @@ fun AppScreen(app: YaApp, openUrl: (String) -> Unit) {
                 is Phase.Login -> Login(app, pal, p, openUrl)
                 is Phase.Main -> Main(app, pal, state!!)
             }
-            SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp)) {
-                Snackbar(
-                    it,
-                    shape = RoundedCornerShape(20.dp),
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                )
-            }
+            ToastHost(app, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp))
         }
         }
     }
