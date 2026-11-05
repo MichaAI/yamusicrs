@@ -12,3 +12,4 @@ pub mod offline;
 pub mod offline_wave;
 pub mod tinyml;
 pub mod ynison;
+pub mod ynison_pb;

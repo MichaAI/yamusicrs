@@ -305,6 +305,13 @@ pub struct Engine {
     yn_last_sent: Instant,
     /// Поколение загрузки очереди с другого устройства (устаревшие ответы отбрасываются).
     yn_fetch_gen: u64,
+    /// Название и тип устройства в «Слушать на…» (по умолчанию «yamusicrs · хост», WEB).
+    pub yn_title: Option<String>,
+    pub yn_kind: &'static str,
+    /// Когда пришёл последний статус хаба (позиция чужого устройства тикает от него).
+    yn_state_at: Instant,
+    /// До какого момента сервер просил не подключаться (для подписи в настройках).
+    yn_wait_until: Option<Instant>,
     last_session_save: Instant,
     last_stall: Option<Instant>,
     /// Пауза до следующей попытки оживить вывод: растёт, пока он не отвечает.
@@ -406,6 +413,10 @@ impl Engine {
             yn_remote_start: false,
             yn_last_sent: Instant::now(),
             yn_fetch_gen: 0,
+            yn_title: None,
+            yn_kind: "WEB",
+            yn_state_at: Instant::now(),
+            yn_wait_until: None,
             last_session_save: Instant::now(),
             last_stall: None,
             stall_backoff: STALL_FIRST,

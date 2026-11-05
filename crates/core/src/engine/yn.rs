@@ -42,13 +42,16 @@ impl Engine {
         let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
             .map(|h| h.trim().to_string())
             .unwrap_or_default();
-        let title = if host.is_empty() {
-            "yamusicrs".to_string()
-        } else {
-            format!("yamusicrs · {host}")
-        };
+        let title = self.yn_title.clone().unwrap_or_else(|| {
+            if host.is_empty() {
+                "yamusicrs".to_string()
+            } else {
+                format!("yamusicrs · {host}")
+            }
+        });
         let tx = self.tx.clone();
-        self.ynison = Some(ynison::spawn(token, id, title, move |e| {
+        let delay = self.yn_go_away_left();
+        self.ynison = Some(ynison::spawn(token, id, title, self.yn_kind, delay, move |e| {
             let _ = tx.send(Msg::Ynison(e));
         }));
     }
@@ -58,6 +61,24 @@ impl Engine {
         self.yn = None;
         self.yn_active = false;
         self.yn_connected = false;
+    }
+
+    /// Файл с моментом (unix, с), до которого сервер просил не подключаться.
+    fn yn_go_away_file(&self) -> std::path::PathBuf {
+        self.paths
+            .token_file
+            .parent()
+            .map(|d| d.join("ynison-go-away"))
+            .unwrap_or_else(|| "ynison-go-away".into())
+    }
+
+    /// Сколько ещё ждать по go-away прошлых запусков: перезапуск не должен продлевать блокировку.
+    fn yn_go_away_left(&self) -> u64 {
+        let now = chrono::Utc::now().timestamp();
+        std::fs::read_to_string(self.yn_go_away_file())
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .map_or(0, |until| (until - now).max(0) as u64)
     }
 
     /// Постоянный id устройства: телефон видит одно и то же устройство между запусками.
@@ -86,6 +107,16 @@ impl Engine {
             return "вкл (без сети)".into();
         }
         if !self.yn_connected {
+            if let Some(left) = self.yn_wait_until.and_then(|t| t.checked_duration_since(Instant::now()))
+                && left.as_secs() >= 60
+            {
+                let m = left.as_secs().div_ceil(60);
+                return if m >= 60 {
+                    format!("вкл · Яндекс не пускает, повтор через {} ч", m.div_ceil(60))
+                } else {
+                    format!("вкл · Яндекс не пускает, повтор через {m} мин")
+                };
+            }
             return "вкл · подключаюсь".into();
         }
         if self.yn_active {
@@ -111,6 +142,7 @@ impl Engine {
         match ev {
             Event::Connected => {
                 self.yn_connected = true;
+                self.yn_wait_until = None;
                 tracing::info!("ynison: подключено");
                 // Соединение моргнуло, а музыка здесь играет — снова заявляем, что играет здесь.
                 if self.now.is_some() && !self.player.paused() {
@@ -124,7 +156,12 @@ impl Engine {
                 if was || retry_in >= 600 {
                     tracing::warn!("ynison: {error}; повтор через {retry_in} с");
                 }
-                if retry_in >= 600 {
+                if retry_in >= 60 {
+                    let until = chrono::Utc::now().timestamp() + retry_in as i64;
+                    let _ = std::fs::write(self.yn_go_away_file(), until.to_string());
+                }
+                self.yn_wait_until = Some(Instant::now() + Duration::from_secs(retry_in));
+                if retry_in >= 600 && was {
                     self.toast_err(format!("Ynison недоступен ({error}); следующая попытка через {} мин", retry_in / 60));
                 }
             }
@@ -166,6 +203,9 @@ impl Engine {
             } else if let (true, Some(s)) = (status_cmd, r.status) {
                 self.yn_apply_status(s);
             }
+        }
+        if r.status != self.yn.as_ref().and_then(|o| o.status) {
+            self.yn_state_at = Instant::now();
         }
         self.yn = Some(r);
     }
@@ -393,6 +433,101 @@ impl Engine {
             return self.yn_claim();
         }
         self.yn_publish_status();
+    }
+
+    // ── пульт: управление другим активным устройством ───────────────────────
+
+    /// Устройства аккаунта, кроме нас: (id, название, тип, активно ли, можно ли включить на нём).
+    pub fn yn_devices(&self) -> Vec<(String, String, String, bool, bool)> {
+        let (Some(r), Some(h)) = (&self.yn, &self.ynison) else { return Vec::new() };
+        r.devices
+            .iter()
+            .filter(|d| d.id != h.device_id)
+            .map(|d| (d.id.clone(), d.title.clone(), d.kind.clone(), r.active.as_deref() == Some(d.id.as_str()), d.can_play))
+            .collect()
+    }
+
+    /// Играет другое устройство: его очередь и статус (для пульта).
+    pub fn yn_remote(&self) -> Option<(String, &QueueState, Status)> {
+        if self.yn_active {
+            return None;
+        }
+        let title = self.yn_other_device()?;
+        let r = self.yn.as_ref()?;
+        Some((title, r.queue.as_ref()?, r.status?))
+    }
+
+    /// Перевести воспроизведение на устройство (или сюда — своим id).
+    pub fn yn_transfer(&mut self, device_id: &str) {
+        let Some(h) = &self.ynison else { return };
+        if device_id == h.device_id {
+            // Сюда: забираем активность и, если очередь там есть, продолжаем с той же секунды.
+            if let Some(r) = self.yn.clone()
+                && let (Some(q), Some(s)) = (r.queue, r.status)
+                && !self.yn_active
+            {
+                h.send(Out::Activate);
+                self.yn_active = true;
+                self.yn_apply_queue(q, s);
+                return;
+            }
+            return self.yn_claim();
+        }
+        // Отсюда: пауза здесь, активность — туда.
+        if self.yn_active && self.now.is_some() && !self.player.paused() {
+            self.player.set_paused(true);
+            let pos = self.now.as_ref().map_or(0.0, |n| n.pos);
+            self.emit(Effect::Playback { playing: false, pos });
+        }
+        if self.yn_active {
+            // Сначала актуальная позиция, чтобы там продолжили с нужного места.
+            self.yn_publish_player();
+        }
+        if let Some(h) = &self.ynison {
+            h.send(Out::Transfer(device_id.to_string()));
+        }
+        self.yn_active = false;
+    }
+
+    /// Пульт: пауза/игра на активном устройстве.
+    pub fn yn_remote_toggle(&mut self) {
+        let Some((_, _, s)) = self.yn_remote() else { return };
+        let progress_ms = self.yn_remote_pos(s);
+        if let Some(h) = &self.ynison {
+            h.send(Out::RemoteStatus(Status { paused: !s.paused, progress_ms, ..s }));
+        }
+    }
+
+    /// Пульт: перемотка на активном устройстве.
+    pub fn yn_remote_seek(&mut self, ms: u64) {
+        let Some((_, _, s)) = self.yn_remote() else { return };
+        if let Some(h) = &self.ynison {
+            h.send(Out::RemoteStatus(Status { progress_ms: ms.min(s.duration_ms.max(ms)), ..s }));
+        }
+    }
+
+    /// Пульт: соседний трек очереди активного устройства.
+    pub fn yn_remote_skip(&mut self, delta: i64) {
+        let Some((_, q, s)) = self.yn_remote() else { return };
+        // Назад в первые секунды трека — на предыдущий, позже — в начало этого (как в приложениях).
+        let delta = if delta < 0 && self.yn_remote_pos(s) > 3000 { 0 } else { delta };
+        let idx = q.index + delta;
+        if idx < 0 || idx as usize >= q.items.len() {
+            return;
+        }
+        let q = QueueState { index: idx, ..q.clone() };
+        if let Some(h) = &self.ynison {
+            h.send(Out::RemotePlayer(q, Status { progress_ms: 0, paused: false, duration_ms: 0 }));
+        }
+    }
+
+    /// Позиция активного устройства сейчас: последняя присланная плюс прошедшее время, если играет.
+    pub fn yn_remote_pos(&self, s: Status) -> u64 {
+        if s.paused {
+            return s.progress_ms;
+        }
+        let since = self.yn_state_at.elapsed().as_millis() as u64;
+        (s.progress_ms + since).min(if s.duration_ms > 0 { s.duration_ms } else { u64::MAX })
     }
 
     pub fn yn_tick(&mut self) {

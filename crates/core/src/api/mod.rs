@@ -69,15 +69,19 @@ pub fn http_client() -> reqwest::Client {
     let b = reqwest::Client::builder()
         .user_agent(concat!("yamusicrs/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(10));
-    // Платформенному верификатору на Android нужна инициализация через JNI и свой AAR —
-    // там проверяем по корням Mozilla, как Ynison.
+    with_roots(b).build().expect("reqwest client")
+}
+
+/// Корни TLS: платформенному верификатору на Android нужна инициализация через JNI и свой
+/// AAR — там проверяем по корням Mozilla.
+pub fn with_roots(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     #[cfg(target_os = "android")]
     let b = b.tls_certs_only(
         webpki_root_certs::TLS_SERVER_ROOT_CERTS
             .iter()
             .filter_map(|c| reqwest::Certificate::from_der(c).ok()),
     );
-    b.build().expect("reqwest client")
+    b
 }
 
 fn now_ts() -> i64 {

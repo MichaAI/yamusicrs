@@ -65,7 +65,10 @@ class YaApp : Application(), CoreListener {
     override fun onCreate() {
         super.onCreate()
         val music = getExternalFilesDir("music") ?: File(filesDir, "music")
-        core = Core(filesDir.absolutePath, cacheDir.absolutePath, music.absolutePath, this)
+        val name = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
+            .filter { it.isNotBlank() }.distinct().joinToString(" ")
+            .replaceFirstChar { it.uppercase() }
+        core = Core(filesDir.absolutePath, cacheDir.absolutePath, music.absolutePath, name, this)
         scope.launch {
             state.map { it?.track?.cover }.distinctUntilChanged().collectLatest { url ->
                 val bmp = url?.let { cover(it) } ?: return@collectLatest

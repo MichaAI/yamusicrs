@@ -100,6 +100,31 @@ pub enum Phase {
     Main,
 }
 
+/// Устройство аккаунта в Ynison («Слушать на…»), кроме нас.
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct DeviceItem {
+    pub id: String,
+    pub title: String,
+    /// `ANDROID`, `IOS`, `WEB`, `SMART_SPEAKER`…
+    pub kind: String,
+    pub active: bool,
+    pub can_play: bool,
+}
+
+/// Что играет на другом устройстве (мы — пульт).
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct RemoteNow {
+    pub device: String,
+    pub title: String,
+    pub cover: Option<String>,
+    pub paused: bool,
+    /// Позиция на момент последнего ответа хаба; дальше тикает сама, если не на паузе.
+    pub position_ms: u64,
+    pub duration_ms: u64,
+    pub has_prev: bool,
+    pub has_next: bool,
+}
+
 #[derive(uniffi::Record, Clone, PartialEq, Debug)]
 pub struct PlayerState {
     pub phase: Phase,
@@ -123,6 +148,9 @@ pub struct PlayerState {
     /// Волна запускается.
     pub wave_loading: bool,
     pub likes_loading: bool,
+    /// Ynison: другие устройства и что играет на активном из них.
+    pub devices: Vec<DeviceItem>,
+    pub remote: Option<RemoteNow>,
 }
 
 /// Настройки звука и отчётов (как вкладка «Настройки» в TUI).
@@ -138,6 +166,10 @@ pub struct SettingsData {
     pub report_plays: bool,
     /// Быстрый старт: из сети сначала AAC, lossless подменяет на ходу; следующие треки прогреваются.
     pub fast_start: bool,
+    /// Ynison: видно в «Слушать на…», можно управлять другими устройствами.
+    pub ynison: bool,
+    /// Состояние Ynison для подписи («играет здесь», «Яндекс не пускает…»).
+    pub ynison_status: String,
     /// Недавние поисковые запросы, свежие первыми.
     pub search_history: Vec<String>,
 }
@@ -184,6 +216,11 @@ enum Cmd {
     Crossfade(f32),
     ReportPlays(bool),
     FastStart(bool),
+    Ynison(bool),
+    Transfer(String),
+    RemotePlayPause,
+    RemoteSkip(i64),
+    RemoteSeek(u64),
     ForgetSearch(String),
     Shutdown,
 }
@@ -199,7 +236,14 @@ impl Core {
     /// `files_dir` — токен, состояние, снимок; `cache_dir` — обложки и временные файлы;
     /// `music_dir` — скачанные треки.
     #[uniffi::constructor]
-    pub fn new(files_dir: String, cache_dir: String, music_dir: String, listener: Arc<dyn CoreListener>) -> Arc<Self> {
+    /// `device_name` — модель телефона, для списка «Слушать на…» в Ynison.
+    pub fn new(
+        files_dir: String,
+        cache_dir: String,
+        music_dir: String,
+        device_name: String,
+        listener: Arc<dyn CoreListener>,
+    ) -> Arc<Self> {
         init_logging();
         let (tx, rx) = unbounded_channel();
         let files = PathBuf::from(files_dir);
@@ -219,7 +263,7 @@ impl Core {
                     .enable_all()
                     .build()
                     .expect("tokio");
-                rt.block_on(run(paths, music, rx, listener));
+                rt.block_on(run(paths, music, device_name, rx, listener));
                 // Фоновые задачи (загрузки, Ynison) не держат выход.
                 rt.shutdown_timeout(Duration::from_millis(200));
             })
@@ -369,6 +413,32 @@ impl Core {
         self.send(Cmd::FastStart(on));
     }
 
+    pub fn set_ynison(&self, on: bool) {
+        self.send(Cmd::Ynison(on));
+    }
+
+    /// Перевести воспроизведение на устройство; пустая строка — сюда.
+    pub fn transfer(&self, device_id: String) {
+        self.send(Cmd::Transfer(device_id));
+    }
+
+    /// Пульт: пауза/игра на активном устройстве.
+    pub fn remote_play_pause(&self) {
+        self.send(Cmd::RemotePlayPause);
+    }
+
+    pub fn remote_next(&self) {
+        self.send(Cmd::RemoteSkip(1));
+    }
+
+    pub fn remote_prev(&self) {
+        self.send(Cmd::RemoteSkip(-1));
+    }
+
+    pub fn remote_seek(&self, position_ms: u64) {
+        self.send(Cmd::RemoteSeek(position_ms));
+    }
+
     pub fn forget_search(&self, query: String) {
         self.send(Cmd::ForgetSearch(query));
     }
@@ -414,11 +484,12 @@ fn output() -> yamusic_core::audio::OutputFactory {
     Box::new(|_| Err(color_eyre::eyre::eyre!("yamusic-android работает только на Android")))
 }
 
-async fn run(paths: Paths, music: PathBuf, mut rx: UnboundedReceiver<Cmd>, listener: Arc<dyn CoreListener>) {
+async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: UnboundedReceiver<Cmd>, listener: Arc<dyn CoreListener>) {
     let mut cfg = Config::load(&paths);
     cfg.library_dir = music;
-    // Ynison на телефоне пока не включаем: здесь и так официальный клиент рядом.
-    cfg.ynison = false;
+    // На телефоне Ynison — только по явному включению в настройках (рядом и так официальное
+    // приложение, а лишние попытки при отказе сервера продлевают его go-away).
+    cfg.ynison = ynison_flag(&paths).exists();
     let (etx, mut erx) = unbounded_channel();
     let mut engine = match Engine::new(etx, cfg, paths, false, output()) {
         Ok(e) => e,
@@ -428,6 +499,8 @@ async fn run(paths: Paths, music: PathBuf, mut rx: UnboundedReceiver<Cmd>, liste
             return;
         }
     };
+    engine.yn_kind = "ANDROID";
+    engine.yn_title = Some(format!("yamusicrs · {device_name}"));
     let mut publisher = Publisher::default();
     let mut pages = Pages::default();
     let (ptx, mut prx) = unbounded_channel::<Reply>();
@@ -633,6 +706,24 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
                 f.set_fast_start(on);
             }
         }
+        Cmd::Ynison(on) => {
+            let flag = ynison_flag(&e.paths);
+            let _ = if on { std::fs::write(&flag, b"1") } else { std::fs::remove_file(&flag) };
+            if on != e.cfg.ynison {
+                e.toggle_ynison();
+            }
+        }
+        Cmd::Transfer(id) => {
+            let id = if id.is_empty() {
+                e.ynison.as_ref().map(|h| h.device_id.clone()).unwrap_or_default()
+            } else {
+                id
+            };
+            e.yn_transfer(&id);
+        }
+        Cmd::RemotePlayPause => e.yn_remote_toggle(),
+        Cmd::RemoteSkip(d) => e.yn_remote_skip(d),
+        Cmd::RemoteSeek(ms) => e.yn_remote_seek(ms),
         Cmd::ForgetSearch(q) => {
             e.state.search_history.retain(|h| h != &q);
             e.state.save(&e.paths);
@@ -705,6 +796,8 @@ impl Publisher {
             crossfade_secs: e.crossfade(),
             report_plays: e.cfg.report_plays,
             fast_start: e.cfg.fast_start,
+            ynison: e.cfg.ynison,
+            ynison_status: e.ynison_label(),
             search_history: e.state.search_history.clone(),
         };
         if self.settings.as_ref() != Some(&settings) {
@@ -755,7 +848,29 @@ fn snapshot(e: &Engine) -> PlayerState {
         wave_name: e.wave.active_name.clone().unwrap_or_default(),
         wave_loading: e.wave.loading,
         likes_loading: matches!(e.likes, Loadable::Loading),
+        devices: e
+            .yn_devices()
+            .into_iter()
+            .map(|(id, title, kind, active, can_play)| DeviceItem { id, title, kind, active, can_play })
+            .collect(),
+        remote: e.yn_remote().and_then(|(device, q, st)| {
+            let p = usize::try_from(q.index).ok().and_then(|i| q.items.get(i))?;
+            Some(RemoteNow {
+                device,
+                title: p.title.clone(),
+                cover: p.cover.as_deref().map(|u| api::cover_url(u, 400)),
+                paused: st.paused,
+                position_ms: st.progress_ms,
+                duration_ms: st.duration_ms,
+                has_prev: q.index > 0,
+                has_next: (q.index as usize) + 1 < q.items.len(),
+            })
+        }),
     }
+}
+
+fn ynison_flag(p: &Paths) -> PathBuf {
+    p.token_file.with_file_name("ynison-on")
 }
 
 fn khz(rate: u32) -> String {

@@ -5452,6 +5452,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "base64 0.23.1",
+ "bytes",
  "chrono",
  "color-eyre",
  "crossbeam-channel",
@@ -5460,6 +5461,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "http-body-util",
  "libc",
  "lofty",
  "parking_lot",
@@ -5476,6 +5478,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "webpki-root-certs",
 ]
 

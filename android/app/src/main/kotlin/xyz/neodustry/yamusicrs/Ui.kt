@@ -367,8 +367,17 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                     }
                 }
                 PageHost(app, nav)
+                val remote = s.remote
                 androidx.compose.animation.AnimatedVisibility(
-                    !nav.stage && hasTrack,
+                    remote != null && !nav.stage,
+                    Modifier.align(Alignment.BottomCenter),
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                ) {
+                    remote?.let { RemotePill(app, nav, it) }
+                }
+                androidx.compose.animation.AnimatedVisibility(
+                    !nav.stage && hasTrack && remote == null,
                     Modifier.align(Alignment.BottomCenter),
                     enter = fadeIn(),
                     exit = fadeOut(),
@@ -406,6 +415,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
         }
     }
     QueueSheet(app, nav, s.queuePos?.toInt())
+    DevicesSheet(app, nav, s)
     TrackMenu(app, nav)
     }
 }
@@ -868,6 +878,8 @@ private fun Stage(
                     )
                     Spacer(Modifier.width(8.dp))
                     val nav = LocalNav.current
+                    ShapeIconButton(Ic.Cast, "Слушать на", { nav.devices = true }, size = 48.dp)
+                    Spacer(Modifier.width(8.dp))
                     ShapeIconButton(Ic.More, "Ещё", {
                         val i = s.queuePos?.toInt()
                         if (i != null) nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Queue, i)

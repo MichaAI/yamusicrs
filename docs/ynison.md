@@ -153,3 +153,49 @@ Android 2026.09.5 использует тот же протокол.
 
 Исследование MA: github.com/trudenboy/ma-provider-yandex-ynison,
 `docs/research/2026-09-01-live-ynison-official-client.md`.
+
+## gRPC, как у Android (2026-11-05)
+
+С середины октября 2026 хаб не отдаёт JSON-WebSocket сторонним клиентам: сразу 503 +
+`ynison-error-code 500140000` + `go-away 3600` (у Music Assistant так же на любых аккаунтах, IP
+и device id; веб music.yandex.ru тоже не подключается). Работают только мобильные приложения,
+а они ходят по gRPC. Транспорт yamusicrs переведён на gRPC (`crates/core/src/ynison.rs`,
+схема и кодек protobuf ↔ JSON — `crates/core/src/ynison_pb.rs`).
+
+- Redirector: unary `https://ynison.music.yandex.net/ynison_redirect.YnisonRedirectService/GetRedirectToYnison`,
+  запрос — пустое сообщение, ответ `{host=1, redirect_ticket=2, session_id=3 int64, keep_alive_params=4}`.
+- Хаб: двунаправленный стрим `https://<host>/ynison_state.YnisonStateService/PutYnisonState`.
+- Метаданные (HTTP/2-заголовки): `authorization: OAuth …`, `Ynison-Device-Id`,
+  `Ynison-Device-Info` — **base64 без паддинга от protobuf** `{type=1 enum, app_name=2, app_version=3}`,
+  `Ynison-Redirect-Ticket`, `Ynison-Session-Id`. Ответные: `Ynison-Go-Away-For-Seconds`,
+  `Ynison-Backoff-Millis`, `Ynison-Error-Code` (в заголовках или трейлерах вместе с `grpc-status`).
+- User-Agent официального клиента: `grpc-java-okhttp/1.61.1`.
+- Официальный клиент представляется `type ANDROID, app_name "Yandex Music",
+  app_version "2026.09.5 #167.1gpr"` (класс `oby.c()`).
+
+Схема восстановлена скриптом по строкам `newMessageInfo` protobuf-lite (имена полей в APK
+не обфусцированы): `PutYnisonStateRequest` (класс `uco`) — oneof действий 1 update_full_state,
+2 update_active_device, 3 update_playing_status, 4 update_player_state, 5 update_volume,
+6 update_player_queue_inject, 9 update_session_params, 11 update_volume_info,
+12 sync_state_from_eov; плюс 7 player_action_timestamp_ms, 8 rid, 10 activity_interception_type.
+Ответ (`wco`): 1 player_state, 2 devices, 3 active_device_id_optional (обёртка `{value}`),
+4 timestamp_ms, 5 rid. Полностью — в `ynison_pb.rs`.
+
+Числа перечислений (из APK): activity_interception_type DO_NOT_INTERCEPT_BY_DEFAULT=**0**,
+INTERCEPT_IF_NO_ONE_ACTIVE=1, INTERCEPT_EAGER=2; entity_type UNSPECIFIED=0 ARTIST PLAYLIST ALBUM
+RADIO VARIOUS GENERATIVE FM_RADIO VIDEO_WAVE LOCAL_TRACKS=9; entity_context
+BASED_ON_ENTITY_BY_DEFAULT=0 USER_TRACKS DOWNLOADED_TRACKS SEARCH MUSIC_HISTORY
+MUSIC_HISTORY_SEARCH ARTIST_MY_COLLECTION ARTIST_FAMILIAR_FROM_WAVE=7; repeat UNSPECIFIED=0
+NONE ONE ALL; playable_type UNSPECIFIED=0 TRACK LOCAL_TRACK INFINITE VIDEO_CLIP; device type
+(имён в APK нет, порядок из десктопа) UNSPECIFIED=0 WEB=1 ANDROID=2 IOS SMART_SPEAKER WEB_TV
+ANDROID_TV APPLE_TV, всего значений 10.
+
+Проверка 2026-11-05 10:16 MSK (gRPC, `app_name "yamusicrs"`, type WEB): транспорт рабочий —
+redirector ответил настоящим gRPC-статусом 14 с `ynison-error-code 500140000`, но go-away уже
+**43200 с** (утренняя JSON-проба получила 3600): каждая попытка, похоже, продлевает отказ.
+go-away теперь запоминается в `<data>/ynison-go-away` и соблюдается после перезапуска.
+Открытый вопрос: пускает ли хаб по `app_name`/типу (официальный клиент — "Yandex Music", ANDROID).
+
+Пульт: устройство подключается с `can_be_remote_controller: true`. Управление активным —
+`update_playing_status` (пауза/позиция) и `update_player_state` (другой индекс очереди) со своей
+версией, перевод — `update_active_device` на id устройства.

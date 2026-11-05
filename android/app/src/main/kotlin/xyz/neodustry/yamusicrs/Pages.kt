@@ -30,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -65,6 +66,7 @@ class Nav(private val app: YaApp) {
     var stage by mutableStateOf(false)
     var queue by mutableStateOf(false)
     var menu by mutableStateOf<MenuTarget?>(null)
+    var devices by mutableStateOf(false)
 
     private fun push(id: ULong, title: String) {
         stage = false
@@ -685,6 +687,11 @@ fun SettingsTab(app: YaApp) {
             }
         }
         Group(null, null) {
+            Toggle("Слушать на других устройствах", s.ynisonStatus.replaceFirstChar { it.uppercase() }.let {
+                if (s.ynison) "Ynison: $it" else "Телефон или компьютер с Яндекс Музыкой включает музыку здесь, а отсюда — там"
+            }, s.ynison) { app.core.setYnison(it) }
+        }
+        Group(null, null) {
             Toggle("История прослушиваний", "Отправлять в Яндекс: так точнее рекомендации волны", s.reportPlays) { app.core.setReportPlays(it) }
         }
         val ctx = androidx.compose.ui.platform.LocalContext.current
@@ -808,3 +815,123 @@ fun QueueSheet(app: YaApp, nav: Nav, queuePos: Int?) {
         }
     }
 }
+
+// ── Ynison: устройства и пульт ──────────────────────────────────────────────
+
+private fun deviceIcon(kind: String) = when (kind) {
+    "ANDROID", "IOS" -> Ic.Phone
+    "WEB", "WEB_DESKTOP" -> Ic.Computer
+    "SMART_SPEAKER" -> Ic.Speaker
+    else -> Ic.Cast
+}
+
+/** «Слушать на…»: где играет музыка, тап — перевести туда. */
+@Composable
+fun DevicesSheet(app: YaApp, nav: Nav, s: uniffi.yamusic_android.PlayerState) {
+    if (!nav.devices) return
+    val st by app.settings.collectAsStateWithLifecycle()
+    val here = s.remote == null && s.devices.none { it.active }
+    ModalBottomSheet(
+        onDismissRequest = { nav.devices = false },
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+    ) {
+        Column(Modifier.padding(bottom = 24.dp)) {
+            Text(
+                "Слушать на",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Black,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            )
+            DeviceRow(Ic.Phone, "Этот телефон", if (here) "Сейчас здесь" else null, here, here && !s.paused) {
+                app.core.transfer("")
+                nav.devices = false
+            }
+            s.devices.filter { it.canPlay }.forEach { d ->
+                DeviceRow(deviceIcon(d.kind), d.title.ifBlank { "Устройство без имени" }, if (d.active) "Сейчас здесь" else null, d.active,
+                    d.active && s.remote?.paused == false) {
+                    app.core.transfer(d.id)
+                    nav.devices = false
+                }
+            }
+            val settings = st
+            if (settings != null && (!settings.ynison || s.devices.isEmpty())) {
+                Text(
+                    if (!settings.ynison) "Включите «Слушать на других устройствах» в настройках"
+                    else settings.ynisonStatus.replaceFirstChar { it.uppercase() },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceRow(icon: ImageVector, title: String, sub: String?, active: Boolean, playing: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(20.dp))
+            .background(if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f) else Color.Transparent)
+            .clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(26.dp))
+        Spacer(Modifier.width(18.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium)
+            sub?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+        }
+        if (active) EqBars(playing, MaterialTheme.colorScheme.primary)
+    }
+}
+
+/**
+ * Пульт: музыка играет на другом устройстве — пилюля вместо мини-плеера. Обложка и название
+ * оттуда, кнопки управляют им; тап — выбрать, где слушать.
+ */
+@Composable
+fun RemotePill(app: YaApp, nav: Nav, r: uniffi.yamusic_android.RemoteNow) {
+    // Позиция тикает от последнего ответа хаба.
+    val clock = remember(r.positionMs, r.paused) { System.currentTimeMillis() }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(r.paused) {
+        while (!r.paused) {
+            kotlinx.coroutines.delay(500)
+            now = System.currentTimeMillis()
+        }
+    }
+    val pos = if (r.paused) r.positionMs.toLong() else r.positionMs.toLong() + (now - clock).coerceAtLeast(0)
+    val frac = if (r.durationMs > 0u) (pos.toFloat() / r.durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+    val fill = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+    Surface(
+        shape = RoundedCornerShape(32.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shadowElevation = 12.dp,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp).clickable { nav.devices = true },
+    ) {
+        Box {
+            Box(Modifier.matchParentSize().drawBehindFill(frac, fill))
+            Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(contentAlignment = Alignment.BottomEnd) {
+                    Art(app, r.cover, Modifier.size(52.dp), corner = 24.dp)
+                    Icon(Ic.Cast, null, tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(2.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(r.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Играет на «${r.device}»", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (r.hasPrev) ShapeIconButton(Ic.Prev, "Назад", { app.core.remotePrev() }, size = 44.dp, container = Color.Transparent)
+                PlayButton(!r.paused, 52.dp, onClick = { app.core.remotePlayPause() })
+                if (r.hasNext) ShapeIconButton(Ic.Next, "Дальше", { app.core.remoteNext() }, size = 44.dp, container = Color.Transparent)
+            }
+        }
+    }
+}
+
+private fun Modifier.drawBehindFill(frac: Float, color: Color) = this.then(
+    Modifier.drawBehind { drawRect(color, size = androidx.compose.ui.geometry.Size(size.width * frac, size.height)) },
+)

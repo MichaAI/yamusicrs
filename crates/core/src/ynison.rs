@@ -1,29 +1,32 @@
 //! Ynison — синхронизация воспроизведения между устройствами («Слушать на…» в приложениях).
 //!
-//! Транспорт: JSON поверх WebSocket, как у веба (redirector → hub), но устройство полноценное:
-//! телефон видит yamusicrs в списке, переключает воспроизведение сюда и управляет им.
-//! Подробности протокола — `docs/ynison.md`.
+//! Транспорт — gRPC, как у официального Android-клиента: unary `GetRedirectToYnison` даёт хаб
+//! и билет, дальше двунаправленный стрим `PutYnisonState` (protobuf, схема — `ynison_pb`).
+//! JSON-WebSocket веба с середины октября 2026 хаб сторонним клиентам не отдаёт (503 + go-away).
+//! Подробности — `docs/ynison.md`.
 //!
-//! Задача держит соединение, сливает частичные ответы хаба в полное состояние и отдаёт
-//! приложению [`Event`]; приложение шлёт сюда [`Out`]. Решения «что делать со звуком»
-//! принимает приложение.
+//! Задача держит соединение, сливает ответы хаба в полное состояние и отдаёт приложению
+//! [`Event`]; приложение шлёт сюда [`Out`]. Решения «что делать со звуком» принимает приложение.
+//! Внутри всё в JSON-именах веба: в protobuf переводится только на краях.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures_util::{SinkExt, StreamExt};
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{HeaderValue, Request};
-use tokio_tungstenite::tungstenite::{self, Message};
 
-const REDIRECT: &str = "wss://ynison.music.yandex.ru/redirector.YnisonRedirectService/GetRedirectToYnison";
+use crate::ynison_pb as pb;
+
+const REDIRECT: &str = "https://ynison.music.yandex.net/ynison_redirect.YnisonRedirectService/GetRedirectToYnison";
 const STATE_PATH: &str = "/ynison_state.YnisonStateService/PutYnisonState";
-const ORIGIN: &str = "https://music.yandex.ru";
+/// Как у официального клиента (grpc-okhttp из APK 2026.09.5).
+const USER_AGENT: &str = "grpc-java-okhttp/1.61.1";
 const APP_NAME: &str = "yamusicrs";
 /// Автор статуса, когда сервер сам ставит паузу: активное устройство отключилось или его сменили.
 pub const SERVER_DISCONNECT: &str = "server-paused-on-active-device-disconnecting";
-/// Повторы подключения после обычных ошибок (секунды); go-away сервера соблюдается точно.
+/// Повторы подключения после обычных ошибок (секунды); go-away и backoff сервера соблюдаются точно.
 const LADDER: [u64; 3] = [1, 5, 30];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +64,10 @@ pub struct Status {
 pub struct Device {
     pub id: String,
     pub title: String,
+    /// `ANDROID`, `IOS`, `WEB`, `SMART_SPEAKER`…
+    pub kind: String,
+    /// Можно включить музыку на нём («Слушать на…»).
+    pub can_play: bool,
 }
 
 /// Полное известное состояние после очередного ответа хаба.
@@ -100,6 +107,12 @@ pub enum Out {
     Player(QueueState, Status),
     /// Забрать воспроизведение себе: включили что-то здесь.
     Activate,
+    /// Пульт: перевести воспроизведение на устройство.
+    Transfer(String),
+    /// Пульт: пауза/игра и позиция активного устройства.
+    RemoteStatus(Status),
+    /// Пульт: другой трек очереди активного устройства.
+    RemotePlayer(QueueState, Status),
 }
 
 pub struct Handle {
@@ -113,7 +126,9 @@ impl Handle {
     }
 }
 
-pub fn spawn<F>(token: String, device_id: String, title: String, emit: F) -> Handle
+/// `kind` — тип устройства в списке «Слушать на…»: `WEB` (компьютер) или `ANDROID`;
+/// `delay` — сколько ждать до первой попытки (непрошедший go-away с прошлого запуска).
+pub fn spawn<F>(token: String, device_id: String, title: String, kind: &'static str, delay: u64, emit: F) -> Handle
 where
     F: Fn(Event) + Send + Sync + 'static,
 {
@@ -122,8 +137,16 @@ where
         token,
         device_id: device_id.clone(),
         title,
+        kind,
     };
-    tokio::spawn(run(me, rx, emit));
+    tokio::spawn(async move {
+        if delay > 0 {
+            tracing::info!("ynison: сервер просил подождать, подключусь через {delay} с");
+            emit(Event::Lost { error: "сервер просил подождать".into(), retry_in: delay });
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+        }
+        run(me, rx, emit).await
+    });
     Handle { tx, device_id }
 }
 
@@ -131,12 +154,13 @@ struct Session {
     token: String,
     device_id: String,
     title: String,
+    kind: &'static str,
 }
 
 enum End {
     /// Приложение закрыло канал — выходим.
     Closed,
-    /// Сервер просит не возвращаться столько секунд.
+    /// Сервер просит не возвращаться столько секунд (go-away или backoff).
     GoAway(u64, String),
     /// Обычная ошибка; `healthy` — сессия успела поработать (лестница с начала).
     Error(String, bool),
@@ -149,7 +173,7 @@ async fn run<F: Fn(Event)>(me: Session, mut rx: UnboundedReceiver<Out>, emit: F)
             End::Closed => return,
             End::GoAway(secs, e) => {
                 step = 0;
-                tracing::warn!("ynison: go-away {secs} с: {e}");
+                tracing::warn!("ynison: сервер просит подождать {secs} с: {e}");
                 (secs, e)
             }
             End::Error(e, healthy) => {
@@ -183,16 +207,17 @@ fn now_ms() -> u64 {
 }
 
 fn version(me: &str, ts_ms: u64) -> Value {
-    let ns = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    json!({"device_id": me, "version": ns.to_string(), "timestamp_ms": ts_ms.to_string()})
+    // Версия — случайное положительное int64, как у официальных клиентов.
+    let v = rand::random::<u64>() >> 1;
+    json!({"device_id": me, "version": v.to_string(), "timestamp_ms": ts_ms.to_string()})
 }
 
-/// Конверт запроса: `rid`, время действия, тип перехвата (числа — строками, иначе сервер рвёт соединение).
-fn envelope(mut body: Value, intercept: &str) -> String {
+/// Конверт запроса: `rid`, время действия, тип перехвата.
+fn envelope(mut body: Value, intercept: &str) -> Value {
     body["rid"] = json!(uuid());
     body["player_action_timestamp_ms"] = json!(now_ms().to_string());
     body["activity_interception_type"] = json!(intercept);
-    body.to_string()
+    body
 }
 
 fn uuid() -> String {
@@ -201,94 +226,175 @@ fn uuid() -> String {
     format!("{}-{}-4{}-a{}-{}", &h[..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
 }
 
-fn request(me: &Session, url: &str, ticket: Option<(&str, &str)>) -> Result<Request<()>, tungstenite::Error> {
-    let mut req = url.into_client_request()?;
-    let info = json!({"app_name": APP_NAME, "app_version": env!("CARGO_PKG_VERSION"), "type": 1}).to_string();
-    let mut proto = json!({"Ynison-Device-Id": me.device_id, "Ynison-Device-Info": info});
-    if let Some((t, s)) = ticket {
-        proto["Ynison-Redirect-Ticket"] = json!(t);
-        proto["Ynison-Session-Id"] = json!(s);
-    }
-    let h = req.headers_mut();
-    let val = |s: String| HeaderValue::from_str(&s).map_err(|e| tungstenite::Error::HttpFormat(e.into()));
-    h.insert("Sec-WebSocket-Protocol", val(format!("Bearer, v2, {proto}"))?);
-    h.insert("Authorization", val(format!("OAuth {}", me.token))?);
-    h.insert("Origin", HeaderValue::from_static(ORIGIN));
-    Ok(req)
+// ── gRPC ─────────────────────────────────────────────────────────────────────
+
+fn client(keepalive: Duration) -> reqwest::Result<reqwest::Client> {
+    crate::api::with_roots(
+        reqwest::Client::builder()
+            .http2_prior_knowledge()
+            .user_agent(USER_AGENT)
+            .connect_timeout(Duration::from_secs(10))
+            .http2_keep_alive_interval(keepalive)
+            .http2_keep_alive_timeout(Duration::from_secs(20))
+            .http2_keep_alive_while_idle(true),
+    )
+    .build()
 }
 
-/// Ошибка из ответа сервера: go-away или обычная.
-fn server_error(v: &Value) -> End {
-    let e = &v["error"];
-    let msg = format!(
-        "{} (grpc {}, http {})",
-        e["message"].as_str().unwrap_or("ошибка Ynison"),
-        e["grpc_code"],
-        e["http_code"]
-    );
-    let away = e["details"]["ynison-go-away-for-seconds"]
-        .as_str()
-        .and_then(|s| s.parse::<u64>().ok())
-        .or_else(|| e["details"]["ynison-go-away-for-seconds"].as_u64());
-    match away {
-        Some(s) if s > 0 => End::GoAway(s, msg),
-        _ => End::Error(msg, false),
+fn headers(me: &Session, ticket: Option<(&str, &str)>) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    let mut put = |k: &'static str, v: &str| {
+        if let Ok(v) = HeaderValue::from_str(v) {
+            h.insert(HeaderName::from_static(k), v);
+        }
+    };
+    put("content-type", "application/grpc");
+    put("te", "trailers");
+    put("authorization", &format!("OAuth {}", me.token));
+    put("ynison-device-id", &me.device_id);
+    put("ynison-device-info", &pb::device_info_header(me.kind, APP_NAME, env!("CARGO_PKG_VERSION")));
+    if let Some((t, s)) = ticket {
+        put("ynison-redirect-ticket", t);
+        put("ynison-session-id", s);
+    }
+    h
+}
+
+/// Сообщение gRPC: флаг сжатия, длина и тело.
+fn frame(msg: &[u8]) -> Bytes {
+    let mut b = Vec::with_capacity(msg.len() + 5);
+    b.push(0);
+    b.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+    b.extend_from_slice(msg);
+    b.into()
+}
+
+/// Статус gRPC из заголовков или трейлеров: `None` — его там нет.
+fn grpc_end(h: &HeaderMap, healthy: bool) -> Option<End> {
+    let code: u32 = h.get("grpc-status")?.to_str().ok()?.parse().ok()?;
+    let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let msg = get("grpc-message").map(|m| percent_decode(&m)).unwrap_or_default();
+    let code_y = get("ynison-error-code").unwrap_or_default();
+    let text = format!("gRPC {code}{}{}", if msg.is_empty() { String::new() } else { format!(": {msg}") },
+        if code_y.is_empty() { String::new() } else { format!(" (ynison {code_y})") });
+    if let Some(s) = get("ynison-go-away-for-seconds").and_then(|s| s.parse::<u64>().ok()).filter(|s| *s > 0) {
+        return Some(End::GoAway(s, text));
+    }
+    if let Some(ms) = get("ynison-backoff-millis").and_then(|s| s.parse::<u64>().ok()).filter(|m| *m > 0) {
+        return Some(End::GoAway(ms.div_ceil(1000), text));
+    }
+    Some(match code {
+        0 => End::Error("хаб закрыл поток".into(), healthy),
+        16 => End::Error(format!("токен не принят ({text})"), false),
+        _ => End::Error(text, healthy),
+    })
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(x) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(x);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Входящий поток сообщений gRPC.
+struct Incoming {
+    body: reqwest::Body,
+    buf: Vec<u8>,
+}
+
+impl Incoming {
+    /// Следующее сообщение; `Err` — поток кончился (со статусом из трейлеров).
+    async fn next(&mut self, healthy: bool) -> Result<Vec<u8>, End> {
+        loop {
+            if self.buf.len() >= 5 {
+                let n = u32::from_be_bytes(self.buf[1..5].try_into().unwrap_or_default()) as usize;
+                if self.buf.len() >= 5 + n {
+                    if self.buf[0] != 0 {
+                        return Err(End::Error("сжатое сообщение gRPC".into(), healthy));
+                    }
+                    let msg = self.buf[5..5 + n].to_vec();
+                    self.buf.drain(..5 + n);
+                    return Ok(msg);
+                }
+            }
+            match self.body.frame().await {
+                Some(Ok(f)) => match f.into_data() {
+                    Ok(d) => self.buf.extend_from_slice(&d),
+                    Err(f) => {
+                        if let Ok(t) = f.into_trailers() {
+                            return Err(grpc_end(&t, healthy).unwrap_or(End::Error("поток без статуса".into(), healthy)));
+                        }
+                    }
+                },
+                Some(Err(e)) => return Err(End::Error(format!("{e}"), healthy)),
+                None => return Err(End::Error("соединение закрыто".into(), healthy)),
+            }
+        }
     }
 }
 
 async fn session<F: Fn(Event)>(me: &Session, rx: &mut UnboundedReceiver<Out>, emit: &F) -> End {
-    // 1. Redirector: куда подключаться и с каким билетом.
-    let req = match request(me, REDIRECT, None) {
+    // 1. Redirector: куда подключаться и с каким билетом (unary).
+    let c = match client(Duration::from_secs(30)) {
+        Ok(c) => c,
+        Err(e) => return End::Error(format!("клиент: {e}"), false),
+    };
+    let resp = match c.post(REDIRECT).headers(headers(me, None)).body(frame(&[])).send().await {
         Ok(r) => r,
         Err(e) => return End::Error(format!("redirector: {e}"), false),
     };
-    let redir: Value = match tokio_tungstenite::connect_async(req).await {
-        Ok((mut ws, _)) => {
-            let first = tokio::time::timeout(Duration::from_secs(10), ws.next()).await;
-            let _ = ws.close(None).await;
-            match first {
-                Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str(&t) {
-                    Ok(v) => v,
-                    Err(e) => return End::Error(format!("redirector: {e}"), false),
-                },
-                Ok(other) => return End::Error(format!("redirector: неожиданный ответ {other:?}"), false),
-                Err(_) => return End::Error("redirector: нет ответа".into(), false),
-            }
-        }
-        Err(e) => return End::Error(format!("redirector: {e}"), false),
-    };
-    if redir.get("error").is_some() {
-        return server_error(&redir);
+    if let Some(e) = grpc_end(resp.headers(), false) {
+        return e;
     }
-    let (Some(host), Some(ticket)) = (redir["host"].as_str(), redir["redirect_ticket"].as_str()) else {
+    let mut inc = Incoming {
+        body: resp.into(),
+        buf: Vec::new(),
+    };
+    let redir = match inc.next(false).await {
+        Ok(m) => pb::decode_redirect(&m),
+        Err(e) => return e,
+    };
+    let (Some(host), Some(ticket)) = (
+        redir["host"].as_str().filter(|h| !h.is_empty()),
+        redir["redirect_ticket"].as_str().filter(|t| !t.is_empty()),
+    ) else {
         return End::Error("redirector не дал адрес (токен?)".into(), false);
     };
-    let session_id = match &redir["session_id"] {
-        Value::String(s) => s.clone(),
-        v => v.to_string(),
-    };
+    let session_id = s(&redir["session_id"]);
     let keepalive = redir["keep_alive_params"]["keep_alive_time_seconds"]
         .as_u64()
-        .or_else(|| redir["keep_alive_params"]["keep_alive_time_seconds"].as_str()?.parse().ok())
+        .filter(|k| *k > 0)
         .unwrap_or(30)
         .clamp(10, 120);
+    tracing::debug!("ynison: хаб {host}, сессия {session_id}");
 
-    // 2. Хаб состояния.
-    let url = format!("wss://{host}{STATE_PATH}");
-    let req = match request(me, &url, Some((ticket, &session_id))) {
-        Ok(r) => r,
-        Err(e) => return End::Error(format!("hub: {e}"), false),
+    // 2. Хаб: двунаправленный стрим. Исходящие сообщения идут через канал в тело запроса.
+    let c = match client(Duration::from_secs(keepalive)) {
+        Ok(c) => c,
+        Err(e) => return End::Error(format!("клиент: {e}"), false),
     };
-    let mut ws = match tokio_tungstenite::connect_async(req).await {
-        Ok((ws, _)) => ws,
-        Err(e) => return End::Error(format!("hub: {e}"), false),
-    };
+    let (btx, brx) = unbounded_channel::<Bytes>();
+    let stream = futures_util::stream::unfold(brx, |mut rx| async move {
+        rx.recv().await.map(|b| (Ok::<_, std::io::Error>(b), rx))
+    });
     // Пустая очередь с нулевым временем версий: ничего не перехватываем, только появляемся в списке.
     let full = json!({
         "update_full_state": {
             "player_state": {
                 "status": {
-                    "paused": true, "duration_ms": "0", "progress_ms": "0", "playback_speed": 1,
+                    "paused": true, "duration_ms": "0", "progress_ms": "0", "playback_speed": 1.0,
                     "version": version(&me.device_id, 0),
                 },
                 "player_queue": {
@@ -300,61 +406,59 @@ async fn session<F: Fn(Event)>(me: &Session, rx: &mut UnboundedReceiver<Out>, em
             },
             "device": {
                 "info": {
-                    "device_id": me.device_id, "title": me.title, "type": "WEB",
+                    "device_id": me.device_id, "title": me.title, "type": me.kind,
                     "app_name": APP_NAME, "app_version": env!("CARGO_PKG_VERSION"),
                 },
-                "capabilities": {"can_be_player": true, "can_be_remote_controller": false, "volume_granularity": 16},
+                "capabilities": {"can_be_player": true, "can_be_remote_controller": true, "volume_granularity": 16},
+                "volume_info": {"volume": 1.0},
             },
             "is_currently_active": false,
         }
     });
     let params = json!({"update_session_params": {"mute_events_if_passive": true}});
-    for m in [envelope(full, "DO_NOT_INTERCEPT_BY_DEFAULT"), envelope(params, "DO_NOT_INTERCEPT_BY_DEFAULT")] {
-        if let Err(e) = ws.send(Message::text(m)).await {
-            return End::Error(format!("hub: {e}"), false);
-        }
+    for m in [full, params] {
+        let _ = btx.send(frame(&pb::encode_request(&envelope(m, "DO_NOT_INTERCEPT_BY_DEFAULT"))));
     }
+    let url = format!("https://{host}{STATE_PATH}");
+    let resp = match c
+        .post(&url)
+        .headers(headers(me, Some((ticket, &session_id))))
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return End::Error(format!("хаб: {e}"), false),
+    };
+    if let Some(e) = grpc_end(resp.headers(), false) {
+        return e;
+    }
+    if !resp.status().is_success() {
+        return End::Error(format!("хаб: HTTP {}", resp.status()), false);
+    }
+    let mut inc = Incoming {
+        body: resp.into(),
+        buf: Vec::new(),
+    };
     emit(Event::Connected);
 
     let mut state = Merged::default();
     let mut healthy = false;
-    let mut ping = tokio::time::interval(Duration::from_secs(keepalive));
-    ping.tick().await;
     loop {
         tokio::select! {
-            m = ws.next() => match m {
-                Some(Ok(Message::Text(t))) => {
-                    let v: Value = match serde_json::from_str(&t) {
-                        Ok(v) => v,
-                        Err(e) => { tracing::warn!("ynison: не JSON: {e}"); continue }
-                    };
-                    if v.get("error").is_some() {
-                        return match server_error(&v) {
-                            End::Error(e, _) => End::Error(e, healthy),
-                            other => other,
-                        };
-                    }
+            m = inc.next(healthy) => match m {
+                Ok(m) => {
                     healthy = true;
+                    let v = pb::decode_response(&m);
                     emit(Event::State(state.apply(&v, &me.device_id)));
                 }
-                Some(Ok(Message::Close(f))) => return End::Error(format!("hub закрыл соединение: {f:?}"), healthy),
-                Some(Ok(_)) => {}
-                Some(Err(e)) => return End::Error(format!("hub: {e}"), healthy),
-                None => return End::Error("hub: соединение закрыто".into(), healthy),
+                Err(e) => return e,
             },
             o = rx.recv() => {
-                let Some(o) = o else {
-                    let _ = ws.close(None).await;
-                    return End::Closed;
-                };
+                let Some(o) = o else { return End::Closed };
                 let msg = outgoing(&me.device_id, o);
-                if let Err(e) = ws.send(Message::text(msg)).await {
-                    return End::Error(format!("hub: {e}"), healthy);
-                }
-            }
-            _ = ping.tick() => {
-                if let Err(e) = ws.send(Message::Ping(Vec::new().into())).await {
-                    return End::Error(format!("hub: {e}"), healthy);
+                if btx.send(frame(&pb::encode_request(&msg))).is_err() {
+                    return End::Error("хаб: поток запроса закрыт".into(), healthy);
                 }
             }
         }
@@ -371,7 +475,39 @@ fn status_json(me: &str, s: Status) -> Value {
     })
 }
 
-fn outgoing(me: &str, o: Out) -> String {
+fn queue_json(me: &str, q: &QueueState) -> Value {
+    let items: Vec<Value> = q
+        .items
+        .iter()
+        .map(|p| {
+            json!({
+                "playable_id": p.id,
+                "album_id_optional": p.album_id,
+                "playable_type": "TRACK",
+                "from": p.from,
+                "title": p.title,
+                "cover_url_optional": p.cover,
+            })
+        })
+        .collect();
+    let mut queue = json!({
+        "entity_id": q.entity_id,
+        "entity_type": q.entity_type,
+        "current_playable_index": q.index,
+        "playable_list": items,
+        "options": {"repeat_mode": q.repeat},
+        "entity_context": "BASED_ON_ENTITY_BY_DEFAULT",
+        "from_optional": q.from,
+        "version": version(me, now_ms()),
+    });
+    if let Some(sid) = &q.wave_session {
+        queue["queue"] = json!({"wave_queue": {"entity_options": {"wave_entity_optional": {"session_id": sid}}}});
+    }
+    queue
+}
+
+fn outgoing(me: &str, o: Out) -> Value {
+    let player = |q: &QueueState, s: Status| json!({"update_player_state": {"player_state": {"player_queue": queue_json(me, q), "status": status_json(me, s)}}});
     match o {
         Out::Status(s) => {
             // Играем — можно перехватить, если никто не активен (как в официальных клиентах).
@@ -382,43 +518,20 @@ fn outgoing(me: &str, o: Out) -> String {
             };
             envelope(json!({"update_playing_status": {"playing_status": status_json(me, s)}}), intercept)
         }
-        Out::Player(q, s) => {
-            let items: Vec<Value> = q
-                .items
-                .iter()
-                .map(|p| {
-                    json!({
-                        "playable_id": p.id,
-                        "album_id_optional": p.album_id,
-                        "playable_type": "TRACK",
-                        "from": p.from,
-                        "title": p.title,
-                        "cover_url_optional": p.cover,
-                    })
-                })
-                .collect();
-            let mut queue = json!({
-                "entity_id": q.entity_id,
-                "entity_type": q.entity_type,
-                "current_playable_index": q.index,
-                "playable_list": items,
-                "options": {"repeat_mode": q.repeat},
-                "entity_context": "BASED_ON_ENTITY_BY_DEFAULT",
-                "from_optional": q.from,
-                "version": version(me, now_ms()),
-            });
-            if let Some(sid) = &q.wave_session {
-                queue["queue"] = json!({"wave_queue": {"entity_options": {"wave_entity_optional": {"session_id": sid}}}});
-            }
-            envelope(
-                json!({"update_player_state": {"player_state": {"player_queue": queue, "status": status_json(me, s)}}}),
-                "DO_NOT_INTERCEPT_BY_DEFAULT",
-            )
-        }
+        Out::Player(q, s) => envelope(player(&q, s), "DO_NOT_INTERCEPT_BY_DEFAULT"),
         Out::Activate => envelope(
             json!({"update_active_device": {"device_id_optional": me}}),
             "DO_NOT_INTERCEPT_BY_DEFAULT",
         ),
+        Out::Transfer(id) => envelope(
+            json!({"update_active_device": {"device_id_optional": id}}),
+            "DO_NOT_INTERCEPT_BY_DEFAULT",
+        ),
+        Out::RemoteStatus(s) => envelope(
+            json!({"update_playing_status": {"playing_status": status_json(me, s)}}),
+            "DO_NOT_INTERCEPT_BY_DEFAULT",
+        ),
+        Out::RemotePlayer(q, s) => envelope(player(&q, s), "DO_NOT_INTERCEPT_BY_DEFAULT"),
     }
 }
 
@@ -455,6 +568,8 @@ impl Merged {
                 .map(|d| Device {
                     id: s(&d["info"]["device_id"]),
                     title: s(&d["info"]["title"]),
+                    kind: s(&d["info"]["type"]),
+                    can_play: d["capabilities"]["can_be_player"].as_bool().unwrap_or(true),
                 })
                 .collect();
         }
