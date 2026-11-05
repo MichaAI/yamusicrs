@@ -17,6 +17,11 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.findRootCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
@@ -505,22 +510,38 @@ fun SearchTab(app: YaApp, nav: Nav) {
         pageId?.let { app.closePage(it.toULong()) }
         pageId = app.core.search(text).toLong()
     }
-    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Header("Поиск", "") {}
-        SearchPill(query, {
-            query = it
-            if (it.isEmpty()) pageId?.let { id -> app.closePage(id.toULong()); pageId = null }
-        }, "Треки, альбомы, исполнители", onSubmit = { run(query) })
-        val id = pageId?.toULong()
-        when (val p = id?.let { pages[it] }) {
-            null -> if (id != null) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator(Modifier.size(72.dp)) }
-            } else {
-                SearchHistory(app, settings?.searchHistory.orEmpty(), ::run)
+    // Строка поиска — внизу, под большим пальцем: над мини-плеером, а с клавиатурой — прямо над ней.
+    val density = LocalDensity.current
+    val ime = WindowInsets.ime.getBottom(density)
+    var gap by remember { mutableIntStateOf(0) }
+    val above = if (LocalNow.current.id != null) 92.dp else 12.dp
+    val lift = with(density) { maxOf(above.roundToPx(), ime - gap + 8.dp.roundToPx()).toDp() }
+    Box(
+        Modifier.fillMaxSize().onGloballyPositioned { c ->
+            // Сколько от низа вкладки до низа экрана (навигация и системная полоса) — клавиатура считается от низа экрана.
+            val root = c.findRootCoordinates().size.height
+            gap = root - c.boundsInRoot().bottom.toInt()
+        },
+    ) {
+        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            Header("Поиск", "") {}
+            val id = pageId?.toULong()
+            when (val p = id?.let { pages[it] }) {
+                null -> if (id != null) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator(Modifier.size(72.dp)) }
+                } else {
+                    SearchHistory(app, settings?.searchHistory.orEmpty(), ::run)
+                }
+                is Page.Search -> SearchResults(app, nav, p, Source.Page(id))
+                is Page.Failed -> Empty(p.error) { TextButton(onClick = { run(query) }) { Text("Повторить") } }
+                else -> {}
             }
-            is Page.Search -> SearchResults(app, nav, p, Source.Page(id))
-            is Page.Failed -> Empty(p.error) { TextButton(onClick = { run(query) }) { Text("Повторить") } }
-            else -> {}
+        }
+        Box(Modifier.align(Alignment.BottomCenter).padding(bottom = lift)) {
+            SearchPill(query, {
+                query = it
+                if (it.isEmpty()) pageId?.let { id -> app.closePage(id.toULong()); pageId = null }
+            }, "Треки, альбомы, исполнители", onSubmit = { run(query) }, floating = true)
         }
     }
 }
@@ -531,7 +552,7 @@ private fun SearchHistory(app: YaApp, history: List<String>, run: (String) -> Un
         Empty("Найдите трек, альбом или исполнителя")
         return
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 190.dp)) {
         item { Section("Недавние запросы") }
         items(history, key = { it }) { q ->
             Row(
@@ -542,7 +563,7 @@ private fun SearchHistory(app: YaApp, history: List<String>, run: (String) -> Un
                 Icon(Ic.History, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(14.dp))
                 Text(q, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                ShapeIconButton(Ic.Close, "Забыть", { app.core.forgetSearch(q) }, size = 40.dp, container = Color.Transparent,
+                ShapeIconButton(Ic.Close, "Забыть", { app.core.forgetSearch(q) }, size = 48.dp, container = Color.Transparent,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -556,7 +577,7 @@ private fun SearchResults(app: YaApp, nav: Nav, p: Page.Search, src: Source) {
         Empty("Ничего не нашлось по запросу «${p.query}»")
         return
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 190.dp)) {
         if (p.artists.isNotEmpty()) {
             item { Section("Исполнители") }
             item {

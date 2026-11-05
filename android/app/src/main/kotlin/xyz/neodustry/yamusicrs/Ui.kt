@@ -35,6 +35,10 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -147,7 +151,10 @@ private val Rounded = FontFamily(
 
 private fun typography(): Typography {
     val t = Typography()
-    fun TextStyle.r(tracking: Float = letterSpacing.value) = copy(fontFamily = Rounded, letterSpacing = tracking.sp)
+    // TextMotion.Animated: без привязки глифов к пиксельной сетке — текст не дрожит,
+    // когда его двигают дробными шагами (бегущая строка, свайпы, сворачивание сцены).
+    fun TextStyle.r(tracking: Float = letterSpacing.value) =
+        copy(fontFamily = Rounded, letterSpacing = tracking.sp, textMotion = androidx.compose.ui.text.style.TextMotion.Animated)
     return t.copy(
         displayLarge = t.displayLarge.r(-1f),
         displayMedium = t.displayMedium.r(-0.6f),
@@ -403,9 +410,11 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
             Box(Modifier.weight(1f)) {
                 // Вкладки листаются свайпом вбок.
                 // Вкладка переключается уже с пятой части ширины, а не с половины.
+                // На главном с играющим треком свайп вбок листает треки, а не вкладки.
                 HorizontalPager(
                     pager,
                     key = { it },
+                    userScrollEnabled = !(pager.settledPage == Tab.Wave.ordinal && hasTrack && !s.waveLoading),
                     flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.2f),
                 ) { page ->
                     Box(Modifier.fillMaxSize().nestedScroll(KeepHorizontal)) {
@@ -544,7 +553,41 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
     val card by app.artist.collectAsStateWithLifecycle()
     val artist = card?.takeIf { it.artistId == t.artistId }
     val nav = LocalNav.current
-    Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+    // Свайп вбок по всему экрану — соседний трек: фото с обложкой уезжают за пальцем, улетают и возвращаются новыми.
+    val scope = rememberCoroutineScope()
+    val dx = remember { Animatable(0f) }
+    val skip = with(LocalDensity.current) { 56.dp.toPx() }
+    Column(
+        modifier.fillMaxWidth().pointerInput(Unit) {
+            detectHorizontalDragGestures(
+                onDragEnd = {
+                    scope.launch {
+                        val w = size.width.toFloat()
+                        when {
+                            dx.value < -skip -> {
+                                app.core.next()
+                                dx.animateTo(-w, tween(160))
+                                dx.snapTo(w * 0.4f)
+                                dx.animateTo(0f, spring(dampingRatio = 0.8f))
+                            }
+                            dx.value > skip -> {
+                                app.core.prevTrack()
+                                dx.animateTo(w, tween(160))
+                                dx.snapTo(-w * 0.4f)
+                                dx.animateTo(0f, spring(dampingRatio = 0.8f))
+                            }
+                            else -> dx.animateTo(0f, spring(dampingRatio = 0.7f))
+                        }
+                    }
+                },
+                onDragCancel = { scope.launch { dx.animateTo(0f) } },
+            ) { change, d ->
+                change.consume()
+                scope.launch { dx.snapTo(dx.value + d) }
+            }
+        },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         // Что играет (волна или список) — тихой подписью, главное на экране — исполнитель.
         Text(
             if (s.wave) s.waveName.ifEmpty { "Моя волна" } else s.queueTitle.ifEmpty { "Сейчас играет" },
@@ -558,15 +601,39 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
             MaterialTheme.colorScheme.onSurface,
             Modifier.padding(horizontal = 24.dp).basicMarquee(initialDelayMillis = 2000),
         )
-        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+        BoxWithConstraints(
+            Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp).graphicsLayer {
+                translationX = dx.value
+                rotationZ = dx.value / size.width * 5f
+                alpha = 1f - (kotlin.math.abs(dx.value) / size.width).coerceIn(0f, 1f) * 0.6f
+            },
+            contentAlignment = Alignment.Center,
+        ) {
             val side = minOf(maxWidth - 64.dp, maxHeight - 48.dp, 360.dp).coerceAtLeast(120.dp)
             val small = (side * 0.34f).coerceIn(72.dp, 120.dp)
             Box(Modifier.size(side, side + small / 2), contentAlignment = Alignment.TopCenter) {
-                // Фото исполнителя (или обложка, если фото нет); концентрично: 48 снаружи.
-                Art(app, artist?.photo ?: t.cover, Modifier.size(side), corner = 48.dp)
+                val cutout = artist?.cutout
+                if (cutout != null) {
+                    // Вырезанное фото — без рамки, прямо на блобе; низ растворяется к обложке.
+                    Art(
+                        app, cutout,
+                        Modifier.size(side).graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                            .drawWithContent {
+                                drawContent()
+                                drawRect(
+                                    Brush.verticalGradient(0.7f to Color.Black, 1f to Color.Transparent),
+                                    blendMode = BlendMode.DstIn,
+                                )
+                            },
+                        plain = true,
+                    )
+                } else {
+                    // Фото исполнителя (или обложка, если фото нет); концентрично: 48 снаружи.
+                    Art(app, artist?.photo ?: t.cover, Modifier.size(side), corner = 48.dp)
+                }
                 // Обложка трека наполовину на фото, в ободке цвета фона — читается как отдельный слой.
                 // Фото нет — крупно и так обложка, второй раз её не показываем.
-                if (artist?.photo != null) Box(
+                if (cutout != null || artist?.photo != null) Box(
                     Modifier.align(Alignment.BottomCenter).size(small + 8.dp).clip(RoundedCornerShape(28.dp))
                         .background(MaterialTheme.colorScheme.background).padding(4.dp),
                 ) {
@@ -693,11 +760,16 @@ fun Header(title: String, subtitle: String, action: @Composable () -> Unit) {
 }
 
 @Composable
-fun SearchPill(value: String, onChange: (String) -> Unit, hint: String, onSubmit: (() -> Unit)? = null) {
+fun SearchPill(value: String, onChange: (String) -> Unit, hint: String, onSubmit: (() -> Unit)? = null, floating: Boolean = false) {
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
+    // Плавающая (поиск внизу) — с тенью и светлее, чтобы читалась поверх списка.
+    val shape = RoundedCornerShape(28.dp)
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(RoundedCornerShape(28.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(horizontal = 18.dp, vertical = 14.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
+            .then(if (floating) Modifier.shadow(10.dp, shape) else Modifier)
+            .clip(shape)
+            .background(if (floating) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainerHigh)
+            .padding(start = 18.dp, end = 6.dp, top = 4.dp, bottom = 4.dp).height(48.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Ic.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
@@ -715,6 +787,13 @@ fun SearchPill(value: String, onChange: (String) -> Unit, hint: String, onSubmit
                 keyboardActions = KeyboardActions(onSearch = { focus.clearFocus(); onSubmit?.invoke() }),
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+        // Очистить — одним тапом, без долгого стирания.
+        if (value.isNotEmpty()) {
+            ShapeIconButton(Ic.Close, "Очистить", { onChange("") }, size = 44.dp, container = Color.Transparent,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Spacer(Modifier.width(12.dp))
         }
     }
 }
@@ -886,12 +965,12 @@ private fun MiniPlayer(
                         if (s.liked) Ic.Heart else Ic.HeartOutline,
                         "Нравится",
                         { app.core.toggleLike() },
-                        size = 44.dp,
+                        size = 48.dp,
                         container = Color.Transparent,
                         tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     PlayButton(!s.paused, 52.dp, onClick = { app.core.playPause() })
-                    ShapeIconButton(Ic.Next, "Дальше", { app.core.next() }, size = 44.dp, container = Color.Transparent)
+                    ShapeIconButton(Ic.Next, "Дальше", { app.core.next() }, size = 48.dp, container = Color.Transparent)
                 }
             }
         }
@@ -1090,22 +1169,8 @@ private fun Stage(
                             Text(s.format, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         }
                     }
-                    ShapeIconButton(
-                        Ic.Lyrics,
-                        "Текст песни",
-                        { showLyrics = !showLyrics },
-                        size = 48.dp,
-                        container = if (showLyrics) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
-                        tint = if (showLyrics) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    val nav = LocalNav.current
-                    ShapeIconButton(Ic.Cast, "Слушать на", { nav.devices = true }, size = 48.dp)
-                    Spacer(Modifier.width(8.dp))
-                    ShapeIconButton(Ic.More, "Ещё", {
-                        val i = s.queuePos?.toInt()
-                        if (i != null) nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Queue, i)
-                    }, size = 48.dp)
+                    // Симметрия со «Свернуть»: заголовок по центру. Остальные действия — внизу, под пальцем.
+                    Spacer(Modifier.width(48.dp))
                 }
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     val wide = maxWidth > maxHeight * 1.2f
@@ -1122,14 +1187,14 @@ private fun Stage(
                         Row(Modifier.fillMaxSize().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
                             art(Modifier.weight(1f).fillMaxHeight())
                             Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Bottom) {
-                                StageInfo(app, s, t, clock)
+                                StageInfo(app, s, t, clock, showLyrics, lyrics != null) { showLyrics = !showLyrics }
                             }
                         }
                     } else {
                         // Кнопки — в зоне большого пальца: под ними остаётся заметный запас.
                         Column(Modifier.fillMaxSize()) {
                             art(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp))
-                            StageInfo(app, s, t, clock)
+                            StageInfo(app, s, t, clock, showLyrics, lyrics != null) { showLyrics = !showLyrics }
                             Spacer(Modifier.height(24.dp))
                         }
                     }
@@ -1284,7 +1349,15 @@ private fun SwipeCover(app: YaApp, t: TrackItem, side: Dp, shared: SharedTransit
 
 /** Название, исполнитель, перемотка и кнопки сцены. */
 @Composable
-private fun ColumnScope.StageInfo(app: YaApp, s: PlayerState, t: TrackItem, clock: PlayClock) {
+private fun ColumnScope.StageInfo(
+    app: YaApp,
+    s: PlayerState,
+    t: TrackItem,
+    clock: PlayClock,
+    showLyrics: Boolean,
+    hasLyrics: Boolean,
+    toggleLyrics: () -> Unit,
+) {
     // Длинное название бежит строкой, как marquee в TUI.
     ScrambleText(
         t.title,
@@ -1294,9 +1367,21 @@ private fun ColumnScope.StageInfo(app: YaApp, s: PlayerState, t: TrackItem, cloc
     )
     val nav = LocalNav.current
     // Исполнитель и альбом — ссылки на свои страницы.
-    Text(t.artists, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
-        maxLines = 1, overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(enabled = t.artistId != null) { nav.artist(t.artistId, t.artists) })
+    val card by app.artist.collectAsStateWithLifecycle()
+    val photo = card?.takeIf { it.artistId == t.artistId }?.photo
+    Row(
+        Modifier.clip(RoundedCornerShape(18.dp)).clickable(enabled = t.artistId != null) { nav.artist(t.artistId, t.artists) }
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Аватарка исполнителя — круглая, как на его странице.
+        if (photo != null) {
+            Art(app, photo, Modifier.size(32.dp), corner = 16.dp)
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(t.artists, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
     if (t.album.isNotEmpty() && t.album != t.title) {
         Text(t.album, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -1321,20 +1406,40 @@ private fun ColumnScope.StageInfo(app: YaApp, s: PlayerState, t: TrackItem, cloc
         )
     }
     Spacer(Modifier.height(16.dp))
-    // Очередь — пилюля под кнопками, в зоне большого пальца.
-    Row(
-        Modifier.align(Alignment.CenterHorizontally).clip(RoundedCornerShape(24.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f))
-            .clickable { nav.queue = true }.padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Ic.Queue, null, Modifier.size(20.dp))
-        Spacer(Modifier.width(10.dp))
-        Text("Очередь", style = MaterialTheme.typography.labelLarge)
-        if (s.queueLen > 0u) {
+    // Второстепенное — одним рядом под кнопками, в зоне большого пальца: текст, очередь, устройства, ещё.
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        val idle = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f)
+        ShapeIconButton(
+            Ic.Lyrics,
+            "Текст песни",
+            toggleLyrics,
+            size = 48.dp,
+            container = if (showLyrics && hasLyrics) MaterialTheme.colorScheme.primary else idle,
+            // У трека нет текста — кнопка тусклая.
+            tint = when {
+                !hasLyrics -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                showLyrics -> MaterialTheme.colorScheme.onPrimary
+                else -> MaterialTheme.colorScheme.onSurface
+            },
+        )
+        Row(
+            Modifier.height(48.dp).clip(RoundedCornerShape(24.dp)).background(idle)
+                .clickable { nav.queue = true }.padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Ic.Queue, null, Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
-            Text("${(s.queuePos?.toInt() ?: 0) + 1} из ${s.queueLen}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text("Очередь", style = MaterialTheme.typography.labelLarge)
+            if (s.queueLen > 0u) {
+                Spacer(Modifier.width(10.dp))
+                Text("${(s.queuePos?.toInt() ?: 0) + 1} из ${s.queueLen}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            }
         }
+        ShapeIconButton(Ic.Cast, "Слушать на", { nav.devices = true }, size = 48.dp, container = idle)
+        ShapeIconButton(Ic.More, "Ещё", {
+            val i = s.queuePos?.toInt()
+            if (i != null) nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Queue, i)
+        }, size = 48.dp, container = idle)
     }
     Spacer(Modifier.height(8.dp))
 }

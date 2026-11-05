@@ -67,8 +67,29 @@ half4 main(float2 p) {
     float f = 0.0;
     float wsum = 0.0;
     float3 acc = float3(0.0);
+    // Центры шаров; основные мягко расталкиваются, чтобы не сходились почти вплотную.
+    float3 bs[7];
+    for (int k = 0; k < 7; k++) { bs[k] = ball(k, t, e); }
+    for (int it = 0; it < 2; it++) {
+        for (int i = 0; i < 5; i++) {
+            float2 push = float2(0.0);
+            for (int j = 0; j < 5; j++) {
+                if (j != i) {
+                    float2 d = bs[i].xy - bs[j].xy;
+                    float l = length(d);
+                    float m = 0.75 * (bs[i].z + bs[j].z);
+                    if (l < m) {
+                        float2 dir = l > 1e-3 ? d / l : normalize(float2(float(i - j), 0.5));
+                        float x = (m - l) / m;
+                        push += dir * (m - l) * 0.5 * x * (2.0 - x);
+                    }
+                }
+            }
+            bs[i].xy += push;
+        }
+    }
     for (int k = 0; k < 7; k++) {
-        float3 b = ball(k, t, e);
+        float3 b = bs[k];
         float2 d = q - b.xy;
         float d2 = max(dot(d, d), 1e-4);
         float v = b.z * b.z / d2;
@@ -156,11 +177,31 @@ private fun GradientBlob(c: List<Color>, phase: Float, energy: Float, zoom: Floa
     Canvas(modifier) {
         val unit = min(size.width, size.height) / 2f * zoom
         val center = Offset(size.width / 2f, size.height / 2f)
+        val amp = 0.26f + 0.10f * energy
+        val xs = FloatArray(5) { k -> amp * sin(phase * (0.23f + 0.06f * k) + k * 2.1f) }
+        val ys = FloatArray(5) { k -> amp * 0.9f * sin(phase * (0.17f + 0.05f * k) + k * 1.3f + 1.2f) }
+        val rs = FloatArray(5) { k -> 0.24f + 0.05f * sin(phase * 0.31f + k * 1.7f) }
+        // Как в шейдере: шары мягко расталкиваются.
+        repeat(2) {
+            for (i in 0 until 5) for (j in 0 until 5) {
+                if (i == j) continue
+                val dx = xs[i] - xs[j]
+                val dy = ys[i] - ys[j]
+                val l = kotlin.math.sqrt(dx * dx + dy * dy)
+                val m = 0.75f * (rs[i] + rs[j])
+                if (l < m) {
+                    val (ux, uy) = if (l > 1e-3f) dx / l to dy / l else (i - j).toFloat().let { it / kotlin.math.sqrt(it * it + 0.25f) to 0.5f / kotlin.math.sqrt(it * it + 0.25f) }
+                    val x = (m - l) / m
+                    val p = (m - l) * 0.5f * x * (2f - x)
+                    xs[i] += ux * p
+                    ys[i] += uy * p
+                }
+            }
+        }
         for (k in 0 until 5) {
-            val amp = 0.26f + 0.10f * energy
-            val x = amp * sin(phase * (0.23f + 0.06f * k) + k * 2.1f)
-            val y = amp * 0.9f * sin(phase * (0.17f + 0.05f * k) + k * 1.3f + 1.2f)
-            val r = (0.24f + 0.05f * sin(phase * 0.31f + k * 1.7f)) * 2.4f
+            val x = xs[k]
+            val y = ys[k]
+            val r = rs[k] * 2.4f
             val o = center + Offset(x * unit, y * unit)
             drawCircle(
                 Brush.radialGradient(listOf(c[k % c.size].copy(alpha = 0.85f), Color.Transparent), o, r * unit),

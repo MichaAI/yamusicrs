@@ -75,6 +75,9 @@ pub struct Artist {
     pub cover: Option<Cover>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub og_image: Option<String>,
+    /// Вырезанное фото с прозрачным фоном (PNG) — есть у части исполнителей, приходит в треках.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutout_cover: Option<Cover>,
 }
 
 impl Artist {

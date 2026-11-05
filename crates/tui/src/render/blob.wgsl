@@ -49,8 +49,29 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var f = 0.0;
     var wsum = 0.0;
     var acc = vec3<f32>(0.0);
+    // Центры шаров; основные мягко расталкиваются, чтобы не сходились почти вплотную.
+    var bs: array<vec3<f32>, 7>;
+    for (var k = 0; k < 7; k++) { bs[k] = ball(k, t, e); }
+    for (var it = 0; it < 2; it++) {
+        for (var i = 0; i < 5; i++) {
+            var push = vec2<f32>(0.0);
+            for (var j = 0; j < 5; j++) {
+                if (j == i) { continue; }
+                let d = bs[i].xy - bs[j].xy;
+                let l = length(d);
+                let m = 0.75 * (bs[i].z + bs[j].z);
+                if (l < m) {
+                    // В совпавшей точке направление берём по номерам — расходятся всегда в разные стороны.
+                    let dir = select(normalize(vec2<f32>(f32(i - j), 0.5)), d / l, l > 1e-3);
+                    let x = (m - l) / m;
+                    push += dir * (m - l) * 0.5 * x * (2.0 - x);
+                }
+            }
+            bs[i] = vec3<f32>(bs[i].xy + push, bs[i].z);
+        }
+    }
     for (var k = 0; k < 7; k++) {
-        let b = ball(k, t, e);
+        let b = bs[k];
         let d2 = max(dot(q - b.xy, q - b.xy), 1e-4);
         let v = b.z * b.z / d2;
         f += v;

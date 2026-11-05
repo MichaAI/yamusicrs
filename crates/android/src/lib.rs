@@ -67,6 +67,8 @@ pub struct ArtistCard {
     pub artist_id: String,
     pub name: String,
     pub photo: Option<String>,
+    /// Вырезанное фото с прозрачным фоном (PNG, 1000×1000); есть не у всех.
+    pub cutout: Option<String>,
 }
 
 /// Пресет «колеса» Моей волны.
@@ -613,9 +615,15 @@ fn load_artist(
     l: Arc<dyn CoreListener>,
 ) {
     let Some(a) = t.artists.iter().find(|a| !a.id.is_empty()) else { return };
+    // Вырезка приходит в самом треке (в /artists/{id}/info её нет) — берём оттуда.
+    let cutout = a.cutout_cover.as_ref().and_then(|c| c.uri.as_deref()).map(|u| api::cover_url(u, 1000));
     if let Some(slot) = cache.get(&a.id) {
-        if let Some(card) = slot.lock().clone() {
-            l.on_artist(card);
+        let mut slot = slot.lock();
+        if let Some(card) = slot.as_mut() {
+            if card.cutout.is_none() {
+                card.cutout = cutout;
+            }
+            l.on_artist(card.clone());
         }
         return;
     }
@@ -626,12 +634,16 @@ fn load_artist(
     tokio::spawn(async move {
         let photo = match c.artist_photo(&id).await {
             Ok(p) => p,
-            Err(err) => return tracing::debug!("фото исполнителя {id}: {err}"),
+            Err(err) => {
+                tracing::debug!("фото исполнителя {id}: {err}");
+                None
+            }
         };
         let card = ArtistCard {
             artist_id: id,
             name,
             photo: photo.map(|u| api::cover_url(&u, 1000)),
+            cutout,
         };
         *slot.lock() = Some(card.clone());
         l.on_artist(card);
