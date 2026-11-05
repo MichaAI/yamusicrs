@@ -476,6 +476,11 @@ impl Core {
 }
 
 fn init_logging() {
+    // Паника в потоке движка иначе молча убивает его: stderr на Android никуда не идёт.
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        tracing::error!("паника в потоке {thread}: {info}");
+    }));
     #[cfg(target_os = "android")]
     {
         let _ = tracing_subscriber::fmt()
