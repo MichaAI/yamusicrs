@@ -41,6 +41,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.layout
@@ -51,6 +53,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlin.math.roundToInt
 import uniffi.yamusic_android.AlbumItem
@@ -79,12 +82,31 @@ class Nav(private val app: YaApp) {
     var queue by mutableStateOf(false)
     var menu by mutableStateOf<MenuTarget?>(null)
     var devices by mutableStateOf(false)
+    /** Выбор исполнителя, когда у трека их несколько. */
+    var artists by mutableStateOf<List<ArtistItem>?>(null)
+    /** Текст песни листом, чтобы выделить и скопировать. */
+    var lyrics by mutableStateOf(false)
 
     private fun push(id: ULong, title: String) {
         stage = false
         queue = false
         menu = null
+        artists = null
+        lyrics = false
         stack.add(Route(id, title))
+    }
+
+    /** К исполнителю трека; если их несколько — сначала выбрать, к какому. */
+    fun artistOf(t: TrackItem) {
+        val list = t.artistList
+        when {
+            list.size > 1 -> {
+                menu = null
+                artists = list
+            }
+            list.size == 1 -> artist(list[0].id, list[0].name)
+            else -> artist(t.artistId, t.artists)
+        }
     }
 
     fun artist(id: String?, name: String) {
@@ -256,8 +278,10 @@ private fun gridPadding() = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp
 @Composable
 private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
     val now = LocalNow.current
+    val list = androidx.compose.foundation.lazy.rememberLazyListState()
+    val nowAt = remember(p.tracks, now.id) { p.tracks.indexOfFirst { it.id == now.id }.takeIf { it >= 0 } }
     Box(Modifier.fillMaxSize()) {
-    LazyColumn(Modifier.fillMaxSize().statusBarsPadding(), contentPadding = PaddingValues(bottom = 120.dp)) {
+    LazyColumn(Modifier.fillMaxSize().statusBarsPadding(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
         item(contentType = "bar") { TopBar("", nav) }
         item(contentType = "hero") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -280,7 +304,7 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
-                            p.tracks.firstOrNull()?.let { t -> nav.artist(t.artistId, a.artists) }
+                            p.tracks.firstOrNull()?.let { t -> nav.artistOf(t) }
                         }.padding(horizontal = 8.dp, vertical = 2.dp),
                     )
                     Spacer(Modifier.height(8.dp))
@@ -305,6 +329,7 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
         }
     }
     if (p.tracks.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
+    ListJumps(app, list, p.tracks.size, 2, nowAt, nowAt?.let { p.tracks[it].thumb })
     }
 }
 
@@ -313,6 +338,54 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
 fun BoxScope.FloatingPlay(onClick: () -> Unit) {
     val lift = if (LocalNow.current.id != null) 100.dp else 20.dp
     PlayButton(false, 64.dp, onClick = onClick, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = lift))
+}
+
+/**
+ * Прыжки по длинному списку — столбиком над кнопкой «играть», пока список листают (и пару секунд после):
+ * в начало, к играющему треку (его обложка), в конец. `first` — индекс первого трека среди элементов списка.
+ */
+@Composable
+fun BoxScope.ListJumps(app: YaApp, state: androidx.compose.foundation.lazy.LazyListState, count: Int, first: Int, now: Int?, nowThumb: String?) {
+    if (count < 20) return
+    val scope = rememberCoroutineScope()
+    var awake by remember { mutableStateOf(false) }
+    LaunchedEffect(state.isScrollInProgress) {
+        if (state.isScrollInProgress) awake = true
+        else {
+            kotlinx.coroutines.delay(2500)
+            awake = false
+        }
+    }
+    val visible = state.layoutInfo.visibleItemsInfo
+    val nowShown = now != null && visible.any { it.index == first + now }
+    val lift = if (LocalNow.current.id != null) 100.dp else 20.dp
+    androidx.compose.animation.AnimatedVisibility(
+        awake,
+        Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = lift + 64.dp + 12.dp),
+        enter = fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
+        exit = fadeOut() + scaleOut(targetScale = 0.8f),
+    ) {
+        val bg = MaterialTheme.colorScheme.surfaceContainerHighest
+        Column(
+            Modifier.shadow(8.dp, RoundedCornerShape(28.dp)).clip(RoundedCornerShape(28.dp)).background(bg).padding(4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            fun jump(i: Int) = scope.launch { state.scrollToItem(i) }
+            ShapeIconButton(Ic.Down, "В начало", { jump(0) }, Modifier.graphicsLayer { rotationZ = 180f }, size = 48.dp, container = Color.Transparent)
+            if (now != null && !nowShown) {
+                // Концентрично: 28 − 4 = 24.
+                Box(
+                    Modifier.size(48.dp).clip(RoundedCornerShape(24.dp)).clickable { jump((first + now - 3).coerceAtLeast(0)) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Art(app, nowThumb, Modifier.size(40.dp), corner = 20.dp)
+                    EqBars(LocalNow.current.playing, Color.White)
+                }
+            }
+            ShapeIconButton(Ic.Down, "В конец", { jump(first + count - 1) }, size = 48.dp, container = Color.Transparent)
+        }
+    }
 }
 
 @Composable
@@ -337,75 +410,126 @@ fun tracksWord(n: Int): String {
 
 // ── исполнитель ─────────────────────────────────────────────────────────────
 
+/**
+ * Исполнитель: его фото во всю ширину до самого верха экрана, имя крупно поверх низа фото;
+ * под ним — волна по нему, популярное с местами, дискография, похожие, об исполнителе.
+ */
 @Composable
 private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
     val now = LocalNow.current
     var allTracks by rememberSaveable { mutableStateOf(false) }
+    val bg = MaterialTheme.colorScheme.background
     Box(Modifier.fillMaxSize()) {
-    LazyColumn(Modifier.fillMaxSize().statusBarsPadding(), contentPadding = PaddingValues(bottom = 120.dp)) {
-        item(contentType = "bar") { TopBar("", nav) }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
         item(contentType = "hero") {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Art(app, p.artist.photo, Modifier.size(200.dp), corner = 100.dp)
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    p.artist.name,
-                    style = MaterialTheme.typography.displaySmall,
-                    fontWeight = FontWeight.Black,
-                    textAlign = TextAlign.Center,
-                )
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val h = minOf(maxWidth, 460.dp)
+                Box(Modifier.fillMaxWidth().height(h)) {
+                    Art(app, p.artist.photo, Modifier.fillMaxSize(), corner = 0.dp)
+                    // Фото растворяется в фон, имя читается поверх.
+                    Box(
+                        Modifier.fillMaxSize().background(
+                            androidx.compose.ui.graphics.Brush.verticalGradient(
+                                0f to Color.Black.copy(alpha = 0.35f),
+                                0.22f to Color.Transparent,
+                                0.5f to Color.Transparent,
+                                1f to bg,
+                            ),
+                        ),
+                    )
+                    Text(
+                        p.artist.name,
+                        style = MaterialTheme.typography.displayLarge.copy(
+                            shadow = androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = 0.5f), blurRadius = 24f),
+                        ),
+                        fontWeight = FontWeight.Black,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.align(Alignment.BottomStart).padding(horizontal = 20.dp),
+                    )
+                }
+            }
+        }
+        item(contentType = "meta") {
+            Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 6.dp)) {
                 p.listeners?.let {
-                    Text("${grouped(it.toLong())} слушателей за месяц", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${grouped(it.toLong())} слушателей за месяц", style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (p.genres.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { p.genres.take(3).forEach { Chip(it) } }
+                    Text(
+                        p.genres.take(3).joinToString(", ").replaceFirstChar { it.uppercase() },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                Spacer(Modifier.height(16.dp))
+                if (p.artist.id.isNotEmpty()) {
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        Modifier.height(52.dp).clip(RoundedCornerShape(26.dp)).background(MaterialTheme.colorScheme.primaryContainer)
+                            .clickable { app.core.startWaveWith(listOf("artist:${p.artist.id}"), "Волна по «${p.artist.name}»") }
+                            .padding(start = 18.dp, end = 22.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Ic.Wave, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text("Волна по исполнителю", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                }
             }
         }
         if (p.tracks.isNotEmpty()) {
-            item { Section("Популярные треки") }
+            item { Section("Популярное", 20.dp) }
             val shown = if (allTracks) p.tracks else p.tracks.take(5)
             itemsIndexed(shown, contentType = { _, _ -> "track" }) { i, t ->
                 TrackRow(
-                    app, t, current = now.id == t.id, playing = now.playing,
+                    app, t, current = now.id == t.id, playing = now.playing, rank = i + 1,
                     onLongClick = { nav.menu = MenuTarget(t, src, i) },
                 ) { app.core.playFrom(src, i.toUInt()) }
             }
             if (p.tracks.size > 5) {
                 item {
-                    TextButton(onClick = { allTracks = !allTracks }, Modifier.padding(horizontal = 16.dp)) {
-                        Text(if (allTracks) "Свернуть" else "Ещё ${p.tracks.size - 5}")
+                    TextButton(onClick = { allTracks = !allTracks }, Modifier.padding(horizontal = 12.dp)) {
+                        Text(if (allTracks) "Свернуть" else "Все ${tracksWord(p.tracks.size)}")
                     }
                 }
             }
         }
-        albumRow(app, nav, "Дискография", p.albums)
-        albumRow(app, nav, "С участием", p.also)
+        albumRow(app, nav, "Дискография", p.albums, 20.dp)
+        albumRow(app, nav, "С участием", p.also, 20.dp)
         if (p.similar.isNotEmpty()) {
-            item { Section("Похожие исполнители") }
+            item { Section("Похожие исполнители", 20.dp) }
             item {
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(p.similar, key = { it.id }) { a -> ArtistCircle(app, a) { nav.artist(a.id, a.name) } }
                 }
             }
         }
         p.about?.let { about ->
-            item { Section("Об исполнителе") }
+            item { Section("Об исполнителе", 20.dp) }
             item {
                 var open by rememberSaveable { mutableStateOf(false) }
                 Text(
                     about,
                     maxLines = if (open) Int.MAX_VALUE else 5,
                     overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(16.dp))
+                    modifier = Modifier.padding(horizontal = 12.dp).clip(RoundedCornerShape(16.dp))
                         .clickable { open = !open }.padding(8.dp),
                 )
             }
         }
     }
+    // «Назад» поверх фото: кнопка в подложке, чтобы читалась на любом снимке.
+    ShapeIconButton(
+        Ic.Back, "Назад", { nav.back() },
+        Modifier.statusBarsPadding().padding(12.dp),
+        size = 48.dp,
+        container = Color.Black.copy(alpha = 0.35f),
+        tint = Color.White,
+    )
     if (p.tracks.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
     }
 }
@@ -422,11 +546,11 @@ fun Section(title: String, inset: Dp = 24.dp) {
     )
 }
 
-private fun LazyListScope.albumRow(app: YaApp, nav: Nav, title: String, albums: List<AlbumItem>) {
+private fun LazyListScope.albumRow(app: YaApp, nav: Nav, title: String, albums: List<AlbumItem>, inset: Dp = 24.dp) {
     if (albums.isEmpty()) return
-    item { Section(title) }
+    item { Section(title, inset) }
     item {
-        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyRow(contentPadding = PaddingValues(horizontal = inset - 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             items(albums, key = { it.id }) { a -> AlbumCard(app, a, 148.dp) { nav.album(a.id, a.title) } }
         }
     }
@@ -763,6 +887,11 @@ fun SettingsTab(app: YaApp) {
             }
         }
         Group(null, null) {
+            Toggle("Волна после списка", "Плейлист, альбом или «Мне нравится» доиграли — дальше волна по ним, а не тишина", s.waveAfterList) {
+                app.core.setWaveAfterList(it)
+            }
+        }
+        Group(null, null) {
             Toggle("Слушать на других устройствах", s.ynisonStatus.replaceFirstChar { it.uppercase() }.let {
                 if (s.ynison) "Ynison: $it" else "Телефон или компьютер с Яндекс Музыкой включает музыку здесь, а отсюда — там"
             }, s.ynison) { app.core.setYnison(it) }
@@ -830,6 +959,8 @@ private fun Toggle(title: String, hint: String, on: Boolean, set: (Boolean) -> U
 fun TrackMenu(app: YaApp, nav: Nav) {
     val m = nav.menu ?: return
     val likes by app.likes.collectAsStateWithLifecycle()
+    val lyr by app.lyrics.collectAsStateWithLifecycle()
+    val hasLyrics = lyr?.let { it.trackId == m.track.id && it.lyrics != null } == true
     val liked = remember(likes, m.track.id) { likes.any { it.id == m.track.id } }
     val t = m.track
     ModalBottomSheet(
@@ -855,9 +986,72 @@ fun TrackMenu(app: YaApp, nav: Nav) {
             MenuItem(if (liked) Ic.Heart else Ic.HeartOutline, if (liked) "Убрать из «Мне нравится»" else "Мне нравится") {
                 app.core.likeFrom(m.source, m.index.toUInt()); close()
             }
-            if (t.artistId != null) MenuItem(Ic.Person, "Исполнитель") { nav.artist(t.artistId, t.artists) }
-            if (t.albumId != null) MenuItem(Ic.Album, "Альбом") { nav.album(t.albumId, t.album) }
+            // Каждый исполнитель — своим пунктом: к любому из них, а не только к первому.
+            if (t.artistList.isEmpty() && t.artistId != null) MenuItem(Ic.Person, t.artists) { nav.artist(t.artistId, t.artists) }
+            t.artistList.forEach { a -> MenuItem(Ic.Person, a.name) { nav.artist(a.id, a.name) } }
+            if (t.albumId != null) MenuItem(Ic.Album, t.album.ifEmpty { "Альбом" }) { nav.album(t.albumId, t.album) }
             MenuItem(Ic.Similar, "Похожие треки") { nav.similar(t) }
+            if (hasLyrics) MenuItem(Ic.Lyrics, "Текст песни целиком") { close(); nav.lyrics = true }
+        }
+    }
+}
+
+/** У трека несколько исполнителей — к какому перейти. */
+@Composable
+fun ArtistPicker(nav: Nav) {
+    val list = nav.artists ?: return
+    ModalBottomSheet(
+        onDismissRequest = { nav.artists = null },
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+    ) {
+        Column(Modifier.padding(bottom = 24.dp)) {
+            Text(
+                "Исполнители",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Black,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            )
+            list.forEach { a -> MenuItem(Ic.Person, a.name) { nav.artist(a.id, a.name) } }
+        }
+    }
+}
+
+/** Текст играющего трека целиком: выделяется пальцем, копируется кнопкой. */
+@Composable
+fun LyricsSheet(app: YaApp, nav: Nav) {
+    if (!nav.lyrics) return
+    val lyr by app.lyrics.collectAsStateWithLifecycle()
+    val l = lyr?.lyrics
+    if (l == null) {
+        nav.lyrics = false
+        return
+    }
+    val text = remember(l) { l.lines.joinToString("\n") { it.text } }
+    val clip = androidx.compose.ui.platform.LocalClipboardManager.current
+    var copied by remember(l) { mutableStateOf(false) }
+    ModalBottomSheet(
+        onDismissRequest = { nav.lyrics = false },
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 16.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Текст песни", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                FilledTonalButton(onClick = {
+                    clip.setText(androidx.compose.ui.text.AnnotatedString(text))
+                    copied = true
+                }) { Text(if (copied) "Скопировано" else "Скопировать") }
+            }
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(
+                    text,
+                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 26.sp),
+                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                        .padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 32.dp),
+                )
+            }
         }
     }
 }
@@ -871,7 +1065,7 @@ private fun MenuItem(icon: ImageVector, text: String, onClick: () -> Unit) {
     ) {
         Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
         Spacer(Modifier.width(18.dp))
-        Text(text, style = MaterialTheme.typography.bodyLarge)
+        Text(text, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -253,7 +253,6 @@ fun AppScreen(app: YaApp, openUrl: (String) -> Unit) {
                 is Phase.Login -> Login(app, pal, p, openUrl)
                 is Phase.Main -> Main(app, pal, state!!)
             }
-            ToastHost(app, Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp))
         }
         }
     }
@@ -383,7 +382,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     // Ушли со строки поиска (страница, сцена, другая вкладка, меню трека) — клавиатура прячется.
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-    LaunchedEffect(nav.stack.size, nav.stage, pager.currentPage, nav.menu != null, nav.devices, nav.queue) {
+    LaunchedEffect(nav.stack.size, nav.stage, pager.currentPage, nav.menu != null, nav.devices, nav.queue, nav.artists != null) {
         focus.clearFocus(force = true)
         keyboard?.hide()
     }
@@ -394,16 +393,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     LaunchedEffect(nav.stage) {
         if (stageState.currentState != nav.stage || stageState.targetState != nav.stage) stageState.animateTo(nav.stage)
     }
-    PredictiveBackHandler(enabled = nav.stage) { progress ->
-        try {
-            progress.collect { stageState.seekTo(it.progress, false) }
-            stageState.animateTo(false)
-            nav.stage = false
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            stageState.animateTo(true)
-            throw e
-        }
-    }
+    // «Назад» со сцены — предиктивный: сцену за пальцем сжимает сама Stage (PredictiveBackHandler в ней).
     val now = NowMark(s.track?.id, !s.paused)
     CompositionLocalProvider(LocalNav provides nav, LocalNow provides now) {
     SharedTransitionLayout(Modifier.fillMaxSize()) {
@@ -479,6 +469,8 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     QueueSheet(app, nav, s.queuePos?.toInt())
     DevicesSheet(app, nav, s)
     TrackMenu(app, nav)
+    ArtistPicker(nav)
+    LyricsSheet(app, nav)
     }
 }
 
@@ -558,6 +550,7 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
     val scope = rememberCoroutineScope()
     val dx = remember { Animatable(0f) }
     val skip = with(LocalDensity.current) { 56.dp.toPx() }
+    val (canNext, canPrev) = skipBounds(app, s)
     Column(
         modifier.fillMaxWidth().pointerInput(Unit) {
             detectHorizontalDragGestures(
@@ -565,13 +558,13 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                     scope.launch {
                         val w = size.width.toFloat()
                         when {
-                            dx.value < -skip -> {
+                            dx.value < -skip && canNext.value -> {
                                 app.core.next()
                                 dx.animateTo(-w, tween(160))
                                 dx.snapTo(w * 0.4f)
                                 dx.animateTo(0f, spring(dampingRatio = 0.8f))
                             }
-                            dx.value > skip -> {
+                            dx.value > skip && canPrev.value -> {
                                 app.core.prevTrack()
                                 dx.animateTo(w, tween(160))
                                 dx.snapTo(-w * 0.4f)
@@ -677,6 +670,16 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
     }
 }
 
+/** Есть ли куда листать: в конце списка без «волны после списка» карточка не улетает, а пружинит назад. */
+@Composable
+private fun skipBounds(app: YaApp, s: PlayerState): Pair<androidx.compose.runtime.State<Boolean>, androidx.compose.runtime.State<Boolean>> {
+    val st by app.settings.collectAsStateWithLifecycle()
+    val pos = s.queuePos?.toInt()
+    val next = s.wave || pos == null || pos + 1 < s.queueLen.toInt() || st?.waveAfterList == true
+    val prev = pos == null || pos > 0
+    return rememberUpdatedState(next) to rememberUpdatedState(prev)
+}
+
 @Composable
 private fun Sub(text: String, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
     Text(text, color = color, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -736,8 +739,10 @@ private fun Likes(app: YaApp, nav: Nav, loading: Boolean) {
         return
     }
     SearchPill(filter, { filter = it }, "Поиск среди ${tracksWord(likes.size)}")
+    val list = rememberLazyListState()
+    val nowAt = remember(shown, now.id) { shown.indexOfFirst { it.value.id == now.id }.takeIf { it >= 0 } }
     Box(Modifier.fillMaxSize()) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
         itemsIndexed(shown, key = { _, it -> it.index }, contentType = { _, _ -> "track" }) { _, (i, t) ->
             TrackRow(
                 app, t, current = now.id == t.id, playing = now.playing,
@@ -746,6 +751,7 @@ private fun Likes(app: YaApp, nav: Nav, loading: Boolean) {
         }
     }
     FloatingPlay { app.core.playLikes(0u) }
+    ListJumps(app, list, shown.size, 0, nowAt, nowAt?.let { shown[it].value.thumb })
     }
 }
 
@@ -809,6 +815,8 @@ fun TrackRow(
     current: Boolean,
     playing: Boolean,
     dim: Boolean = false,
+    /** Место в рейтинге (популярное исполнителя) — цифрой перед обложкой. */
+    rank: Int? = null,
     onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -825,6 +833,15 @@ fun TrackRow(
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        rank?.let {
+            Text(
+                "$it",
+                Modifier.width(28.dp),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Box(contentAlignment = Alignment.Center) {
             Art(app, t.thumb, Modifier.size(52.dp), corner = if (current) 26.dp else 14.dp)
             if (current) {
@@ -876,6 +893,7 @@ private fun MiniPlayer(
     val density = LocalDensity.current
     val skip = with(density) { 56.dp.toPx() }
     val up = with(density) { 28.dp.toPx() }
+    val (canNext, canPrev) = skipBounds(app, s)
     with(shared) {
         Surface(
             shape = RoundedCornerShape(32.dp),
@@ -902,13 +920,13 @@ private fun MiniPlayer(
                                         open()
                                         dx.snapTo(0f)
                                     }
-                                    x < -skip -> {
+                                    x < -skip && canNext.value -> {
                                         app.core.next()
                                         dx.animateTo(-size.width.toFloat(), tween(160))
                                         dx.snapTo(size.width.toFloat() * 0.4f)
                                         dx.animateTo(0f, spring(dampingRatio = 0.8f))
                                     }
-                                    x > skip -> {
+                                    x > skip && canPrev.value -> {
                                         app.core.prevTrack()
                                         dx.animateTo(size.width.toFloat(), tween(160))
                                         dx.snapTo(-size.width.toFloat() * 0.4f)
@@ -1048,7 +1066,22 @@ private fun Stage(
     val scrim by animateFloatAsState(if (lyricsOn) 0.62f else 0f, tween(400), label = "scrim")
     // Чем дальше утянули, тем сильнее скругление и меньше масштаб — видно, что сворачивается.
     // («Назад» сворачивает сцену в мини-плеер за пальцем — это переход в Main.)
-    val pull = (dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f)
+    // Жест «назад» сворачивает сцену за пальцем тем же сжатием, что и свайп вниз.
+    val back = remember { Animatable(0f) }
+    var backEdge by remember { mutableIntStateOf(androidx.activity.BackEventCompat.EDGE_LEFT) }
+    PredictiveBackHandler(enabled = true) { progress ->
+        try {
+            progress.collect {
+                backEdge = it.swipeEdge
+                back.snapTo(it.progress)
+            }
+            close()
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            scope.launch { back.animateTo(0f, spring(dampingRatio = 0.8f)) }
+            throw e
+        }
+    }
+    val pull = maxOf((dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f), back.value)
     with(shared) {
         Box(
             Modifier
@@ -1063,6 +1096,9 @@ private fun Stage(
                     val k = 1f - pull * 0.1f
                     scaleX = k
                     scaleY = k
+                    // От какого края тянут «назад» — туда сцена и подаётся.
+                    val dir = if (backEdge == androidx.activity.BackEventCompat.EDGE_RIGHT) -1f else 1f
+                    translationX = dir * back.value * 24.dp.toPx()
                     shape = RoundedCornerShape((pull * 40).dp)
                     clip = pull > 0f
                 }
@@ -1373,7 +1409,7 @@ private fun ColumnScope.StageInfo(
     val card by app.artist.collectAsStateWithLifecycle()
     val photo = card?.takeIf { it.artistId == t.artistId }?.photo
     Row(
-        Modifier.clip(RoundedCornerShape(18.dp)).clickable(enabled = t.artistId != null) { nav.artist(t.artistId, t.artists) }
+        Modifier.clip(RoundedCornerShape(18.dp)).clickable(enabled = t.artistList.isNotEmpty()) { nav.artistOf(t) }
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1410,7 +1446,8 @@ private fun ColumnScope.StageInfo(
     }
     Spacer(Modifier.height(16.dp))
     // Второстепенное — одним рядом под кнопками, в зоне большого пальца: текст, очередь, устройства, ещё.
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+    // Кнопки фиксированной ширины, очередь забирает остаток: длинное «128 из 1500» не сдавливает соседей.
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         val idle = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f)
         ShapeIconButton(
             Ic.Lyrics,
@@ -1426,16 +1463,23 @@ private fun ColumnScope.StageInfo(
             },
         )
         Row(
-            Modifier.height(48.dp).clip(RoundedCornerShape(24.dp)).background(idle)
-                .clickable { nav.queue = true }.padding(horizontal = 20.dp),
+            Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(24.dp)).background(idle)
+                .clickable { nav.queue = true }.padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
         ) {
             Icon(Ic.Queue, null, Modifier.size(20.dp))
-            Spacer(Modifier.width(10.dp))
-            Text("Очередь", style = MaterialTheme.typography.labelLarge)
+            Spacer(Modifier.width(8.dp))
+            Text("Очередь", style = MaterialTheme.typography.labelLarge, maxLines = 1)
             if (s.queueLen > 0u) {
-                Spacer(Modifier.width(10.dp))
-                Text("${(s.queuePos?.toInt() ?: 0) + 1} из ${s.queueLen}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${(s.queuePos?.toInt() ?: 0) + 1} из ${s.queueLen}",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    softWrap = false,
+                )
             }
         }
         ShapeIconButton(Ic.Cast, "Слушать на", { nav.devices = true }, size = 48.dp, container = idle)
@@ -1448,43 +1492,63 @@ private fun ColumnScope.StageInfo(
 }
 
 /**
- * Текст песни: синхронный — текущая строка крупно и в акценте (с тенью, чтобы читалась над
- * блобом), держится на трети высоты; тап по строке — перемотка. Строка пересчитывается из
- * часов позиции, а перекомпоновка случается только при смене строки.
+ * Текст песни. Синхронный: строки одного размера (без прыжков вёрстки), текущая — белая и
+ * чуть крупнее масштабом, пройденные гаснут, будущие приглушены; держится на трети высоты,
+ * тап по строке — перемотка. Обычный — плотным абзацем, пустые строки — паузы между куплетами.
  */
 @Composable
 private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
+    val base = MaterialTheme.typography.titleLarge.copy(
+        fontWeight = FontWeight.ExtraBold,
+        lineHeight = 30.sp,
+        shadow = Shadow(Color.Black.copy(alpha = 0.6f), blurRadius = 16f),
+    )
+    val ink = MaterialTheme.colorScheme.onSurface
     if (!l.synced) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-            l.lines.forEach { Text(it.text, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 4.dp)) }
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 16.dp)) {
+            l.lines.forEach {
+                if (it.text.isBlank()) Spacer(Modifier.height(14.dp))
+                else Text(it.text, style = base.copy(fontWeight = FontWeight.Bold, lineHeight = 28.sp), color = ink.copy(alpha = 0.9f))
+            }
         }
         return
     }
     val cur by remember(l) { derivedStateOf { l.lines.indexOfLast { it.timeMs.toLong() <= clock.pos() + 250 } } }
     val list = rememberLazyListState()
     LaunchedEffect(cur) { if (cur >= 0) list.animateScrollToItem(cur) }
-    val glow = Shadow(Color.Black.copy(alpha = 0.75f), blurRadius = 18f)
     BoxWithConstraints(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(top = maxHeight / 3, bottom = maxHeight * 2 / 3)) {
             itemsIndexed(l.lines) { i, line ->
                 val active = i == cur
-                val color by animateColorAsState(
+                val alpha by animateFloatAsState(
                     when {
-                        active -> MaterialTheme.colorScheme.primary
-                        i < cur -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        active -> 1f
+                        i < cur -> 0.3f
+                        else -> 0.55f
                     },
+                    tween(300),
                     label = "line",
                 )
-                val style = if (active) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleLarge
-                Text(
-                    line.text.ifBlank { "♪" },
-                    style = style.copy(shadow = glow),
-                    fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
-                    color = color,
-                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                        .clickable { app.core.seek(line.timeMs) }.padding(vertical = 8.dp, horizontal = 4.dp),
-                )
+                val scale by animateFloatAsState(if (active) 1.06f else 1f, tween(300), label = "scale")
+                if (line.text.isBlank()) {
+                    // Проигрыш — короткая пауза, а не целая строка с символом.
+                    Spacer(Modifier.height(20.dp))
+                } else {
+                    Text(
+                        line.text,
+                        style = base,
+                        color = ink,
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                            .clickable { app.core.seek(line.timeMs) }
+                            .padding(vertical = 5.dp, horizontal = 4.dp)
+                            .graphicsLayer {
+                                this.alpha = alpha
+                                scaleX = scale
+                                scaleY = scale
+                                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                            },
+                    )
+                }
             }
         }
     }

@@ -40,6 +40,8 @@ pub struct TrackItem {
     /// Для перехода к альбому и исполнителю (первому с id).
     pub album_id: Option<String>,
     pub artist_id: Option<String>,
+    /// Все исполнители с id — переход к любому из них.
+    pub artist_list: Vec<ArtistItem>,
     pub explicit: bool,
 }
 
@@ -56,6 +58,16 @@ impl From<&Track> for TrackItem {
             available: t.available,
             album_id: t.album().map(|a| a.id.clone()).filter(|a| !a.is_empty()),
             artist_id: t.artists.iter().map(|a| a.id.clone()).find(|a| !a.is_empty()),
+            artist_list: t
+                .artists
+                .iter()
+                .filter(|a| !a.id.is_empty())
+                .map(|a| ArtistItem {
+                    id: a.id.clone(),
+                    name: a.name.clone(),
+                    photo: None,
+                })
+                .collect(),
             explicit: t.explicit(),
         }
     }
@@ -176,6 +188,8 @@ pub struct SettingsData {
     pub report_plays: bool,
     /// Быстрый старт: из сети сначала AAC, lossless подменяет на ходу; следующие треки прогреваются.
     pub fast_start: bool,
+    /// Список доиграл — дальше волна по нему.
+    pub wave_after_list: bool,
     /// Ynison: видно в «Слушать на…», можно управлять другими устройствами.
     pub ynison: bool,
     /// Состояние Ynison для подписи («играет здесь», «Яндекс не пускает…»).
@@ -249,6 +263,7 @@ enum Cmd {
     Crossfade(f32),
     ReportPlays(bool),
     FastStart(bool),
+    WaveAfterList(bool),
     Ynison(bool),
     Transfer(String),
     RemotePlayPause,
@@ -457,6 +472,10 @@ impl Core {
 
     pub fn set_fast_start(&self, on: bool) {
         self.send(Cmd::FastStart(on));
+    }
+
+    pub fn set_wave_after_list(&self, on: bool) {
+        self.send(Cmd::WaveAfterList(on));
     }
 
     pub fn set_ynison(&self, on: bool) {
@@ -689,6 +708,16 @@ fn source_tracks<'a>(e: &'a Engine, p: &'a Pages, s: &Source) -> Option<(String,
     }
 }
 
+/// Сиды волны, которой продолжится список, когда доиграет; пусто — по последнему треку.
+fn seeds_of(e: &Engine, p: &Pages, s: &Source) -> Vec<String> {
+    match s {
+        // «Мне нравится» — плейлист 3 владельца.
+        Source::Likes => e.client().map(|c| vec![format!("playlist:{}_3", c.uid)]).unwrap_or_default(),
+        Source::Queue => e.queue.seeds.clone(),
+        Source::Page { id } => p.seeds.get(id).cloned().into_iter().collect(),
+    }
+}
+
 fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: Cmd) {
     let idle = e.now.is_none() && e.loading_track.is_none();
     match c {
@@ -712,6 +741,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             if let Loadable::Ready(v) = &e.likes {
                 let v = v.clone();
                 e.play_list(v, i as usize, "Мне нравится".into());
+                e.queue.seeds = seeds_of(e, pages, &Source::Likes);
             }
         }
         Cmd::PlayQueue(i) => {
@@ -754,6 +784,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
         }
         Cmd::ClosePage(id) => {
             pages.tracks.remove(&id);
+            pages.seeds.remove(&id);
         }
         Cmd::PlayFrom(Source::Queue, i) => {
             if (i as usize) < e.queue.items.len() {
@@ -764,6 +795,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             if let Some((title, v)) = source_tracks(e, pages, &s) {
                 let v = v.to_vec();
                 e.play_list(v, i as usize, title);
+                e.queue.seeds = seeds_of(e, pages, &s);
             }
         }
         Cmd::EnqueueFrom(s, i, next) => {
@@ -808,6 +840,10 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             if let Some(f) = &e.fetcher {
                 f.set_fast_start(on);
             }
+        }
+        Cmd::WaveAfterList(on) => {
+            e.cfg.wave_after_list = on;
+            e.cfg.save(&e.paths);
         }
         Cmd::Ynison(on) => {
             let flag = ynison_flag(&e.paths);
@@ -899,6 +935,7 @@ impl Publisher {
             crossfade_secs: e.crossfade(),
             report_plays: e.cfg.report_plays,
             fast_start: e.cfg.fast_start,
+            wave_after_list: e.cfg.wave_after_list,
             ynison: e.cfg.ynison,
             ynison_status: e.ynison_label(),
             search_history: e.state.search_history.clone(),

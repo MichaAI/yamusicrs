@@ -196,6 +196,8 @@ pub struct Queue {
     pub title: String,
     /// Поколение очереди: токены старой очереди не двигают курсор новой.
     pub generation: u64,
+    /// Сиды волны «по этому списку» (плейлист, альбом, исполнитель); пусто — по последнему треку.
+    pub seeds: Vec<String>,
 }
 
 pub struct Now {
@@ -389,6 +391,7 @@ impl Engine {
                 kind: QueueKind::List,
                 title: String::new(),
                 generation: 0,
+                seeds: Vec::new(),
             },
             wave: WaveState {
                 loading: false,
@@ -752,7 +755,7 @@ impl Engine {
                                 session: s.radio_session_id,
                                 batch: s.batch_id,
                             },
-                            "Моя волна".into(),
+                            self.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into()),
                         );
                         self.play_index(0);
                     }
@@ -1129,6 +1132,7 @@ impl Engine {
             kind,
             title,
             generation: self.queue.generation + 1,
+            seeds: Vec::new(),
         };
         self.next_loaded = None;
         self.failed.clear();
@@ -1535,6 +1539,9 @@ impl Engine {
         match idx {
             Some(i) => self.play_index(i),
             None => {
+                if self.wave_after_list() {
+                    return;
+                }
                 if matches!(self.queue.kind, QueueKind::Wave { .. }) {
                     self.toast("Волна подгружается…".into());
                     self.maybe_extend_wave(cur);
@@ -1546,6 +1553,25 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Список доиграл: дальше волна по нему (если включено). `true` — волна запускается.
+    fn wave_after_list(&mut self) -> bool {
+        if !self.cfg.wave_after_list || self.offline || self.wave.loading || !matches!(self.queue.kind, QueueKind::List) {
+            return false;
+        }
+        let seeds = if self.queue.seeds.is_empty() {
+            let last = self.queue.pos.and_then(|p| self.queue.items.get(p)).or(self.queue.items.last());
+            match last {
+                Some(t) => vec![format!("track:{}", t.id)],
+                None => return false,
+            }
+        } else {
+            self.queue.seeds.clone()
+        };
+        let name = if self.queue.title.is_empty() { "Моя волна".to_string() } else { format!("Волна по «{}»", self.queue.title) };
+        self.start_wave(seeds, name);
+        true
     }
 
     pub fn prev(&mut self) {
@@ -2117,6 +2143,7 @@ impl Engine {
                     // Волна догружается: ждём WaveMore, он сам поставит следующий.
                     None if self.wave.extending => {}
                     None => {
+                        self.wave_after_list();
                         if let Some(now) = self.now.take() {
                             self.report_end(now.token, now.pos, false);
                         }

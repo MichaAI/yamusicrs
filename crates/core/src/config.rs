@@ -40,6 +40,8 @@ pub struct Config {
     pub fast_start: bool,
     /// Сколько следующих треков прогревать.
     pub warm_ahead: usize,
+    /// Список (плейлист, альбом…) доиграл — дальше волна по нему, а не тишина.
+    pub wave_after_list: bool,
 }
 
 impl Default for Config {
@@ -63,6 +65,7 @@ impl Default for Config {
             ynison: true,
             fast_start: true,
             warm_ahead: 5,
+            wave_after_list: true,
         }
     }
 }

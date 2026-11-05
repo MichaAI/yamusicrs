@@ -157,6 +157,8 @@ pub enum Loaded {
         cover: Option<String>,
         album: Option<Album>,
         tracks: Vec<Track>,
+        /// Сид волны «по этому списку».
+        seed: Option<String>,
     },
     Search(String, SearchResult),
     Albums(String, Vec<Album>),
@@ -165,10 +167,11 @@ pub enum Loaded {
 
 pub type Reply = (u64, Result<Loaded, String>);
 
-/// Треки открытых страниц: id → (название очереди, треки).
+/// Треки открытых страниц: id → (название очереди, треки); сиды волны «по этому списку».
 #[derive(Default)]
 pub struct Pages {
     pub tracks: HashMap<u64, (String, Vec<Track>)>,
+    pub seeds: HashMap<u64, String>,
 }
 
 impl Pages {
@@ -185,9 +188,13 @@ impl Pages {
                 cover,
                 album,
                 tracks,
+                seed,
             } => {
                 let items = tracks.iter().map(TrackItem::from).collect();
                 self.tracks.insert(id, (title.clone(), tracks));
+                if let Some(seed) = seed {
+                    self.seeds.insert(id, seed);
+                }
                 Page::Tracks {
                     title,
                     subtitle,
@@ -224,12 +231,16 @@ impl Pages {
                 };
                 let items = tracks.iter().map(TrackItem::from).collect();
                 self.tracks.insert(id, (name.clone(), tracks));
+                if let Some(a) = info.filter(|a| !a.id.is_empty()) {
+                    self.seeds.insert(id, format!("artist:{}", a.id));
+                }
                 let albums = if b.discography.is_empty() { &b.albums } else { &b.discography };
                 Page::Artist {
                     artist: ArtistItem {
                         id: info.map(|i| i.id.clone()).unwrap_or_default(),
                         name,
-                        photo: info.and_then(|i| i.cover_uri()).map(|u| api::cover_url(u, 400)),
+                        // Во всю ширину шапки — крупно.
+                        photo: info.and_then(|i| i.cover_uri()).map(|u| api::cover_url(u, 1000)),
                     },
                     listeners: b.stats.and_then(|s| s.last_month_listeners),
                     genres: info.map(|i| i.genres.clone()).unwrap_or_default(),
@@ -260,6 +271,7 @@ pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
                 cover: p.cover_uri().map(|u| api::cover_url(u, 400)),
                 album: None,
                 tracks: e.offline_tracks(ts.clone()),
+                seed: Some(format!("playlist:{}_{}", p.uid, p.kind)),
             }),
             None => Err("Этот плейлист не успел сохраниться для офлайна".into()),
         };
@@ -292,6 +304,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 cover: full.cover_uri().map(|u| api::cover_url(u, 400)),
                 album: None,
                 tracks,
+                seed: Some(format!("playlist:{uid}_{kind}")),
             })
         }
         Req::Album(id) => {
@@ -303,6 +316,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 cover: a.cover_uri().map(|u| api::cover_url(u, 400)),
                 album: Some(Album { volumes: Vec::new(), ..a }),
                 tracks,
+                seed: Some(format!("album:{id}")),
             })
         }
         Req::Artist(id) => {
@@ -336,6 +350,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 cover: None,
                 album: None,
                 tracks,
+                seed: Some(format!("track:{track_id}")),
             })
         }
         Req::Search(q) => Ok(Loaded::Search(q.clone(), c.search(&q).await.map_err(err_str)?)),
@@ -349,6 +364,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 cover: None,
                 album: None,
                 tracks,
+                seed: None,
             })
         }
     }

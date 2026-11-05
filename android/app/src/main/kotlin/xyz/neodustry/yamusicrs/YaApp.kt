@@ -11,7 +11,6 @@ import java.net.URL
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -29,8 +28,6 @@ import uniffi.yamusic_android.SettingsData
 import uniffi.yamusic_android.ToastAction
 import uniffi.yamusic_android.TrackItem
 import uniffi.yamusic_android.WavePreset
-
-data class Toast(val text: String, val error: Boolean, val action: ToastAction?)
 
 /** Текст играющего трека: `lyrics == null` — текста нет. */
 data class TrackLyrics(val trackId: String, val lyrics: LyricsData?)
@@ -53,7 +50,6 @@ class YaApp : Application(), CoreListener {
     var releasesId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
     /** Палитра под обложку играющего трека, как тема TUI. */
     val palette = MutableStateFlow(Pal.Default)
-    val toasts = MutableSharedFlow<Toast>(extraBufferCapacity = 16)
 
     lateinit var core: Core
         private set
@@ -94,8 +90,9 @@ class YaApp : Application(), CoreListener {
         queue.value = title to items
     }
 
+    /** Тостов на телефоне нет: что важно, видно на экране; остальное — в logcat. */
     override fun onToast(text: String, error: Boolean, action: ToastAction?) {
-        toasts.tryEmit(Toast(text, error, action))
+        if (error) android.util.Log.w("yamusicrs", text) else android.util.Log.i("yamusicrs", text)
     }
 
     override fun onWheel(presets: List<WavePreset>) {

@@ -252,10 +252,12 @@ class PlayClock {
     internal var base = 0L
     internal var at = 0L
     internal var running = false
+    /** Длина трека: часы не уходят за конец, пока ядро не сказало, что дальше. */
+    internal var limit = Long.MAX_VALUE
 
     fun pos(): Long {
         val now = frame.longValue
-        return if (running && now > at) base + (now - at) / 1_000_000 else base
+        return (if (running && now > at) base + (now - at) / 1_000_000 else base).coerceAtMost(limit)
     }
 }
 
@@ -267,6 +269,7 @@ fun rememberPlayClock(s: PlayerState): PlayClock {
         c.base = s.positionMs.toLong()
         c.at = System.nanoTime()
         c.running = running
+        c.limit = s.track?.durationMs?.toLong()?.takeIf { it > 0 } ?: Long.MAX_VALUE
         c.frame.longValue = c.at
     }
     LaunchedEffect(running) {
