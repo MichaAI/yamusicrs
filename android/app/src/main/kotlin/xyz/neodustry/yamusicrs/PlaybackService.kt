@@ -24,17 +24,17 @@ class PlaybackService : MediaSessionService() {
     private val like = SessionCommand("xyz.neodustry.yamusicrs.LIKE", Bundle.EMPTY)
     private val dislike = SessionCommand("xyz.neodustry.yamusicrs.DISLIKE", Bundle.EMPTY)
 
-    /** «Нравится» и «Не рекомендовать» — в уведомлении рядом с переключением треков. */
+    /** «Не рекомендовать» и «Нравится» (в таком порядке, как в плеере) — в уведомлении рядом с переключением треков. */
     private fun buttons(liked: Boolean): List<CommandButton> = listOf(
-        CommandButton.Builder(if (liked) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED)
-            .setDisplayName(if (liked) "Убрать из «Мне нравится»" else "Нравится")
-            .setSessionCommand(like)
-            .setSlots(CommandButton.SLOT_OVERFLOW)
-            .build(),
         CommandButton.Builder(CommandButton.ICON_UNDEFINED)
             .setCustomIconResId(R.drawable.ic_dislike)
             .setDisplayName("Не рекомендовать")
             .setSessionCommand(dislike)
+            .setSlots(CommandButton.SLOT_OVERFLOW)
+            .build(),
+        CommandButton.Builder(if (liked) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED)
+            .setDisplayName(if (liked) "Убрать из «Мне нравится»" else "Нравится")
+            .setSessionCommand(like)
             .setSlots(CommandButton.SLOT_OVERFLOW)
             .build(),
     )
