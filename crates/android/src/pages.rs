@@ -127,9 +127,10 @@ pub enum Page {
         about: Option<String>,
         /// Популярные треки (их и играет `play_from`).
         tracks: Vec<TrackItem>,
-        /// «Знакомое вам»: треки исполнителя из коллекции и волны. Играются с индекса
-        /// `tracks.len()` — в источнике страницы они идут сразу за популярными.
-        familiar: Vec<TrackItem>,
+        /// Треки исполнителя из коллекции и услышанные в волне. В источнике страницы идут за
+        /// популярными: сначала коллекция (с индекса `tracks.len()`), потом волна.
+        collection: Vec<TrackItem>,
+        wave: Vec<TrackItem>,
         albums: Vec<AlbumItem>,
         also: Vec<AlbumItem>,
         similar: Vec<ArtistItem>,
@@ -235,11 +236,14 @@ impl Pages {
             },
             Loaded::Artist(name, b) => {
                 let info = b.artist.as_ref();
-                let popular = b.popular_tracks.len();
+                let (popular, coll) = (b.popular_tracks.len(), b.collection.len());
                 let mut tracks = b.popular_tracks.clone();
-                tracks.extend(b.familiar.iter().cloned());
+                tracks.extend(b.collection.iter().cloned());
+                tracks.extend(b.wave.iter().cloned());
                 let items: Vec<TrackItem> = tracks.iter().map(TrackItem::from).collect();
-                let (items, familiar) = (items[..popular].to_vec(), items[popular..].to_vec());
+                let items_p = items[..popular].to_vec();
+                let collection = items[popular..popular + coll].to_vec();
+                let wave = items[popular + coll..].to_vec();
                 self.tracks.insert(id, (name.clone(), tracks));
                 if let Some(a) = info.filter(|a| !a.id.is_empty()) {
                     self.seeds.insert(id, format!("artist:{}", a.id));
@@ -258,8 +262,9 @@ impl Pages {
                         .and_then(|i| i.description.as_ref())
                         .map(|d| d.text.clone())
                         .filter(|t| !t.is_empty()),
-                    tracks: items,
-                    familiar,
+                    tracks: items_p,
+                    collection,
+                    wave,
                     albums: albums.iter().map(AlbumItem::from).collect(),
                     also: b.also_albums.iter().map(AlbumItem::from).collect(),
                     similar: b.similar_artists.iter().map(ArtistItem::from).collect(),

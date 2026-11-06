@@ -497,7 +497,7 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
         if (p.tracks.isEmpty()) item { Empty("В этом списке нет треков") }
         itemsIndexed(p.tracks, contentType = { _, _ -> "track" }) { i, t ->
             TrackRow(
-                app, t, current = now.id == t.id, playing = now.playing, enter = i,
+                app, t, current = now.id == t.id, playing = now.playing,
                 onLongClick = { nav.menu = MenuTarget(t, src, i) },
             ) { app.core.playFrom(src, i.toUInt()) }
         }
@@ -601,8 +601,7 @@ fun tracksWord(n: Int): String {
 @Composable
 private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
     val now = LocalNow.current
-    var allTracks by rememberSaveable { mutableStateOf(false) }
-    var allFamiliar by rememberSaveable { mutableStateOf(false) }
+    var tab by rememberSaveable { mutableIntStateOf(0) }
     val bg = MaterialTheme.colorScheme.background
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     Box(Modifier.fillMaxSize()) {
@@ -672,39 +671,28 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
                 }
             }
         }
-        if (p.tracks.isNotEmpty()) {
-            item { Section("Популярное", 20.dp) }
-            val shown = if (allTracks) p.tracks else p.tracks.take(5)
-            itemsIndexed(shown, contentType = { _, _ -> "track" }) { i, t ->
-                TrackRow(
-                    app, t, current = now.id == t.id, playing = now.playing, enter = i, rank = i + 1,
-                    onLongClick = { nav.menu = MenuTarget(t, src, i) },
-                ) { app.core.playFrom(src, i.toUInt()) }
-            }
-            if (p.tracks.size > 5) {
-                item {
-                    TextButton(onClick = { allTracks = !allTracks }, Modifier.padding(horizontal = 12.dp)) {
-                        Text(if (allTracks) "Свернуть" else "Все ${tracksWord(p.tracks.size)}")
-                    }
+        // Популярное, своё и услышанное в волне — отдельными вкладками, каждая со всем списком.
+        val tabs = listOfNotNull(
+            p.tracks.takeIf { it.isNotEmpty() }?.let { Triple("Популярное", it, 0) },
+            p.collection.takeIf { it.isNotEmpty() }?.let { Triple("В коллекции", it, p.tracks.size) },
+            p.wave.takeIf { it.isNotEmpty() }?.let { Triple("В волне", it, p.tracks.size + p.collection.size) },
+        )
+        if (tabs.isNotEmpty()) {
+            val cur = tab.coerceIn(0, tabs.size - 1)
+            val (_, shown, base) = tabs[cur]
+            if (tabs.size > 1) {
+                item(contentType = "tabs") {
+                    Segments(tabs.map { it.first }, cur, { tab = it }, Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 8.dp))
                 }
+            } else {
+                item { Section(tabs[0].first, 20.dp) }
             }
-        }
-        if (p.familiar.isNotEmpty()) {
-            item { Section("Знакомое вам", 20.dp) }
-            val shown = if (allFamiliar) p.familiar else p.familiar.take(5)
-            itemsIndexed(shown, contentType = { _, _ -> "track" }) { i, t ->
-                val at = p.tracks.size + i
+            itemsIndexed(shown, key = { i, t -> "$cur:$i:${t.id}" }, contentType = { _, _ -> "track" }) { i, t ->
+                val at = base + i
                 TrackRow(
-                    app, t, current = now.id == t.id, playing = now.playing, enter = i,
+                    app, t, current = now.id == t.id, playing = now.playing, rank = if (cur == 0 && tabs[0].first == "Популярное") i + 1 else null,
                     onLongClick = { nav.menu = MenuTarget(t, src, at) },
                 ) { app.core.playFrom(src, at.toUInt()) }
-            }
-            if (p.familiar.size > 5) {
-                item {
-                    TextButton(onClick = { allFamiliar = !allFamiliar }, Modifier.padding(horizontal = 12.dp)) {
-                        Text(if (allFamiliar) "Свернуть" else "Все ${tracksWord(p.familiar.size)}")
-                    }
-                }
             }
         }
         albumRow(app, nav, "Дискография", p.albums, 20.dp)
@@ -741,7 +729,7 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
         container = Color.Black.copy(alpha = 0.35f),
         tint = Color.White,
     )
-    if (p.tracks.isNotEmpty() || p.familiar.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
+    if (p.tracks.isNotEmpty() || p.collection.isNotEmpty() || p.wave.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
     }
 }
 
@@ -753,7 +741,7 @@ fun Section(title: String, inset: Dp = 24.dp) {
         title,
         style = MaterialTheme.typography.titleLarge,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.appear().padding(start = inset, end = inset, top = 24.dp, bottom = 8.dp),
+        modifier = Modifier.padding(start = inset, end = inset, top = 24.dp, bottom = 8.dp),
     )
 }
 
@@ -941,7 +929,7 @@ private fun SearchResults(app: YaApp, nav: Nav, p: Page.Search, src: Source) {
             item { Section("Треки") }
             itemsIndexed(p.tracks, contentType = { _, _ -> "track" }) { i, t ->
                 TrackRow(
-                    app, t, current = now.id == t.id, playing = now.playing, enter = i,
+                    app, t, current = now.id == t.id, playing = now.playing,
                     onLongClick = { nav.menu = MenuTarget(t, src, i) },
                 ) { app.core.playFrom(src, i.toUInt()) }
             }
@@ -1063,7 +1051,7 @@ fun Downloaded(app: YaApp, nav: Nav) {
                 }
                 else -> itemsIndexed(tracks, contentType = { _, _ -> "track" }) { i, t ->
                     TrackRow(
-                        app, t, current = now.id == t.id, playing = now.playing, enter = i,
+                        app, t, current = now.id == t.id, playing = now.playing,
                         onLongClick = { nav.menu = MenuTarget(t, src, i) },
                     ) { app.core.playFrom(src, i.toUInt()) }
                 }

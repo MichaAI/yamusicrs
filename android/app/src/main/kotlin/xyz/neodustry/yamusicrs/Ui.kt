@@ -868,7 +868,7 @@ private fun Likes(app: YaApp, nav: Nav, loading: Boolean) {
     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
         itemsIndexed(shown, key = { _, it -> it.index }, contentType = { _, _ -> "track" }) { _, (i, t) ->
             TrackRow(
-                app, t, current = now.id == t.id, playing = now.playing, enter = i,
+                app, t, current = now.id == t.id, playing = now.playing,
                 onLongClick = { nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Likes, i) },
             ) { app.core.playLikes(i.toUInt()) }
         }
@@ -940,8 +940,6 @@ fun TrackRow(
     dim: Boolean = false,
     /** Место в рейтинге (популярное исполнителя) — цифрой перед обложкой. */
     rank: Int? = null,
-    /** Номер среди первых строк списка — для каскадного появления. */
-    enter: Int = 99,
     onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -950,19 +948,12 @@ fun TrackRow(
         dim -> 0.55f
         else -> 1f
     }
-    val bg by animateColorAsState(
-        if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0f),
-        label = "rowBg",
-    )
-    val titleColor by animateColorAsState(
-        if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface, label = "rowTitle",
-    )
-    val coverCorner by androidx.compose.animation.core.animateDpAsState(
-        if (current) 26.dp else 14.dp, spring(dampingRatio = 0.6f, stiffness = 300f), label = "rowCorner",
-    )
+    val bg = if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
+    val titleColor = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+    val coverCorner = if (current) 26.dp else 14.dp
     Row(
         // Концентрично миниатюре: 14 + 10 (отступ) = 24.
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp).appear(enter)
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp)
             .bounceClick(RoundedCornerShape(24.dp), onLongClick = onLongClick) { if (t.available) onClick() }
             .background(bg)
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -979,7 +970,7 @@ fun TrackRow(
         }
         Box(contentAlignment = Alignment.Center) {
             Art(app, t.thumb, Modifier.size(52.dp), corner = coverCorner)
-            androidx.compose.animation.AnimatedVisibility(current, enter = fadeIn() + scaleIn(initialScale = 0.6f), exit = fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.6f)) {
+            if (current) {
                 Box(contentAlignment = Alignment.Center) {
                     Box(Modifier.size(52.dp).clip(RoundedCornerShape(coverCorner)).background(Color.Black.copy(alpha = 0.45f)))
                     EqBars(playing, MaterialTheme.colorScheme.primary)

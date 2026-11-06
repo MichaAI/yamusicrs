@@ -422,6 +422,11 @@ pub struct ArtistBrief {
     /// «Знакомое вам»: треки исполнителя из коллекции и из волны (`familiar-you`).
     #[serde(skip)]
     pub familiar: Vec<Track>,
+    /// Из них — только то, что в коллекции, и только услышанное в волне.
+    #[serde(skip)]
+    pub collection: Vec<Track>,
+    #[serde(skip)]
+    pub wave: Vec<Track>,
     #[serde(skip)]
     pub concerts: Vec<Concert>,
 }

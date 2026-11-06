@@ -759,13 +759,18 @@ impl Client {
             ("waveTracksLimit", "100".to_string()),
             ("collectionTracksLimit", "100".into()),
         ];
-        let (brief, albums, familiar, concerts) = tokio::join!(
+        let (brief, albums, familiar, concerts, all) = tokio::join!(
             self.get::<ArtistBrief>(&bp, &[]),
             self.get::<ArtistAlbums>(&ap, &q),
             self.send::<Value>(self.req_as(reqwest::Method::GET, &fp, DESKTOP_CLIENT).query(&fq)),
             self.send::<Value>(self.req_as(reqwest::Method::GET, &cp, DESKTOP_CLIENT)),
+            self.artist_tracks(id),
         );
         let mut brief = brief?;
+        // В `brief-info` — лишь несколько популярных; полный список — постранично.
+        if !all.is_empty() {
+            brief.popular_tracks = all;
+        }
         match albums {
             Ok(a) => brief.discography = a.albums,
             Err(e) => tracing::warn!("дискография {id}: {e}"),
@@ -776,10 +781,15 @@ impl Client {
                 let mut seen = std::collections::HashSet::new();
                 for part in ["collection", "wave"] {
                     for t in v[part]["tracks"].as_array().into_iter().flatten() {
-                        if let Ok(t) = serde_json::from_value::<Track>(t.clone())
-                            && seen.insert(t.id.clone())
-                        {
-                            brief.familiar.push(t);
+                        if let Ok(t) = serde_json::from_value::<Track>(t.clone()) {
+                            if part == "collection" {
+                                brief.collection.push(t.clone());
+                            } else {
+                                brief.wave.push(t.clone());
+                            }
+                            if seen.insert(t.id.clone()) {
+                                brief.familiar.push(t);
+                            }
                         }
                     }
                 }
@@ -798,6 +808,34 @@ impl Client {
             Err(e) => tracing::warn!("концерты {id}: {e}"),
         }
         Ok(brief)
+    }
+
+    /// Все треки исполнителя по порядку выдачи (популярные первыми), до 500; ошибка — пусто.
+    async fn artist_tracks(&self, id: &str) -> Vec<Track> {
+        let mut out: Vec<Track> = Vec::new();
+        for page in 0..5 {
+            let q = [("page", page.to_string()), ("page-size", "100".into())];
+            let v: Value = match self.get(&format!("/artists/{id}/tracks"), &q).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("треки {id}: {e}");
+                    break;
+                }
+            };
+            let part: Vec<Track> = v["tracks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| serde_json::from_value(t.clone()).ok())
+                .collect();
+            let n = part.len();
+            out.extend(part);
+            let total = v["pager"]["total"].as_u64().unwrap_or(0) as usize;
+            if n == 0 || out.len() >= total {
+                break;
+            }
+        }
+        out
     }
 
     /// Лёгкая карточка исполнителя для экрана волны: фото и концерты, без дискографии.
