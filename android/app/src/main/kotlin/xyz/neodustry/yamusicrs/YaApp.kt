@@ -67,6 +67,15 @@ class YaApp : Application(), CoreListener {
         if (fresh.isNotEmpty()) core.requestArtistPhotos(fresh)
     }
 
+    /** id скачанных треков (без суффикса альбома). */
+    var downloaded by androidx.compose.runtime.mutableStateOf<Set<String>>(emptySet())
+
+    override fun onDownloaded(ids: List<String>) {
+        downloaded = ids.toHashSet()
+    }
+
+    fun isDownloaded(id: String) = id.substringBefore(':') in downloaded
+
     override fun onArtistPhoto(id: String, photo: String?) {
         if (photo != null) artistPhotos[id] = photo
     }

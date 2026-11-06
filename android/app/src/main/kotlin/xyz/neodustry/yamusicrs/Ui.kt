@@ -1004,6 +1004,10 @@ fun TrackRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
             )
         }
+        if (app.isDownloaded(t.id)) {
+            Icon(Ic.Download, "Скачан", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary.copy(alpha = alpha))
+            Spacer(Modifier.width(6.dp))
+        }
         Text(time(t.durationMs.toLong()), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

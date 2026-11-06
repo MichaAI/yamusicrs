@@ -88,6 +88,26 @@ fun rememberCoverTap(url: String?): Pair<Modifier, () -> Unit> {
     return mod to tap
 }
 
+/** «Скачано N из M» с полосой: сколько списка уже играет без сети. */
+@Composable
+private fun DownloadProgress(have: Int, total: Int) {
+    val f by animateFloatAsState(have.toFloat() / total, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "have")
+    Column(Modifier.fillMaxWidth(0.7f), horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Ic.Download, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (have == total) "Скачан целиком" else "Скачано $have из $total",
+                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
+            Box(Modifier.fillMaxWidth(f).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
+        }
+    }
+}
+
 /** Откуда летит обложка: рамка в окне, адрес картинки, скругление. */
 data class Tap(val from: androidx.compose.ui.geometry.Rect, val url: String, val corner: Dp)
 
@@ -152,10 +172,6 @@ class Nav(private val app: YaApp) {
     }
 
     fun playlist(p: PlaylistItem) = push(app.core.openPlaylist(p.uid, p.kind), p.title)
-
-    fun likes() = push(app.core.likesPage(), "Мне нравится")
-
-    fun downloaded() = push(app.core.downloaded(), "Скачанное")
 
     fun similar(t: TrackItem) = push(app.core.openSimilar(t.id, t.title), "Похожие")
 
@@ -468,6 +484,11 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
                     }
                 } else if (p.subtitle.isNotEmpty()) {
                     Text(p.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                }
+                val have = p.tracks.count { app.isDownloaded(it.id) }
+                if (have > 0) {
+                    Spacer(Modifier.height(14.dp))
+                    DownloadProgress(have, p.tracks.size)
                 }
                 Spacer(Modifier.height(16.dp))
                 Spacer(Modifier.height(12.dp))
@@ -794,7 +815,21 @@ fun PlaylistCard(app: YaApp, p: PlaylistItem, width: Dp?, onClick: () -> Unit) {
             overflow = TextOverflow.Ellipsis,
         )
         if (p.trackCount > 0u) {
-            Text(tracksWord(p.trackCount.toInt()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            val have = p.have?.toInt() ?: 0
+            if (have > 0) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Ic.Download, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(4.dp))
+                    Text("$have из ${p.trackCount}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                }
+                Spacer(Modifier.height(4.dp))
+                val f by animateFloatAsState(have.toFloat() / p.trackCount.toInt(), label = "have")
+                Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
+                    Box(Modifier.fillMaxWidth(f).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
+                }
+            } else {
+                Text(tracksWord(p.trackCount.toInt()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
         }
     }
 }
@@ -984,25 +1019,12 @@ fun ReleasesTab(app: YaApp, nav: Nav) {
 @Composable
 fun PlaylistsGrid(app: YaApp, nav: Nav) {
     val (own, personal) = app.playlists.collectAsStateWithLifecycle().value
-    val st by app.settings.collectAsStateWithLifecycle()
-    val likes by app.likes.collectAsStateWithLifecycle()
-    val shortcuts = st?.playlistShortcuts == true
-    if (own.isEmpty() && personal.isEmpty() && !shortcuts) {
+    if (own.isEmpty() && personal.isEmpty()) {
         Empty("Плейлисты, которые вы создадите или сохраните в Яндекс Музыке, появятся здесь")
         return
     }
     LazyVerticalGrid(GridCells.Adaptive(156.dp), Modifier.fillMaxSize(), contentPadding = gridPadding()) {
         fun full(block: @Composable () -> Unit) = item(span = { GridItemSpan(maxLineSpan) }) { block() }
-        if (shortcuts) {
-            full {
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ShortcutCard(Ic.Heart, "Мне нравится", tracksWord(likes.size), MaterialTheme.colorScheme.primaryContainer,
-                        MaterialTheme.colorScheme.onPrimaryContainer, Modifier.weight(1f).appear(0)) { nav.likes() }
-                    ShortcutCard(Ic.Download, "Скачанное", tracksWord(st?.libraryTracks?.toInt() ?: 0), MaterialTheme.colorScheme.tertiaryContainer,
-                        MaterialTheme.colorScheme.onTertiaryContainer, Modifier.weight(1f).appear(1)) { nav.downloaded() }
-                }
-            }
-        }
         if (own.isNotEmpty()) {
             full { Section("Мои плейлисты", 8.dp) }
             items(own, key = { "o" + it.uid + ":" + it.kind }) { pl -> PlaylistCard(app, pl, null) { nav.playlist(pl) } }
@@ -1011,19 +1033,6 @@ fun PlaylistsGrid(app: YaApp, nav: Nav) {
             full { Section("Настроили для вас", 8.dp) }
             items(personal, key = { "p" + it.uid + ":" + it.kind }) { pl -> PlaylistCard(app, pl, null) { nav.playlist(pl) } }
         }
-    }
-}
-
-/** Плитка-ярлык среди плейлистов: «Мне нравится», «Скачанное». */
-@Composable
-private fun ShortcutCard(icon: ImageVector, title: String, hint: String, bg: Color, fg: Color, modifier: Modifier, onClick: () -> Unit) {
-    Column(
-        modifier.bounceClick(RoundedCornerShape(26.dp), onClick = onClick).background(bg).padding(16.dp),
-    ) {
-        Icon(icon, null, tint = fg, modifier = Modifier.size(28.dp))
-        Spacer(Modifier.height(18.dp))
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = fg, maxLines = 1)
-        Text(hint, style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.75f), maxLines = 1)
     }
 }
 
@@ -1232,11 +1241,6 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
         Group(null, null) {
             Toggle("Полная дата выхода", "В шапке альбома — день, месяц и год, а не только год", s.fullReleaseDate) {
                 app.core.setFullReleaseDate(it)
-            }
-        }
-        Group(null, null) {
-            Toggle("Ярлыки в плейлистах", "«Мне нравится» и «Скачанное» — первыми плитками на вкладке «Плейлисты»", s.playlistShortcuts) {
-                app.core.setPlaylistShortcuts(it)
             }
         }
         Group(null, null) {

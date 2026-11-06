@@ -71,6 +71,8 @@ pub struct PlaylistItem {
     pub track_count: u32,
     pub cover: Option<String>,
     pub description: Option<String>,
+    /// Сколько треков плейлиста уже скачано (если состав известен).
+    pub have: Option<u32>,
 }
 
 impl From<&Playlist> for PlaylistItem {
@@ -83,6 +85,7 @@ impl From<&Playlist> for PlaylistItem {
             track_count: p.track_count.unwrap_or(p.tracks.len() as u32),
             cover: p.cover_uri().map(|u| api::cover_url(u, 400)),
             description: p.description.clone().filter(|d| !d.is_empty()),
+            have: None,
         }
     }
 }
@@ -155,8 +158,6 @@ pub enum Req {
     Chart,
     /// Всё скачанное, недавно игранное сверху (без сети тоже).
     Downloaded,
-    /// «Мне нравится» как страница.
-    Likes,
 }
 
 /// Сырой ответ сети; в `Page` превращается уже в потоке движка.
@@ -292,24 +293,6 @@ fn downloaded(e: &Engine) -> Loaded {
 
 /// Открыть страницу: ответ уйдёт в `tx` (офлайн плейлист — из снимка сразу).
 pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
-    if let Req::Likes = req {
-        let ts = match e.likes.ready() {
-            Some(l) => l.clone(),
-            None => e.snapshot.likes.clone(),
-        };
-        let _ = tx.send((
-            id,
-            Ok(Loaded::Tracks {
-                title: "Мне нравится".into(),
-                subtitle: tracks_word(ts.len()),
-                cover: None,
-                album: None,
-                tracks: if e.offline { e.offline_tracks(ts) } else { ts },
-                seed: None,
-            }),
-        ));
-        return;
-    }
     if let Req::Downloaded = req {
         let _ = tx.send((id, Ok(downloaded(e))));
         return;
@@ -345,7 +328,6 @@ pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
 async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
     match req {
         // Отдаётся из библиотеки в `open`, сюда не доходит.
-        Req::Likes => Err("Лайки читаются из памяти".into()),
         Req::Downloaded => Err("Скачанное читается без сети".into()),
         Req::Playlist { uid, kind } => {
             let full = c.playlist(&uid, &kind).await.map_err(err_str)?;
@@ -438,9 +420,18 @@ fn tracks_word(n: usize) -> String {
 
 /// Свои плейлисты (офлайн — из снимка) и «Настроили для вас».
 pub fn playlists(e: &Engine) -> (Vec<PlaylistItem>, Vec<PlaylistItem>) {
+    // Сколько треков плейлиста скачано — по составу из офлайн-снимка.
+    let item = |p: &Playlist| {
+        let mut it = PlaylistItem::from(p);
+        it.have = e
+            .snapshot
+            .tracks_of(p)
+            .map(|ts| ts.iter().filter(|t| e.library.contains(&t.id)).count() as u32);
+        it
+    };
     let own = match &e.playlists {
-        Loadable::Ready(v) => v.iter().map(PlaylistItem::from).collect(),
-        _ => e.snapshot.playlists.iter().map(PlaylistItem::from).collect(),
+        Loadable::Ready(v) => v.iter().map(item).collect(),
+        _ => e.snapshot.playlists.iter().map(item).collect(),
     };
     let personal = e.personal.iter().map(|p| PlaylistItem::from(&p.playlist)).collect();
     (own, personal)

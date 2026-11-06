@@ -196,8 +196,6 @@ pub struct SettingsData {
     pub offline_mode: bool,
     /// Полная дата выхода альбома в его шапке.
     pub full_release_date: bool,
-    /// «Мне нравится» и «Скачанное» первыми среди плейлистов.
-    pub playlist_shortcuts: bool,
     /// Умное скачивание треков для офлайн-волны.
     pub smart_download: bool,
     /// Его качество: `lossless`, `hq` или `nq`.
@@ -257,6 +255,8 @@ pub trait CoreListener: Send + Sync {
     fn on_artist(&self, card: ArtistCard);
     /// Фото исполнителя по запросу `request_artist_photos`; `None` — фото нет.
     fn on_artist_photo(&self, id: String, photo: Option<String>);
+    /// id всех скачанных треков — при каждом изменении библиотеки.
+    fn on_downloaded(&self, ids: Vec<String>);
 }
 
 enum Cmd {
@@ -296,7 +296,6 @@ enum Cmd {
     SmartWindow(u8, u8),
     SmartWifiOnly(bool),
     ArtistPhotos(Vec<String>),
-    PlaylistShortcuts(bool),
     /// Стереть скачанное; `true` — только подобранное для офлайн-волны.
     ClearDownloads(bool),
     Ynison(bool),
@@ -469,11 +468,6 @@ impl Core {
         self.open(Req::Chart)
     }
 
-    /// «Мне нравится» страницей (для ярлыка среди плейлистов).
-    pub fn likes_page(&self) -> u64 {
-        self.open(Req::Likes)
-    }
-
     /// Скачанное (работает и без сети).
     pub fn downloaded(&self) -> u64 {
         self.open(Req::Downloaded)
@@ -571,10 +565,6 @@ impl Core {
     /// Доспросить фото исполнителей (ответы придут в `on_artist_photo`).
     pub fn request_artist_photos(&self, ids: Vec<String>) {
         self.send(Cmd::ArtistPhotos(ids));
-    }
-
-    pub fn set_playlist_shortcuts(&self, on: bool) {
-        self.send(Cmd::PlaylistShortcuts(on));
     }
 
     /// Стереть скачанное: всё или только подобранное для офлайн-волны.
@@ -977,10 +967,6 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             e.cfg.full_release_date = on;
             e.cfg.save(&e.paths);
         }
-        Cmd::PlaylistShortcuts(on) => {
-            e.cfg.playlist_shortcuts = on;
-            e.cfg.save(&e.paths);
-        }
         Cmd::ClearDownloads(only_smart) => {
             e.library.clear(only_smart);
         }
@@ -1039,7 +1025,8 @@ struct Publisher {
     likes_dirty: bool,
     likes_sent: bool,
     queue_mark: Option<(u64, usize)>,
-    playlists_mark: Option<(usize, u64, usize)>,
+    playlists_mark: Option<(usize, u64, usize, usize)>,
+    downloaded_mark: Option<usize>,
     settings: Option<SettingsData>,
 }
 
@@ -1077,7 +1064,13 @@ impl Publisher {
             pls.len(),
             pls.iter().map(|p| p.revision as u64 + p.track_count.unwrap_or(0) as u64).sum(),
             e.personal.len(),
+            e.library.stats().0,
         );
+        let dl = e.library.stats().0;
+        if self.downloaded_mark != Some(dl) {
+            self.downloaded_mark = Some(dl);
+            l.on_downloaded(e.library.ids());
+        }
         if self.playlists_mark != Some(mark) {
             self.playlists_mark = Some(mark);
             let (own, personal) = pages::playlists(e);
@@ -1094,7 +1087,6 @@ impl Publisher {
             ynison: e.cfg.ynison,
             offline_mode: e.cfg.offline_mode,
             full_release_date: e.cfg.full_release_date,
-            playlist_shortcuts: e.cfg.playlist_shortcuts,
             smart_download: e.cfg.smart_download,
             smart_quality: quality_str(e.cfg.smart_quality).into(),
             smart_limit_gb: e.cfg.smart_limit_gb as f32,
