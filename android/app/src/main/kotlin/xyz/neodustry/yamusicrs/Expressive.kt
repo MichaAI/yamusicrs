@@ -486,14 +486,14 @@ fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain:
         photo -> modifier.clip(RoundedCornerShape(22.dp))
         else -> modifier
     }
-    // Из кеша — сразу; пришла из сети — проявляется и чуть «оседает».
-    val fade = remember(url) { Animatable(if (app.cached(url) != null) 1f else 0f) }
-    LaunchedEffect(img) { if (img != null && fade.value < 1f) fade.animateTo(1f, tween(320)) }
+    // Из кеша — сразу и без слоя; пришла из сети — проявляется и чуть «оседает».
+    val fade = remember(url) { if (app.cached(url) != null) null else Animatable(0f) }
+    if (fade != null) LaunchedEffect(img) { if (img != null) fade.animateTo(1f, tween(320)) }
     Box(box) {
         img?.let {
             Image(
                 it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().graphicsLayer {
+                modifier = if (fade == null) Modifier.fillMaxSize() else Modifier.fillMaxSize().graphicsLayer {
                     val f = fade.value
                     alpha = f
                     scaleX = 1.08f - 0.08f * f; scaleY = scaleX

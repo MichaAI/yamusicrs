@@ -82,9 +82,13 @@ data class Route(val id: ULong, val title: String)
 @Composable
 fun rememberCoverTap(url: String?): Pair<Modifier, () -> Unit> {
     val nav = LocalNav.current
-    val box = remember { arrayOfNulls<androidx.compose.ui.geometry.Rect>(1) }
-    val mod = Modifier.onGloballyPositioned { box[0] = it.boundsInRoot() }
-    val tap = { box[0]?.let { r -> if (url != null) nav.tapped = Tap(r, url, 20.dp) }; Unit }
+    // Рамку считаем только по нажатию: при прокрутке колбэк лишь запоминает координаты.
+    val box = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
+    val mod = Modifier.onGloballyPositioned { box[0] = it }
+    val tap = {
+        box[0]?.takeIf { it.isAttached }?.let { c -> if (url != null) nav.tapped = Tap(c.boundsInRoot(), url, 20.dp) }
+        Unit
+    }
     return mod to tap
 }
 
@@ -803,21 +807,7 @@ fun PlaylistCard(app: YaApp, p: PlaylistItem, width: Dp?, onClick: () -> Unit) {
             overflow = TextOverflow.Ellipsis,
         )
         if (p.trackCount > 0u) {
-            val have = p.have?.toInt() ?: 0
-            if (have > 0) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Ic.Download, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(4.dp))
-                    Text("$have из ${p.trackCount}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                }
-                Spacer(Modifier.height(4.dp))
-                val f by animateFloatAsState(have.toFloat() / p.trackCount.toInt(), label = "have")
-                Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
-                    Box(Modifier.fillMaxWidth(f).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
-                }
-            } else {
-                Text(tracksWord(p.trackCount.toInt()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-            }
+            Text(tracksWord(p.trackCount.toInt()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
         }
     }
 }

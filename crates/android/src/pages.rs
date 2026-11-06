@@ -71,8 +71,6 @@ pub struct PlaylistItem {
     pub track_count: u32,
     pub cover: Option<String>,
     pub description: Option<String>,
-    /// Сколько треков плейлиста уже скачано (если состав известен).
-    pub have: Option<u32>,
 }
 
 impl From<&Playlist> for PlaylistItem {
@@ -85,7 +83,6 @@ impl From<&Playlist> for PlaylistItem {
             track_count: p.track_count.unwrap_or(p.tracks.len() as u32),
             cover: p.cover_uri().map(|u| api::cover_url(u, 400)),
             description: p.description.clone().filter(|d| !d.is_empty()),
-            have: None,
         }
     }
 }
@@ -429,18 +426,9 @@ fn tracks_word(n: usize) -> String {
 
 /// Свои плейлисты (офлайн — из снимка) и «Настроили для вас».
 pub fn playlists(e: &Engine) -> (Vec<PlaylistItem>, Vec<PlaylistItem>) {
-    // Сколько треков плейлиста скачано — по составу из офлайн-снимка.
-    let item = |p: &Playlist| {
-        let mut it = PlaylistItem::from(p);
-        it.have = e
-            .snapshot
-            .tracks_of(p)
-            .map(|ts| ts.iter().filter(|t| e.library.contains(&t.id)).count() as u32);
-        it
-    };
     let own = match &e.playlists {
-        Loadable::Ready(v) => v.iter().map(item).collect(),
-        _ => e.snapshot.playlists.iter().map(item).collect(),
+        Loadable::Ready(v) => v.iter().map(PlaylistItem::from).collect(),
+        _ => e.snapshot.playlists.iter().map(PlaylistItem::from).collect(),
     };
     let personal = e.personal.iter().map(|p| PlaylistItem::from(&p.playlist)).collect();
     (own, personal)

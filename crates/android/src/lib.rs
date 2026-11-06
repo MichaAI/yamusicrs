@@ -1025,7 +1025,7 @@ struct Publisher {
     likes_dirty: bool,
     likes_sent: bool,
     queue_mark: Option<(u64, usize)>,
-    playlists_mark: Option<(usize, u64, usize, usize)>,
+    playlists_mark: Option<(usize, u64, usize)>,
     downloaded_mark: Option<usize>,
     settings: Option<SettingsData>,
 }
@@ -1064,7 +1064,6 @@ impl Publisher {
             pls.len(),
             pls.iter().map(|p| p.revision as u64 + p.track_count.unwrap_or(0) as u64).sum(),
             e.personal.len(),
-            e.library.stats().0,
         );
         let dl = e.library.stats().0;
         if self.downloaded_mark != Some(dl) {
