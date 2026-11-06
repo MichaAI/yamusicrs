@@ -2171,8 +2171,12 @@ fn draw_aura(
         (true, _) => 512,
         _ => 256,
     };
-    let ph = ((pw as f32 * rect.height as f32 * ctx.cell_aspect / rect.width.max(1) as f32).round() as u32)
-        .clamp(16, if band.is_some() { 1280 } else { 512 });
+    // Высота — из пропорций области. Если она упёрлась в предел, ужимаем и ширину:
+    // иначе кадр получит другие пропорции, чем область, и растянется.
+    let cap = if band.is_some() { 1280.0 } else { 512.0 };
+    let raw_h = pw as f32 * rect.height as f32 * ctx.cell_aspect / rect.width.max(1) as f32;
+    let k = (cap / raw_h).min(1.0);
+    let (pw, ph) = (((pw as f32 * k).round() as u32).max(16), ((raw_h * k).round() as u32).clamp(16, cap as u32));
     let params = crate::render::Blob {
         colors,
         phase: app.wave_phase,
