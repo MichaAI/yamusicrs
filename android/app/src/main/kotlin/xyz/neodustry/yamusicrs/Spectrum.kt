@@ -50,8 +50,8 @@ fun SpectrumBackdrop(colors: List<Color>, playing: Boolean, modifier: Modifier =
                     target[i] = if (raw.size >= BARS * 2) maxOf(raw[i * 2], raw[i * 2 + 1]).pow(1.3f) else 0f
                 }
                 // Сглаживание по соседям, затем плавный подъём и более медленный спад по времени кадра.
-                val up = min(dt * 14f, 1f)
-                val down = min(dt * 4f, 1f)
+                val up = min(dt * 32f, 1f)
+                val down = min(dt * 9f, 1f)
                 for (i in 0 until BARS) {
                     val t = 0.25f * target[maxOf(i - 1, 0)] + 0.5f * target[i] + 0.25f * target[min(i + 1, BARS - 1)]
                     levels[i] += (t - levels[i]) * (if (t > levels[i]) up else down)

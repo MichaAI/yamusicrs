@@ -2235,7 +2235,7 @@ fn spectrum_levels(app: &mut App, ctx: &Ctx) -> [f32; crate::render::BARS] {
         0.25 * target[i.saturating_sub(1)] + 0.5 * target[i] + 0.25 * target[(i + 1).min(N - 1)]
     });
     // Вверх — мягко, вниз — ещё медленнее; шаг по реальному времени кадра.
-    let (up, down) = ((ctx.dt * 14.0).min(1.0), (ctx.dt * 4.0).min(1.0));
+    let (up, down) = ((ctx.dt * 32.0).min(1.0), (ctx.dt * 9.0).min(1.0));
     let mut out = [0.0; N];
     for (i, lv) in app.spec.iter_mut().enumerate() {
         *lv += (blurred[i] - *lv) * if blurred[i] > *lv { up } else { down };
@@ -2328,16 +2328,6 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let [cover_zone, info, ctrl] =
         Layout::vertical([Constraint::Min(8), Constraint::Length(6), Constraint::Length(4)]).areas(left);
 
-    // Спектр зажат между обложкой и текстом: под него отдаём нижнюю часть зоны обложки.
-    let spectrum = app.engine.cfg.visualizer == "spectrum";
-    let (cover_zone, band) = if spectrum {
-        let bh = (cover_zone.height / 5).clamp(3, 8).min(cover_zone.height.saturating_sub(8));
-        let z = Rect { height: cover_zone.height - bh, ..cover_zone };
-        let band = Rect { x: cover_zone.x + 2, y: z.bottom(), width: cover_zone.width.saturating_sub(4), height: bh };
-        (z, (bh >= 2).then_some(band))
-    } else {
-        (cover_zone, None)
-    };
     // Обложка ~70% зоны, ореол-блоб в 1.6 раза больше и под ней.
     let max_h = (cover_zone.height as f32 * 0.72) as u16;
     let max_w = (cover_zone.width as f32 * 0.72) as u16;
@@ -2367,6 +2357,13 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         .cover_uri()
         .filter(|k| app.images.contains(k))
         .map(|_| crate::ui::kitty::fit_square(cover, ctx.cell_aspect));
+    // Спектр — в зазоре между обложкой и подписью; обложка остаётся на своём месте.
+    let band = (app.engine.cfg.visualizer == "spectrum")
+        .then(|| {
+            let (top, bottom) = (cover.bottom(), info.y);
+            (bottom >= top + 2).then(|| Rect { x: cover_zone.x + 2, y: top, width: cover_zone.width.saturating_sub(4), height: bottom - top })
+        })
+        .flatten();
     // Со спектром картинка тянется до низа полосы, чтобы столбики рисовал тот же шейдер под текстом.
     let glow = match band {
         Some(b) => {
