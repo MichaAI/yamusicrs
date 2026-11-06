@@ -13,6 +13,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -51,6 +52,7 @@ import androidx.compose.ui.draw.shadow
 import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.composed
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -318,15 +320,11 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
     var last by remember(route.id) { mutableStateOf<Page?>(null) }
     val fresh = pages[route.id]
     if (fresh != null && fresh !== last) last = fresh
-    when (val p = fresh ?: last) {
+    val shown = fresh ?: last
+    androidx.compose.animation.Crossfade(shown, animationSpec = tween(280), label = "pageLoad") { p ->
+    when (p) {
         null -> {
-            val tap = nav.fly?.takeIf { it.routeId == route.id }?.tap
-            if (tap != null) {
-                PendingHero(app, nav, route, tap)
-            } else Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                TopBar(route.title, nav)
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator(Modifier.size(72.dp)) }
-            }
+            PendingHero(app, nav, route, nav.fly?.takeIf { it.routeId == route.id }?.tap)
         }
         is Page.Failed -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
             TopBar(route.title, nav)
@@ -345,6 +343,30 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
             SearchResults(app, nav, p, src)
         }
     }
+    }
+}
+
+/** Мягко пульсирующая заготовка на месте ещё не пришедшего содержимого. */
+fun Modifier.skeleton(corner: Dp = 12.dp): Modifier = composed {
+    val a by androidx.compose.animation.core.rememberInfiniteTransition(label = "skeleton").animateFloat(
+        0.45f, 1f,
+        androidx.compose.animation.core.infiniteRepeatable(tween(900), androidx.compose.animation.core.RepeatMode.Reverse),
+        label = "skeletonAlpha",
+    )
+    val color = MaterialTheme.colorScheme.surfaceContainerHighest
+    drawBehind { drawRoundRect(color, cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner.toPx()), alpha = a) }
+}
+
+@Composable
+private fun SkeletonRow(i: Int) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Box(Modifier.size(52.dp).skeleton(12.dp))
+        Spacer(Modifier.width(14.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.fillMaxWidth(if (i % 3 == 0) 0.6f else if (i % 3 == 1) 0.45f else 0.72f).height(14.dp).skeleton(7.dp))
+            Box(Modifier.fillMaxWidth(if (i % 2 == 0) 0.32f else 0.4f).height(11.dp).skeleton(6.dp))
+        }
+    }
 }
 
 /**
@@ -352,12 +374,12 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
  * так что она летит сразу, а не после ответа сети.
  */
 @Composable
-private fun PendingHero(app: YaApp, nav: Nav, route: Route, tap: Tap) {
+private fun PendingHero(app: YaApp, nav: Nav, route: Route, tap: Tap?) {
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             Spacer(Modifier.height(64.dp))
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Art(
+                if (tap == null) Box(Modifier.size(232.dp).skeleton(36.dp)) else Art(
                     app, tap.url,
                     Modifier.size(232.dp)
                         .onGloballyPositioned { c ->
@@ -379,8 +401,11 @@ private fun PendingHero(app: YaApp, nav: Nav, route: Route, tap: Tap) {
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(32.dp))
-                LoadingIndicator(Modifier.size(48.dp))
+                Spacer(Modifier.height(24.dp))
+            }
+            // Список ещё грузится: на месте строк — заготовки, которые потом перетекут в треки.
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                repeat(7) { i -> SkeletonRow(i) }
             }
         }
         ShapeIconButton(
@@ -1176,6 +1201,26 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                 { app.core.setCrossfade(CROSSFADES[it]) },
                 Modifier.fillMaxWidth(),
             )
+        }
+        Group("Эквалайзер", null) {
+            Toggle("Включить", "Выключен — звук идёт без обработки (bit-perfect)", s.eqEnabled) { app.core.setEqEnabled(it) }
+            androidx.compose.animation.AnimatedVisibility(s.eqEnabled) {
+                Column {
+                    Spacer(Modifier.height(12.dp))
+                    Segments(EQ_BANDS.map { "$it" }, EQ_BANDS.indexOf(s.eqGains.size).coerceAtLeast(0), {
+                        app.core.setEqBands(EQ_BANDS[it].toUInt())
+                    }, Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    EqBands(app.core, s.eqGains, s.eqEnabled)
+                    Spacer(Modifier.height(4.dp))
+                    EqReset(app.core, s.eqGains)
+                }
+            }
+        }
+        Group("Фон плеера", "Блоб — мягкие пятна цвета обложки, Спектр — столбики по звучанию") {
+            Segments(listOf("Блоб", "Спектр"), if (s.visualizer == "spectrum") 1 else 0, {
+                app.core.setVisualizer(if (it == 1) "spectrum" else "blob")
+            }, Modifier.fillMaxWidth())
         }
         Group(null, null) {
             Toggle("Выравнивание громкости", "Выключено — звук bit-perfect, как в исходнике", s.normalize) { app.core.setNormalize(it) }

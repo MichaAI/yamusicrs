@@ -6,6 +6,7 @@
 //! сбивают таймер.
 
 mod decoder;
+pub mod dsp;
 #[cfg(feature = "pipewire")]
 pub mod pipewire;
 mod resample;
@@ -69,6 +70,10 @@ pub struct Shared {
     /// Когда PipeWire последний раз звал `process` (мс от `epoch`) — для сторожа.
     last_process: AtomicU64,
     epoch: std::time::Instant,
+    eq: Mutex<dsp::EqParams>,
+    eq_version: AtomicU32,
+    spectrum: dsp::Spectrum,
+    spectrum_on: AtomicBool,
 }
 
 impl Shared {
@@ -86,12 +91,23 @@ impl Shared {
         self.paused.load(Ordering::Relaxed)
     }
 
+    pub fn set_spectrum(&self, on: bool) {
+        self.spectrum_on.store(on, Ordering::Relaxed);
+    }
+
+    /// Уровни спектра 0..1 (см. [`dsp::SPECTRUM_BANDS`]); пусто, пока расчёт выключен.
+    pub fn spectrum(&self) -> Vec<f32> {
+        self.spectrum.read()
+    }
+
     /// Читатель кольца для потока вывода с `channels` каналами.
-    pub fn filler(self: &Arc<Self>, channels: u16) -> Filler {
+    pub fn filler(self: &Arc<Self>, rate: u32, channels: u16) -> Filler {
         Filler {
             last_vol: self.volume(),
             shared: self.clone(),
             channels: channels.max(1) as usize,
+            eq: dsp::Equalizer::new(rate, channels as usize),
+            analyzer: dsp::Analyzer::new(rate, channels as usize),
         }
     }
 
@@ -130,6 +146,8 @@ pub struct Filler {
     shared: Arc<Shared>,
     channels: usize,
     last_vol: f32,
+    eq: dsp::Equalizer,
+    analyzer: dsp::Analyzer,
 }
 
 impl Filler {
@@ -154,6 +172,16 @@ impl Filler {
         }
         out[take..].fill(0.0);
         shared.played.fetch_add(take as u64, Ordering::AcqRel);
+
+        drop(cons);
+        let ver = shared.eq_version.load(Ordering::Relaxed);
+        if ver != self.eq.version() {
+            let p = shared.eq.lock().clone();
+            self.eq.configure(&p, ver);
+        }
+        self.eq.process(&mut out[..take]);
+        self.analyzer.enabled = shared.spectrum_on.load(Ordering::Relaxed);
+        self.analyzer.push(&out[..take], &shared.spectrum);
 
         if from != 1.0 || to != 1.0 {
             let frames = (take / self.channels).max(1);
@@ -255,6 +283,10 @@ impl Player {
             cons: Mutex::new(cons),
             last_process: AtomicU64::new(0),
             epoch: std::time::Instant::now(),
+            eq: Mutex::new(dsp::EqParams::default()),
+            eq_version: AtomicU32::new(0),
+            spectrum: dsp::Spectrum::default(),
+            spectrum_on: AtomicBool::new(false),
         });
         let out = output(shared.clone())?;
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -364,6 +396,22 @@ impl Player {
     pub fn reconnect_output(&self) {
         self.shared.mark_process();
         self.out.reconnect();
+    }
+
+    /// Новые настройки эквалайзера; действуют со следующего блока вывода.
+    pub fn set_eq(&self, p: dsp::EqParams) {
+        *self.shared.eq.lock() = p;
+        self.shared.eq_version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Включает/выключает расчёт спектра (выключенный не тратит CPU).
+    pub fn set_spectrum(&self, on: bool) {
+        self.shared.spectrum_on.store(on, Ordering::Relaxed);
+    }
+
+    /// Общее состояние: через него интерфейс читает спектр без обращения к движку.
+    pub fn shared(&self) -> Arc<Shared> {
+        self.shared.clone()
     }
 
     pub fn set_volume(&self, v: f32) {

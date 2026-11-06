@@ -48,7 +48,7 @@ impl AAudioOut {
     fn open(&self, inner: &mut Inner, f: Format) {
         inner.stream = None;
         let channels = f.channels.max(1) as usize;
-        let mut filler = self.shared.filler(f.channels);
+        let mut filler = self.shared.filler(f.rate, f.channels);
         let me = self.me.clone();
         let built = AudioStreamBuilder::new().map(|b| {
             b.direction(AudioDirection::Output)

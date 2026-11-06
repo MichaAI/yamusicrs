@@ -230,6 +230,10 @@ fun Modifier.blobHole(holes: BlobHoles?, corner: androidx.compose.ui.unit.Dp, op
  */
 @Composable
 fun Blob(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier, zoom: Float = 1.25f, holes: BlobHoles? = null) {
+    if (Viz.spectrum) {
+        SpectrumBackdrop(colors, playing, modifier)
+        return
+    }
     val c = colors.take(4).map { animateColorAsState(it, tween(900), label = "blob").value }
     var phase by remember { mutableFloatStateOf(0f) }
     var speed by remember { mutableFloatStateOf(0.3f) }

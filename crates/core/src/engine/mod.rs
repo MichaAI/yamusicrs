@@ -367,6 +367,7 @@ impl Engine {
         });
         let player = Player::with_output(atx, volume, output)?;
         player.set_crossfade(state.crossfade.unwrap_or(cfg.crossfade_secs));
+        player.set_eq(eq_params(&cfg));
         let library = Library::open(cfg.library_dir.clone(), paths.index_file.clone(), cfg.library_max_gb);
         let mut e = Self {
             tx,
@@ -1283,6 +1284,12 @@ impl Engine {
         let cur = self.crossfade();
         let next = CROSSFADE_STEPS.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(0.0);
         self.set_crossfade(next);
+    }
+
+    /// Применяет и сохраняет настройки эквалайзера из конфига.
+    pub fn apply_eq(&mut self) {
+        self.player.set_eq(eq_params(&self.cfg));
+        self.cfg.save(&self.paths);
     }
 
     pub fn set_crossfade(&mut self, next: f32) {
@@ -2514,4 +2521,13 @@ enum VerifyError {
     Invalid(String),
     /// Сеть, таймаут, 5xx — токен ни при чём, стоит повторить.
     Transient(String),
+}
+
+fn eq_params(cfg: &Config) -> crate::audio::dsp::EqParams {
+    let n = cfg.eq_gains.len().clamp(3, 31);
+    crate::audio::dsp::EqParams {
+        enabled: cfg.eq_enabled,
+        freqs: crate::audio::dsp::eq_freqs(n),
+        gains: cfg.eq_gains.iter().take(n).map(|g| g.clamp(-12.0, 12.0)).collect(),
+    }
 }

@@ -157,7 +157,7 @@ fn make_stream(core: &pw::core::CoreRc, shared: &Arc<Shared>, f: Format) -> Resu
     let stream = pw::stream::StreamRc::new(core.clone(), "yamusicrs", props)?;
 
     let state = ProcessState {
-        filler: shared.filler(f.channels),
+        filler: shared.filler(f.rate, f.channels),
         channels: f.channels.max(1) as usize,
     };
     let listener = stream

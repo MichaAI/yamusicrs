@@ -58,6 +58,11 @@ pub struct Config {
     pub smart_to_hour: u8,
     /// Докачивать только не по мобильной сети (как официальный клиент).
     pub smart_wifi_only: bool,
+    /// Эквалайзер: включён ли, сколько полос и усиления полос в дБ.
+    pub eq_enabled: bool,
+    pub eq_gains: Vec<f32>,
+    /// Что рисовать на фоне: `blob` или `spectrum`.
+    pub visualizer: String,
 }
 
 impl Default for Config {
@@ -90,6 +95,9 @@ impl Default for Config {
             smart_from_hour: 0,
             smart_to_hour: 0,
             smart_wifi_only: true,
+            eq_enabled: false,
+            eq_gains: vec![0.0; 10],
+            visualizer: "blob".into(),
         }
     }
 }

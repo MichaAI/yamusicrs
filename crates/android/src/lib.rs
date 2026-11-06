@@ -209,6 +209,11 @@ pub struct SettingsData {
     pub smart_to_hour: u8,
     /// Докачивать только не по мобильной сети.
     pub smart_wifi_only: bool,
+    /// Эквалайзер: включён ли, усиления полос в дБ (число полос = длина списка).
+    pub eq_enabled: bool,
+    pub eq_gains: Vec<f32>,
+    /// `blob` или `spectrum`.
+    pub visualizer: String,
     /// Вся библиотека: треков и ГиБ (с точностью 0,1).
     pub library_tracks: u32,
     pub library_gb: f32,
@@ -285,6 +290,11 @@ enum Cmd {
     Normalize(bool),
     TargetLufs(f32),
     Crossfade(f32),
+    EqEnabled(bool),
+    EqBands(u32),
+    EqGain(u32, f32),
+    EqReset,
+    Visualizer(String),
     ReportPlays(bool),
     FastStart(bool),
     WaveAfterList(bool),
@@ -510,6 +520,36 @@ impl Core {
         self.send(Cmd::Crossfade(secs));
     }
 
+    pub fn set_eq_enabled(&self, on: bool) {
+        self.send(Cmd::EqEnabled(on));
+    }
+
+    /// Число полос эквалайзера (3..=31); усиления пересчитываются по кривой.
+    pub fn set_eq_bands(&self, n: u32) {
+        self.send(Cmd::EqBands(n));
+    }
+
+    pub fn set_eq_gain(&self, band: u32, db: f32) {
+        self.send(Cmd::EqGain(band, db));
+    }
+
+    pub fn reset_eq(&self) {
+        self.send(Cmd::EqReset);
+    }
+
+    /// `blob` или `spectrum`: спектр считается, только пока выбран он.
+    pub fn set_visualizer(&self, kind: String) {
+        if let Some(sh) = SHARED.get() {
+            sh.set_spectrum(kind == "spectrum");
+        }
+        self.send(Cmd::Visualizer(kind));
+    }
+
+    /// Уровни спектра 0..1 (64 полосы), читаются прямо из потока вывода.
+    pub fn spectrum(&self) -> Vec<f32> {
+        SHARED.get().map(|s| s.spectrum()).unwrap_or_default()
+    }
+
     pub fn set_report_plays(&self, on: bool) {
         self.send(Cmd::ReportPlays(on));
     }
@@ -657,6 +697,8 @@ fn output() -> yamusic_core::audio::OutputFactory {
     Box::new(|_| Err(color_eyre::eyre::eyre!("yamusic-android работает только на Android")))
 }
 
+static SHARED: std::sync::OnceLock<Arc<yamusic_core::audio::Shared>> = std::sync::OnceLock::new();
+
 async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: UnboundedReceiver<Cmd>, listener: Arc<dyn CoreListener>) {
     let mut cfg = Config::load(&paths);
     cfg.library_dir = music;
@@ -672,6 +714,9 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
             return;
         }
     };
+    let shared = engine.player.shared();
+    shared.set_spectrum(engine.cfg.visualizer == "spectrum");
+    let _ = SHARED.set(shared);
     engine.yn_kind = "ANDROID";
     engine.yn_title = Some(format!("yamusicrs · {device_name}"));
     let mut publisher = Publisher::default();
@@ -946,6 +991,40 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
                 e.set_crossfade(v);
             }
         }
+        Cmd::EqEnabled(on) => {
+            e.cfg.eq_enabled = on;
+            e.apply_eq();
+        }
+        Cmd::EqBands(n) => {
+            let n = (n as usize).clamp(3, 31);
+            let old = e.cfg.eq_gains.clone();
+            e.cfg.eq_gains = (0..n)
+                .map(|i| {
+                    if old.is_empty() {
+                        return 0.0;
+                    }
+                    let t = if n == 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
+                    let x = t * (old.len() - 1) as f32;
+                    let (a, b) = (x.floor() as usize, (x.ceil() as usize).min(old.len() - 1));
+                    old[a] + (old[b] - old[a]) * (x - a as f32)
+                })
+                .collect();
+            e.apply_eq();
+        }
+        Cmd::EqGain(i, db) => {
+            if let Some(g) = e.cfg.eq_gains.get_mut(i as usize) {
+                *g = db.clamp(-12.0, 12.0);
+                e.apply_eq();
+            }
+        }
+        Cmd::EqReset => {
+            e.cfg.eq_gains.iter_mut().for_each(|g| *g = 0.0);
+            e.apply_eq();
+        }
+        Cmd::Visualizer(k) => {
+            e.cfg.visualizer = k;
+            e.cfg.save(&e.paths);
+        }
         Cmd::ReportPlays(on) => {
             if on != e.cfg.report_plays {
                 e.toggle_report_plays();
@@ -1094,6 +1173,9 @@ impl Publisher {
             smart_from_hour: e.cfg.smart_from_hour,
             smart_to_hour: e.cfg.smart_to_hour,
             smart_wifi_only: e.cfg.smart_wifi_only,
+            eq_enabled: e.cfg.eq_enabled,
+            eq_gains: e.cfg.eq_gains.clone(),
+            visualizer: e.cfg.visualizer.clone(),
             library_tracks: e.library.stats().0 as u32,
             library_gb: gib(e.library.stats().1),
             ynison_status: e.ynison_label(),
