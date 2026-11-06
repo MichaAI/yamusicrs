@@ -73,6 +73,18 @@ fun SpectrumBackdrop(colors: List<Color>, playing: Boolean, modifier: Modifier =
         for (i in 0 until BARS) {
             val h = (levels[i] * maxH).coerceAtLeast(w)
             val x = gap + i * (w + gap)
+            if (!backdrop) {
+                // Мягкая тень поверх блоба: три слоя, шире и прозрачнее к краю.
+                for ((grow, a) in listOf(3.dp.toPx() to 0.06f, 2.dp.toPx() to 0.08f, 1.dp.toPx() to 0.1f)) {
+                    drawRoundRect(
+                        Color.Black,
+                        topLeft = Offset(x - grow, size.height - h - grow + 2.dp.toPx()),
+                        size = Size(w + grow * 2, h + grow * 2),
+                        cornerRadius = CornerRadius(w / 2 + grow, w / 2 + grow),
+                        alpha = a,
+                    )
+                }
+            }
             drawRoundRect(
                 Brush.verticalGradient(listOf(top, bottom), startY = size.height - h, endY = size.height),
                 topLeft = Offset(x, size.height - h),

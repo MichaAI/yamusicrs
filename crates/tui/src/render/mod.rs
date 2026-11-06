@@ -88,7 +88,7 @@ fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
             let v = (y as f32 + 0.5) / h as f32;
             let mut p = if b.bars_only { [0.0; 4] } else { blob_px(u, v, aspect, b, &bs) };
             if let Some(bars) = &b.bars {
-                p = with_bars(p, u, v, aspect, h as f32, bars, &b.pastel());
+                p = with_bars(p, u, v, aspect, h as f32, bars, &b.pastel(), !b.bars_only);
             }
             let p = dither(p, x, y, b.dither);
             out.extend(p.map(|c| c as u8));
@@ -97,28 +97,44 @@ fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
     out
 }
 
-/// Накладывает столбик спектра на пиксель блоба (та же формула, что в blob.wgsl).
-fn with_bars(px: [f32; 4], u: f32, v: f32, aspect: f32, h: f32, b: &Bars, c: &[[f32; 3]; 4]) -> [f32; 4] {
+/// Расстояние до столбика `i` (скруглённая капсула), `dy` сдвигает его вниз — для тени.
+fn bar_sd(u: f32, v: f32, aspect: f32, b: &Bars, i: usize, dy: f32) -> f32 {
     let [x0, y0, x1, y1] = b.rect;
-    let n = BARS as f32;
-    let slot = (x1 - x0) / n;
+    let slot = (x1 - x0) / BARS as f32;
+    let bw = slot * aspect * 0.62;
+    let cx = x0 + (i as f32 + 0.5) * slot;
+    let hgt = (b.levels[i] * (y1 - y0)).max(bw);
+    let (dx, dy) = ((u - cx) * aspect, v - dy - (y1 - hgt * 0.5));
+    let q = (dx.abs() - bw * 0.5 + bw * 0.5, dy.abs() - hgt * 0.5 + bw * 0.5);
+    (q.0.max(0.0).powi(2) + q.1.max(0.0).powi(2)).sqrt() + q.0.max(q.1).min(0.0) - bw * 0.5
+}
+
+/// Накладывает столбик спектра (и тень под ним, если `shadow`) на пиксель блоба — как в blob.wgsl.
+#[allow(clippy::too_many_arguments)]
+fn with_bars(mut px: [f32; 4], u: f32, v: f32, aspect: f32, h: f32, b: &Bars, c: &[[f32; 3]; 4], shadow: bool) -> [f32; 4] {
+    let [x0, y0, x1, y1] = b.rect;
+    let slot = (x1 - x0) / BARS as f32;
+    let bw = slot * aspect * 0.62;
     let xu = (u - x0) / slot;
-    if !(0.0..n).contains(&xu) || v < y0 || v > y1 {
+    if !(0.0..BARS as f32).contains(&xu) || v < y0 || v > y1 + bw * 0.5 {
         return px;
     }
     let i = xu.floor() as usize;
-    let bw = slot * aspect * 0.62;
-    let cx = x0 + (i as f32 + 0.5) * slot;
-    let total = y1 - y0;
-    let hgt = (b.levels[i] * total).max(bw);
-    let (dx, dy) = ((u - cx) * aspect, v - (y1 - hgt * 0.5));
-    let q = (dx.abs() - bw * 0.5 + bw * 0.5, dy.abs() - hgt * 0.5 + bw * 0.5);
-    let d = (q.0.max(0.0).powi(2) + q.1.max(0.0).powi(2)).sqrt() + q.0.max(q.1).min(0.0) - bw * 0.5;
-    let cov = (0.5 - d * h).clamp(0.0, 1.0) * 0.9;
+    if shadow {
+        let ds = bar_sd(u, v, aspect, b, i, bw * 0.18);
+        let sh = (1.0 - smooth(-bw * 0.1, bw * 0.28, ds)) * 0.35;
+        let a = px[3] / 255.0;
+        let sa = sh + a * (1.0 - sh);
+        for k in 0..3 {
+            px[k] = px[k] * a * (1.0 - sh) / sa.max(1e-6);
+        }
+        px[3] = sa * 255.0;
+    }
+    let cov = (0.5 - bar_sd(u, v, aspect, b, i, 0.0) * h).clamp(0.0, 1.0) * 0.9;
     if cov <= 0.0 {
         return px;
     }
-    let t = ((y1 - v) / total).clamp(0.0, 1.0);
+    let t = ((y1 - v) / (y1 - y0)).clamp(0.0, 1.0);
     let col = |k: usize| {
         let m = c[1][k] + (c[2][k] - c[1][k]) * t;
         (m + (1.0 - m) * 0.2) * 255.0
@@ -337,7 +353,8 @@ impl Gpu {
         for v in lv {
             u.extend_from_slice(&v.to_le_bytes());
         }
-        for v in [if b.bars_only { 1.0f32 } else { 0.0 }, 0.0, 0.0, 0.0] {
+        let shadow = b.bars.is_some() && !b.bars_only;
+        for v in [if b.bars_only { 1.0f32 } else { 0.0 }, if shadow { 1.0 } else { 0.0 }, 0.0, 0.0] {
             u.extend_from_slice(&v.to_le_bytes());
         }
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {

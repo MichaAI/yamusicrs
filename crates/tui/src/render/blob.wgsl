@@ -8,7 +8,7 @@ struct Params {
     b: array<vec4<f32>, 7>,   // шары кадра (x, y, r, —) — считаются на CPU (render::balls)
     bars: vec4<f32>,          // полоса спектра в долях кадра (x0, y0, x1, y1); x1 <= x0 — нет спектра
     lv: array<vec4<f32>, 8>,  // уровни 32 столбиков
-    fl: vec4<f32>,            // x = 1: без блоба, только столбики
+    fl: vec4<f32>,            // x = 1: без блоба, только столбики; y = 1: столбики с тенью
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -25,6 +25,19 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     o.pos = vec4<f32>(xy * 2.0 - 1.0, 0.0, 1.0);
     o.uv = vec2<f32>(xy.x, 1.0 - xy.y);
     return o;
+}
+
+// Расстояние до столбика i (скруглённая капсула); dy сдвигает его вниз — для тени.
+fn bar_sd(uv: vec2<f32>, i: u32, dy: f32) -> f32 {
+    let aspect = P.p.z;
+    let slot = (P.bars.z - P.bars.x) / 32.0;
+    let bw = slot * aspect * 0.62;
+    let cx = P.bars.x + (f32(i) + 0.5) * slot;
+    let total = P.bars.w - P.bars.y;
+    let hgt = max(P.lv[i / 4u][i % 4u] * total, bw);
+    let d0 = vec2<f32>((uv.x - cx) * aspect, uv.y - dy - (P.bars.w - hgt * 0.5));
+    let q = abs(d0) - vec2<f32>(bw * 0.5, hgt * 0.5) + vec2<f32>(bw * 0.5);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - bw * 0.5;
 }
 
 @fragment
@@ -58,21 +71,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let a = body * 0.94 * smoothstep(0.0, 0.12, edge);
     var out = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), a);
     if (P.fl.x > 0.5) { out = vec4<f32>(0.0); }
-    // Спектр: столбики с круглыми концами в полосе между обложкой и текстом.
+    // Спектр: столбики с круглыми концами в полосе между обложкой и текстом;
+    // поверх блоба (fl.y) — с мягкой тенью.
     if (P.bars.z > P.bars.x) {
         let n = 32.0;
         let slot = (P.bars.z - P.bars.x) / n;
+        let bw = slot * aspect * 0.62;
         let xu = (in.uv.x - P.bars.x) / slot;
-        if (xu >= 0.0 && xu < n && in.uv.y >= P.bars.y && in.uv.y <= P.bars.w) {
+        if (xu >= 0.0 && xu < n && in.uv.y >= P.bars.y && in.uv.y <= P.bars.w + bw * 0.5) {
             let i = u32(floor(xu));
-            let bw = slot * aspect * 0.62;
-            let cx = P.bars.x + (f32(i) + 0.5) * slot;
+            let px = fwidth(in.uv.y);
+            if (P.fl.y > 0.5) {
+                let ds = bar_sd(in.uv, i, bw * 0.18);
+                let sh = (1.0 - smoothstep(-bw * 0.1, bw * 0.28, ds)) * 0.35;
+                let sa = sh + out.a * (1.0 - sh);
+                out = vec4<f32>(out.rgb * out.a * (1.0 - sh) / max(sa, 1e-6), sa);
+            }
+            let d = bar_sd(in.uv, i, 0.0);
             let total = P.bars.w - P.bars.y;
-            let hgt = max(P.lv[i / 4u][i % 4u] * total, bw);
-            let d0 = vec2<f32>((in.uv.x - cx) * aspect, in.uv.y - (P.bars.w - hgt * 0.5));
-            let q = abs(d0) - vec2<f32>(bw * 0.5, hgt * 0.5) + vec2<f32>(bw * 0.5);
-            let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - bw * 0.5;
-            let cov = clamp(0.5 - d / fwidth(in.uv.y), 0.0, 1.0) * 0.9;
+            let cov = clamp(0.5 - d / px, 0.0, 1.0) * 0.9;
             let t = clamp((P.bars.w - in.uv.y) / total, 0.0, 1.0);
             let m = mix(P.c[1].rgb, P.c[2].rgb, t);
             let bc = m + (vec3<f32>(1.0) - m) * 0.2;
