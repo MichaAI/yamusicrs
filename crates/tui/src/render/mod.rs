@@ -11,6 +11,18 @@ pub struct Blob {
     pub energy: f32,
     /// Сила дизеринга в ступенях 8 бит; 0 — без дизеринга.
     pub dither: f32,
+    /// Столбики спектра поверх блоба (тот же проход шейдера).
+    pub bars: Option<Bars>,
+}
+
+/// Число столбиков спектра.
+pub const BARS: usize = 32;
+
+/// Спектр в полосе кадра: `rect` = (x0, y0, x1, y1) в долях кадра, `levels` 0..1.
+#[derive(Clone, Copy)]
+pub struct Bars {
+    pub rect: [f32; 4],
+    pub levels: [f32; BARS],
 }
 
 impl Blob {
@@ -72,11 +84,47 @@ fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
         for x in 0..w {
             let u = (x as f32 + 0.5) / w as f32;
             let v = (y as f32 + 0.5) / h as f32;
-            let p = dither(blob_px(u, v, aspect, b, &bs), x, y, b.dither);
+            let mut p = blob_px(u, v, aspect, b, &bs);
+            if let Some(bars) = &b.bars {
+                p = with_bars(p, u, v, aspect, h as f32, bars, &b.pastel());
+            }
+            let p = dither(p, x, y, b.dither);
             out.extend(p.map(|c| c as u8));
         }
     }
     out
+}
+
+/// Накладывает столбик спектра на пиксель блоба (та же формула, что в blob.wgsl).
+fn with_bars(px: [f32; 4], u: f32, v: f32, aspect: f32, h: f32, b: &Bars, c: &[[f32; 3]; 4]) -> [f32; 4] {
+    let [x0, y0, x1, y1] = b.rect;
+    let n = BARS as f32;
+    let slot = (x1 - x0) / n;
+    let xu = (u - x0) / slot;
+    if !(0.0..n).contains(&xu) || v < y0 || v > y1 {
+        return px;
+    }
+    let i = xu.floor() as usize;
+    let bw = slot * aspect * 0.62;
+    let cx = x0 + (i as f32 + 0.5) * slot;
+    let total = y1 - y0;
+    let hgt = (b.levels[i] * total).max(bw);
+    let (dx, dy) = ((u - cx) * aspect, v - (y1 - hgt * 0.5));
+    let q = (dx.abs() - bw * 0.5 + bw * 0.5, dy.abs() - hgt * 0.5 + bw * 0.5);
+    let d = (q.0.max(0.0).powi(2) + q.1.max(0.0).powi(2)).sqrt() + q.0.max(q.1).min(0.0) - bw * 0.5;
+    let cov = (0.5 - d * h).clamp(0.0, 1.0) * 0.9;
+    if cov <= 0.0 {
+        return px;
+    }
+    let t = ((y1 - v) / total).clamp(0.0, 1.0);
+    let col = |k: usize| {
+        let m = c[1][k] + (c[2][k] - c[1][k]) * t;
+        (m + (1.0 - m) * 0.2) * 255.0
+    };
+    let a = px[3] / 255.0;
+    let ra = cov + a * (1.0 - cov);
+    let mix = |k: usize| (col(k) * cov + px[k] * a * (1.0 - cov)) / ra.max(1e-6);
+    [mix(0), mix(1), mix(2), ra * 255.0]
 }
 
 /// Дизеринг против «колец» на градиентах: шум в `amp` ступеней 8 бит
@@ -265,7 +313,7 @@ async fn init_gpu() -> Option<Gpu> {
 
 impl Gpu {
     fn render(&self, w: u32, h: u32, b: &Blob) -> Option<Vec<u8>> {
-        let mut u = Vec::with_capacity(192);
+        let mut u = Vec::with_capacity(336);
         for c in b.pastel() {
             for v in [c[0], c[1], c[2], 1.0] {
                 u.extend_from_slice(&v.to_le_bytes());
@@ -278,6 +326,14 @@ impl Gpu {
             for v in [x, y, r, 0.0] {
                 u.extend_from_slice(&v.to_le_bytes());
             }
+        }
+        let r = b.bars.map_or([0.0; 4], |x| x.rect);
+        for v in r {
+            u.extend_from_slice(&v.to_le_bytes());
+        }
+        let lv = b.bars.map_or([0.0; BARS], |x| x.levels);
+        for v in lv {
+            u.extend_from_slice(&v.to_le_bytes());
         }
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,

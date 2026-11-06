@@ -1956,7 +1956,9 @@ fn draw_wave_stage(f: &mut Frame, area: Rect, app: &mut App, _sel: Option<&crate
     app.wave_phase += ctx.dt * app.blob_speed;
     // Блоб — живой фон всей правой части.
     let blob_rect = stage;
-    let colors = draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 }, None);
+    let band_h = (stage.height / 4).max(3).min(stage.height);
+    let band = Rect { x: stage.x + 2, y: stage.bottom() - band_h, width: stage.width.saturating_sub(4), height: band_h };
+    let colors = draw_aura(f, app, ctx, blob_rect, colors, if playing { 1.0 } else { 0.0 }, None, Some(band));
 
     let title = if wave_on {
         app.engine.wave.active_name.clone().unwrap_or_else(|| "Моя волна".into())
@@ -2081,6 +2083,7 @@ fn blob_contrast(images: &super::kitty::Images, blob: Rect, x: f32, y: f32, colo
                 phase: t,
                 energy: 0.5,
                 dither: 0.0,
+                bars: None,
             },
         )
     });
@@ -2143,6 +2146,7 @@ fn draw_aura(
     target: Cols,
     energy: f32,
     hole: Option<Rect>,
+    band: Option<Rect>,
 ) -> Cols {
     // Цвета перетекают к новым плавно (смена пресета, наведение, новый трек).
     let k = (ctx.dt * 2.5).min(1.0);
@@ -2157,13 +2161,8 @@ fn draw_aura(
     let energy = app.blob_energy;
     let spectrum = app.engine.cfg.visualizer == "spectrum";
     app.engine.player.set_spectrum(spectrum);
-    if spectrum {
-        app.images.hide_blob();
-        if !app.show_help {
-            draw_spectrum(f, app, ctx, rect, colors);
-        }
-        return colors;
-    }
+    let band = if spectrum { band } else { None };
+    let levels = band.map(|_| spectrum_levels(app, ctx));
     // Пиксели кадра в пропорциях области: ~256 по ширине.
     let pw = 256u32;
     let ph =
@@ -2173,6 +2172,15 @@ fn draw_aura(
         phase: app.wave_phase,
         energy,
         dither: app.engine.cfg.blob_dither as f32,
+        bars: band.zip(levels).map(|(b, levels)| crate::render::Bars {
+            rect: [
+                b.x.saturating_sub(rect.x) as f32 / rect.width.max(1) as f32,
+                b.y.saturating_sub(rect.y) as f32 / rect.height.max(1) as f32,
+                (b.right().saturating_sub(rect.x)) as f32 / rect.width.max(1) as f32,
+                (b.bottom().saturating_sub(rect.y)) as f32 / rect.height.max(1) as f32,
+            ],
+            levels,
+        }),
     };
     // Kitty рисует блоб поверх фона ячеек, так что под справкой он просвечивал бы сквозь неё.
     if app.show_help {
@@ -2200,43 +2208,51 @@ fn draw_aura(
     };
     if !images.blob(rect, pw, ph, frame) {
         blob_halfblocks(f, rect, colors, app.wave_phase);
+        if let (Some(b), Some(l)) = (band, levels) {
+            draw_spectrum_cells(f, b, &l, colors);
+        }
     }
     colors
 }
 
-/// Спектр вместо блоба: столбики из блоков 1/8 высоты от нижнего края области, цвет — из палитры.
-fn draw_spectrum(f: &mut Frame, app: &mut App, ctx: &Ctx, r: Rect, colors: Cols) {
-    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let bars = (r.width as usize / 2).clamp(8, 64);
+/// Уровни столбиков (0..1): быстро вверх, плавно вниз; на паузе опадают.
+fn spectrum_levels(app: &mut App, ctx: &Ctx) -> [f32; crate::render::BARS] {
+    const N: usize = crate::render::BARS;
     let raw = if app.engine.player.paused() { Vec::new() } else { app.engine.player.shared().spectrum() };
-    app.spec.resize(bars, 0.0);
+    app.spec.resize(N, 0.0);
     let k = (ctx.dt * 7.0).min(1.0);
+    let mut out = [0.0; N];
     for (i, lv) in app.spec.iter_mut().enumerate() {
-        let (a, b) = (i * raw.len() / bars, ((i + 1) * raw.len() / bars).max(i * raw.len() / bars + 1));
+        let (a, b) = (i * raw.len() / N, ((i + 1) * raw.len() / N).max(i * raw.len() / N + 1));
         let v = raw.get(a..b.min(raw.len())).map_or(0.0, |s| s.iter().cloned().fold(0.0, f32::max)).powf(1.6);
         *lv = if v > *lv { v } else { *lv + (v - *lv) * k };
+        out[i] = *lv;
     }
+    out
+}
+
+/// Спектр без картинок (терминал без kitty): блоки в 1/8 высоты в полосе `r`.
+fn draw_spectrum_cells(f: &mut Frame, r: Rect, levels: &[f32], colors: Cols) {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let n = levels.len();
     let (lo, hi) = (colors[1], colors[2]);
     let buf = f.buffer_mut();
-    let rows = (r.height as f32 * 0.7).max(1.0);
-    for (i, lv) in app.spec.iter().enumerate() {
-        let x0 = r.x + (i as u32 * r.width as u32 / bars as u32) as u16;
-        let x1 = r.x + ((i as u32 + 1) * r.width as u32 / bars as u32) as u16;
-        let eighths = (lv * rows * 8.0).round() as usize;
+    for (i, lv) in levels.iter().enumerate() {
+        let x0 = r.x + (i as u32 * r.width as u32 / n as u32) as u16;
+        let x1 = r.x + ((i as u32 + 1) * r.width as u32 / n as u32) as u16;
+        let eighths = (lv * r.height as f32 * 8.0).round() as usize;
         for row in 0..r.height {
-            let from_bottom = row as usize;
-            let full = eighths / 8;
-            let ch = if from_bottom < full {
+            let ch = if (row as usize) < eighths / 8 {
                 '█'
-            } else if from_bottom == full && eighths % 8 > 0 {
+            } else if row as usize == eighths / 8 && eighths % 8 > 0 {
                 BLOCKS[eighths % 8 - 1]
             } else {
                 break;
             };
-            let t = from_bottom as f32 / rows;
-            let c = |j: usize| (lo[j] + (hi[j] - lo[j]) * t.min(1.0)) as u8;
+            let t = row as f32 / r.height as f32;
+            let c = |j: usize| (lo[j] + (hi[j] - lo[j]) * t) as u8;
             let y = r.y + r.height - 1 - row;
-            for x in x0..x1.saturating_sub(if x1 - x0 > 1 { 1 } else { 0 }) {
+            for x in x0..x1.saturating_sub((x1 - x0 > 1) as u16) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch).set_fg(Color::Rgb(c(0), c(1), c(2)));
                 }
@@ -2268,6 +2284,7 @@ fn blob_halfblocks(f: &mut Frame, r: Rect, colors: Cols, t: f32) {
                         phase: t,
                         energy: 0.5,
                         dither: 0.0,
+                        bars: None,
                     },
                 )
             };
@@ -2298,6 +2315,16 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let [cover_zone, info, ctrl] =
         Layout::vertical([Constraint::Min(8), Constraint::Length(6), Constraint::Length(4)]).areas(left);
 
+    // Спектр зажат между обложкой и текстом: под него отдаём нижнюю часть зоны обложки.
+    let spectrum = app.engine.cfg.visualizer == "spectrum";
+    let (cover_zone, band) = if spectrum {
+        let bh = (cover_zone.height / 5).clamp(3, 8).min(cover_zone.height.saturating_sub(8));
+        let z = Rect { height: cover_zone.height - bh, ..cover_zone };
+        let band = Rect { x: cover_zone.x + 2, y: z.bottom(), width: cover_zone.width.saturating_sub(4), height: bh };
+        (z, (bh >= 2).then_some(band))
+    } else {
+        (cover_zone, None)
+    };
     // Обложка ~70% зоны, ореол-блоб в 1.6 раза больше и под ней.
     let max_h = (cover_zone.height as f32 * 0.72) as u16;
     let max_w = (cover_zone.width as f32 * 0.72) as u16;
@@ -2327,7 +2354,16 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         .cover_uri()
         .filter(|k| app.images.contains(k))
         .map(|_| crate::ui::kitty::fit_square(cover, ctx.cell_aspect));
-    draw_aura(f, app, ctx, glow, colors, if app.engine.player.paused() { 0.0 } else { 1.0 }, hole);
+    // Со спектром картинка тянется до низа полосы, чтобы столбики рисовал тот же шейдер под текстом.
+    let glow = match band {
+        Some(b) => {
+            let x = glow.x.min(b.x);
+            let y = glow.y.min(b.y);
+            Rect { x, y, width: glow.right().max(b.right()) - x, height: b.bottom() - y }
+        }
+        None => glow,
+    };
+    draw_aura(f, app, ctx, glow, colors, if app.engine.player.paused() { 0.0 } else { 1.0 }, hole, band);
     match track.cover_uri() {
         Some(k) if app.images.contains(k) => {
             app.images.render(k, cover, f.buffer_mut(), ctx.cell_aspect);
