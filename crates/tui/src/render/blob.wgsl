@@ -8,6 +8,7 @@ struct Params {
     b: array<vec4<f32>, 7>,   // шары кадра (x, y, r, —) — считаются на CPU (render::balls)
     bars: vec4<f32>,          // полоса спектра в долях кадра (x0, y0, x1, y1); x1 <= x0 — нет спектра
     lv: array<vec4<f32>, 8>,  // уровни 32 столбиков
+    fl: vec4<f32>,            // x = 1: без блоба, только столбики
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -56,6 +57,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let edge = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
     let a = body * 0.94 * smoothstep(0.0, 0.12, edge);
     var out = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), a);
+    if (P.fl.x > 0.5) { out = vec4<f32>(0.0); }
     // Спектр: столбики с круглыми концами в полосе между обложкой и текстом.
     if (P.bars.z > P.bars.x) {
         let n = 32.0;

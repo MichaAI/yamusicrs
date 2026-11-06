@@ -6,6 +6,7 @@ import androidx.annotation.RequiresApi
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -230,10 +231,19 @@ fun Modifier.blobHole(holes: BlobHoles?, corner: androidx.compose.ui.unit.Dp, op
  */
 @Composable
 fun Blob(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier, zoom: Float = 1.25f, holes: BlobHoles? = null) {
-    if (Viz.spectrum) {
-        SpectrumBackdrop(colors, playing, modifier)
-        return
+    when (Viz.kind) {
+        "spectrum" -> SpectrumBackdrop(colors, playing, modifier)
+        // Оба сразу: блоб — фон, столбики поверх без собственной подложки.
+        "both" -> androidx.compose.foundation.layout.Box(modifier) {
+            BlobOnly(colors, playing, Modifier.fillMaxSize(), zoom, holes)
+            SpectrumBackdrop(colors, playing, Modifier.fillMaxSize(), backdrop = false)
+        }
+        else -> BlobOnly(colors, playing, modifier, zoom, holes)
     }
+}
+
+@Composable
+private fun BlobOnly(colors: List<Color>, playing: Boolean, modifier: Modifier, zoom: Float, holes: BlobHoles?) {
     val c = colors.take(4).map { animateColorAsState(it, tween(900), label = "blob").value }
     var phase by remember { mutableFloatStateOf(0f) }
     var speed by remember { mutableFloatStateOf(0.3f) }

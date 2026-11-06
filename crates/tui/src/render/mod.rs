@@ -13,6 +13,8 @@ pub struct Blob {
     pub dither: f32,
     /// Столбики спектра поверх блоба (тот же проход шейдера).
     pub bars: Option<Bars>,
+    /// Без блоба: только столбики.
+    pub bars_only: bool,
 }
 
 /// Число столбиков спектра.
@@ -84,7 +86,7 @@ fn cpu_blob(w: u32, h: u32, b: &Blob) -> Vec<u8> {
         for x in 0..w {
             let u = (x as f32 + 0.5) / w as f32;
             let v = (y as f32 + 0.5) / h as f32;
-            let mut p = blob_px(u, v, aspect, b, &bs);
+            let mut p = if b.bars_only { [0.0; 4] } else { blob_px(u, v, aspect, b, &bs) };
             if let Some(bars) = &b.bars {
                 p = with_bars(p, u, v, aspect, h as f32, bars, &b.pastel());
             }
@@ -313,7 +315,7 @@ async fn init_gpu() -> Option<Gpu> {
 
 impl Gpu {
     fn render(&self, w: u32, h: u32, b: &Blob) -> Option<Vec<u8>> {
-        let mut u = Vec::with_capacity(336);
+        let mut u = Vec::with_capacity(352);
         for c in b.pastel() {
             for v in [c[0], c[1], c[2], 1.0] {
                 u.extend_from_slice(&v.to_le_bytes());
@@ -333,6 +335,9 @@ impl Gpu {
         }
         let lv = b.bars.map_or([0.0; BARS], |x| x.levels);
         for v in lv {
+            u.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [if b.bars_only { 1.0f32 } else { 0.0 }, 0.0, 0.0, 0.0] {
             u.extend_from_slice(&v.to_le_bytes());
         }
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {

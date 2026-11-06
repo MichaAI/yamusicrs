@@ -1290,9 +1290,10 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
             }
         }
         Section("Вид") {
-            Group("Фон плеера", "Блоб — мягкие пятна цвета обложки, Спектр — столбики по звучанию") {
-                Segments(listOf("Блоб", "Спектр"), if (s.visualizer == "spectrum") 1 else 0, {
-                    app.core.setVisualizer(if (it == 1) "spectrum" else "blob")
+            Group("Фон плеера", "Блоб — мягкие пятна цвета обложки, Спектр — столбики по звучанию, Оба — столбики поверх блоба") {
+                val kinds = listOf("blob", "spectrum", "both")
+                Segments(listOf("Блоб", "Спектр", "Оба"), kinds.indexOf(s.visualizer).coerceAtLeast(0), {
+                    app.core.setVisualizer(kinds[it])
                 }, Modifier.fillMaxWidth())
             }
             Group(null, null) {

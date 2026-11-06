@@ -22,7 +22,8 @@ import kotlin.math.pow
 
 /** Что рисовать на фоне и откуда брать спектр; обновляется из настроек. */
 object Viz {
-    var spectrum by androidx.compose.runtime.mutableStateOf(false)
+    /** `blob`, `spectrum` или `both`. */
+    var kind by androidx.compose.runtime.mutableStateOf("blob")
     var core: Core? = null
 }
 
@@ -33,7 +34,7 @@ private const val BARS = 32
  * Уровни читаются прямо из потока вывода; кадр перерисовывается только в фазе рисования.
  */
 @Composable
-fun SpectrumBackdrop(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier) {
+fun SpectrumBackdrop(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier, backdrop: Boolean = true) {
     val levels = remember { FloatArray(BARS) }
     val target = remember { FloatArray(BARS) }
     var tick by remember { mutableIntStateOf(0) }
@@ -65,7 +66,7 @@ fun SpectrumBackdrop(colors: List<Color>, playing: Boolean, modifier: Modifier =
     val bottom = colors.getOrNull(2) ?: top
     Canvas(modifier) {
         tick.let { }
-        drawRect(Brush.verticalGradient(listOf(base.copy(alpha = 0.35f), base.copy(alpha = 0.12f))))
+        if (backdrop) drawRect(Brush.verticalGradient(listOf(base.copy(alpha = 0.35f), base.copy(alpha = 0.12f))))
         val gap = 6.dp.toPx()
         val w = (size.width - gap * (BARS + 1)) / BARS
         val maxH = size.height * 0.62f

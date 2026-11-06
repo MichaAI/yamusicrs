@@ -180,7 +180,7 @@ class YaApp : Application(), CoreListener {
     override fun onSettings(settings: SettingsData) {
         this.settings.value = settings
         Viz.core = core
-        Viz.spectrum = settings.visualizer == "spectrum"
+        Viz.kind = settings.visualizer
     }
 
     /** Страница больше не нужна: забыть и ответ, и треки в ядре. */

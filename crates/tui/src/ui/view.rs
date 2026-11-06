@@ -2084,6 +2084,7 @@ fn blob_contrast(images: &super::kitty::Images, blob: Rect, x: f32, y: f32, colo
                 energy: 0.5,
                 dither: 0.0,
                 bars: None,
+                bars_only: false,
             },
         )
     });
@@ -2159,7 +2160,7 @@ fn draw_aura(
     // «Энергия» (размах движения шаров) тоже догоняет цель плавно.
     app.blob_energy += (energy - app.blob_energy) * (ctx.dt * 2.0).min(1.0);
     let energy = app.blob_energy;
-    let spectrum = app.engine.cfg.visualizer == "spectrum";
+    let spectrum = app.engine.cfg.visualizer != "blob";
     app.engine.player.set_spectrum(spectrum);
     let band = if spectrum { band } else { None };
     let levels = band.map(|_| spectrum_levels(app, ctx));
@@ -2177,6 +2178,7 @@ fn draw_aura(
         phase: app.wave_phase,
         energy,
         dither: app.engine.cfg.blob_dither as f32,
+        bars_only: app.engine.cfg.visualizer == "spectrum",
         bars: band.zip(levels).map(|(b, levels)| crate::render::Bars {
             rect: [
                 b.x.saturating_sub(rect.x) as f32 / rect.width.max(1) as f32,
@@ -2298,6 +2300,7 @@ fn blob_halfblocks(f: &mut Frame, r: Rect, colors: Cols, t: f32) {
                         energy: 0.5,
                         dither: 0.0,
                         bars: None,
+                bars_only: false,
                     },
                 )
             };
@@ -2358,7 +2361,7 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         .filter(|k| app.images.contains(k))
         .map(|_| crate::ui::kitty::fit_square(cover, ctx.cell_aspect));
     // Спектр — в зазоре между обложкой и подписью; обложка остаётся на своём месте.
-    let band = (app.engine.cfg.visualizer == "spectrum")
+    let band = (app.engine.cfg.visualizer != "blob")
         .then(|| {
             let (top, bottom) = (cover.bottom(), info.y);
             (bottom >= top + 2).then(|| Rect { x: cover_zone.x + 2, y: top, width: cover_zone.width.saturating_sub(4), height: bottom - top })

@@ -61,7 +61,7 @@ pub struct Config {
     /// Эквалайзер: включён ли, сколько полос и усиления полос в дБ.
     pub eq_enabled: bool,
     pub eq_gains: Vec<f32>,
-    /// Что рисовать на фоне: `blob` или `spectrum`.
+    /// Что рисовать на фоне: `blob`, `spectrum` или `both` (блоб + спектр).
     pub visualizer: String,
 }
 

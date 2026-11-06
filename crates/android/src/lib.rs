@@ -212,7 +212,7 @@ pub struct SettingsData {
     /// Эквалайзер: включён ли, усиления полос в дБ (число полос = длина списка).
     pub eq_enabled: bool,
     pub eq_gains: Vec<f32>,
-    /// `blob` или `spectrum`.
+    /// `blob`, `spectrum` или `both` (блоб + спектр).
     pub visualizer: String,
     /// Вся библиотека: треков и ГиБ (с точностью 0,1).
     pub library_tracks: u32,
@@ -540,7 +540,7 @@ impl Core {
     /// `blob` или `spectrum`: спектр считается, только пока выбран он.
     pub fn set_visualizer(&self, kind: String) {
         if let Some(sh) = SHARED.get() {
-            sh.set_spectrum(kind == "spectrum");
+            sh.set_spectrum(kind != "blob");
         }
         self.send(Cmd::Visualizer(kind));
     }
@@ -715,7 +715,7 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
         }
     };
     let shared = engine.player.shared();
-    shared.set_spectrum(engine.cfg.visualizer == "spectrum");
+    shared.set_spectrum(engine.cfg.visualizer != "blob");
     let _ = SHARED.set(shared);
     engine.yn_kind = "ANDROID";
     engine.yn_title = Some(format!("yamusicrs · {device_name}"));

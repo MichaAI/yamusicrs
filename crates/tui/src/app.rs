@@ -209,7 +209,7 @@ impl Setting {
             Setting::SmartLimit => "Сколько места отдать подобранным трекам.",
             Setting::FullReleaseDate => "В шапке альбома — день, месяц и год выхода, а не только год.",
             Setting::Fps => "Частота кадров анимаций (блоб, прокрутка, перебор символов).",
-            Setting::Visualizer => "Блоб — мягкие пятна цвета обложки, спектр — столбики по звучанию.",
+            Setting::Visualizer => "Блоб — мягкие пятна цвета обложки, спектр — столбики по звучанию, оба — столбики поверх блоба.",
             Setting::Equalizer => "10 полос; пресеты: плоский, бас, вокал, яркий. Точная настройка — eq_gains в config.toml. Плоский и выключенный не трогают звук.",
             Setting::Dither => "Шум против «колец» на градиентах блоба, в ступенях 8 бит; 0 — выключен.",
             Setting::Recheck => "Сервер не дал lossless — трек помечается и не перепроверяется 30 дней. Enter снимает пометки: каждый трек хуже lossless спросит сервер заново при следующем проигрывании и, если дадут лучше, перекачается.",
@@ -1448,7 +1448,12 @@ impl App {
                 0 => "выкл".into(),
                 d => d.to_string(),
             },
-            Setting::Visualizer => if self.engine.cfg.visualizer == "spectrum" { "спектр" } else { "блоб" }.into(),
+            Setting::Visualizer => match self.engine.cfg.visualizer.as_str() {
+                "spectrum" => "спектр",
+                "both" => "блоб + спектр",
+                _ => "блоб",
+            }
+            .into(),
             Setting::Equalizer => if !self.engine.cfg.eq_enabled { "выкл" } else {
                 eq_presets().iter().find(|(_, g)| self.engine.cfg.eq_gains == *g).map_or("свой", |(n, _)| *n)
             }.into(),
@@ -1557,7 +1562,12 @@ impl App {
                 self.engine.cfg.save(&self.engine.paths);
             }
             Setting::Visualizer => {
-                self.engine.cfg.visualizer = if self.engine.cfg.visualizer == "spectrum" { "blob" } else { "spectrum" }.into();
+                self.engine.cfg.visualizer = match self.engine.cfg.visualizer.as_str() {
+                    "blob" => "spectrum",
+                    "spectrum" => "both",
+                    _ => "blob",
+                }
+                .into();
                 self.engine.cfg.save(&self.engine.paths);
             }
             Setting::Equalizer => {
