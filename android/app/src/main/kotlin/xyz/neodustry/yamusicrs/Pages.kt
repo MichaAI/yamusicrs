@@ -1186,105 +1186,112 @@ fun SettingsTab(app: YaApp) {
 private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
         Header("Настройки", "") {}
-        Group("Качество", "Lossless — FLAC без потерь, Авто — выбирает Яндекс по скорости сети, Высокое — AAC 256, Экономия — для мобильного интернета") {
-            Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.quality }.coerceAtLeast(0), {
-                app.core.setQuality(QUALITIES[it].first)
-            }, Modifier.fillMaxWidth())
-        }
-        Group("Плавный переход", "Наплыв из одного трека в другой; «Выкл» — встык") {
-            Segments(
-                CROSSFADES.map { if (it == 0f) "Выкл" else "${it.toInt()} с" },
-                CROSSFADES.indexOfFirst { kotlin.math.abs(it - s.crossfadeSecs) < 0.5f }.coerceAtLeast(0),
-                { app.core.setCrossfade(CROSSFADES[it]) },
-                Modifier.fillMaxWidth(),
-            )
-        }
-        Group("Эквалайзер", null) {
-            Toggle("Включить", "Выключен — звук идёт без обработки (bit-perfect)", s.eqEnabled) { app.core.setEqEnabled(it) }
-            androidx.compose.animation.AnimatedVisibility(s.eqEnabled) {
-                Column {
-                    Spacer(Modifier.height(12.dp))
-                    Segments(EQ_BANDS.map { "$it" }, EQ_BANDS.indexOf(s.eqGains.size).coerceAtLeast(0), {
-                        app.core.setEqBands(EQ_BANDS[it].toUInt())
-                    }, Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(8.dp))
-                    EqBands(app.core, s.eqGains, s.eqEnabled)
-                    Spacer(Modifier.height(4.dp))
-                    EqReset(app.core, s.eqGains)
-                }
+        Section("Звук") {
+            Group("Качество", "Lossless — FLAC без потерь, Авто — выбирает Яндекс по скорости сети, Высокое — AAC 256, Экономия — для мобильного интернета") {
+                Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.quality }.coerceAtLeast(0), {
+                    app.core.setQuality(QUALITIES[it].first)
+                }, Modifier.fillMaxWidth())
             }
-        }
-        Group("Фон плеера", "Блоб — мягкие пятна цвета обложки, Спектр — столбики по звучанию") {
-            Segments(listOf("Блоб", "Спектр"), if (s.visualizer == "spectrum") 1 else 0, {
-                app.core.setVisualizer(if (it == 1) "spectrum" else "blob")
-            }, Modifier.fillMaxWidth())
-        }
-        Group(null, null) {
-            Toggle("Выравнивание громкости", "Выключено — звук bit-perfect, как в исходнике", s.normalize) { app.core.setNormalize(it) }
-            if (s.normalize) {
-                var lufs by remember(s.targetLufs) { mutableFloatStateOf(s.targetLufs) }
-                Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Целевая громкость", Modifier.weight(1f))
-                    Text("${lufs.roundToInt()} LUFS", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                }
-                Slider(
-                    lufs,
-                    { lufs = it.roundToInt().toFloat() },
-                    valueRange = -23f..-8f,
-                    steps = 14,
-                    onValueChangeFinished = { app.core.setTargetLufs(lufs) },
+            Group("Плавный переход", "Наплыв из одного трека в другой; «Выкл» — встык") {
+                Segments(
+                    CROSSFADES.map { if (it == 0f) "Выкл" else "${it.toInt()} с" },
+                    CROSSFADES.indexOfFirst { kotlin.math.abs(it - s.crossfadeSecs) < 0.5f }.coerceAtLeast(0),
+                    { app.core.setCrossfade(CROSSFADES[it]) },
+                    Modifier.fillMaxWidth(),
                 )
             }
-        }
-        Group(null, null) {
-            Toggle("Быстрый старт", "Из сети трек начинает играть в AAC, lossless подменяет его без паузы; следующие треки прогреваются заранее", s.fastStart) {
-                app.core.setFastStart(it)
+            Group(null, null) {
+                Toggle("Выравнивание громкости", "Выключено — звук bit-perfect, как в исходнике", s.normalize) { app.core.setNormalize(it) }
+                if (s.normalize) {
+                    var lufs by remember(s.targetLufs) { mutableFloatStateOf(s.targetLufs) }
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Целевая громкость", Modifier.weight(1f))
+                        Text("${lufs.roundToInt()} LUFS", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        lufs,
+                        { lufs = it.roundToInt().toFloat() },
+                        valueRange = -23f..-8f,
+                        steps = 14,
+                        onValueChangeFinished = { app.core.setTargetLufs(lufs) },
+                    )
+                }
+            }
+            Group(null, null) {
+                Toggle("Эквалайзер", "Выключен — звук идёт без обработки (bit-perfect)", s.eqEnabled) { app.core.setEqEnabled(it) }
+                androidx.compose.animation.AnimatedVisibility(s.eqEnabled) {
+                    Column {
+                        Spacer(Modifier.height(12.dp))
+                        Segments(EQ_BANDS.map { "$it" }, EQ_BANDS.indexOf(s.eqGains.size).coerceAtLeast(0), {
+                            app.core.setEqBands(EQ_BANDS[it].toUInt())
+                        }, Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(8.dp))
+                        EqBands(app.core, s.eqGains, s.eqEnabled)
+                        Spacer(Modifier.height(4.dp))
+                        EqReset(app.core, s.eqGains)
+                    }
+                }
             }
         }
-        Group(null, null) {
-            Toggle("Волна после списка", "Плейлист, альбом или «Мне нравится» доиграли — дальше волна по ним, а не тишина", s.waveAfterList) {
-                app.core.setWaveAfterList(it)
+        Section("Воспроизведение") {
+            Group(null, null) {
+                Toggle("Быстрый старт", "Из сети трек начинает играть в AAC, lossless подменяет его без паузы; следующие треки прогреваются заранее", s.fastStart) {
+                    app.core.setFastStart(it)
+                }
+            }
+            Group(null, null) {
+                Toggle("Волна после списка", "Плейлист, альбом или «Мне нравится» доиграли — дальше волна по ним, а не тишина", s.waveAfterList) {
+                    app.core.setWaveAfterList(it)
+                }
+            }
+            Group(null, null) {
+                Toggle("История прослушиваний", "Отправлять в Яндекс: так точнее рекомендации волны", s.reportPlays) { app.core.setReportPlays(it) }
             }
         }
-        // Офлайн-режим и докачка — своим экраном: настроек там много.
-        Group(null, null) {
-            SubmenuRow(
-                "Офлайн и докачка",
-                when {
-                    s.offlineMode -> "Сейчас офлайн: играет только скачанное"
-                    s.smartDownload -> "Треки для офлайн-волны докачиваются: ${"%.1f".format(s.smartUsedGb)} из ${s.smartLimitGb.toInt()} ГБ"
-                    else -> "Офлайн-режим, докачка треков для офлайн-волны"
-                },
-            ) { openSub() }
-        }
-        Group(null, null) {
-            Toggle("Полная дата выхода", "В шапке альбома — день, месяц и год, а не только год", s.fullReleaseDate) {
-                app.core.setFullReleaseDate(it)
+        Section("Устройства и сеть") {
+            Group(null, null) {
+                SubmenuRow(
+                    "Офлайн и докачка",
+                    when {
+                        s.offlineMode -> "Сейчас офлайн: играет только скачанное"
+                        s.smartDownload -> "Треки для офлайн-волны докачиваются: ${"%.1f".format(s.smartUsedGb)} из ${s.smartLimitGb.toInt()} ГБ"
+                        else -> "Офлайн-режим, докачка треков для офлайн-волны"
+                    },
+                ) { openSub() }
+            }
+            Group(null, null) {
+                Toggle("Слушать на других устройствах", s.ynisonStatus.replaceFirstChar { it.uppercase() }.let {
+                    if (s.ynison) "Ynison: $it" else "Телефон или компьютер с Яндекс Музыкой включает музыку здесь, а отсюда — там"
+                }, s.ynison) { app.core.setYnison(it) }
+            }
+            Group(null, null) {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                // Проверяем заново при каждом возвращении на экран (решение принимается в системном окне).
+                var free by remember { mutableStateOf(unrestricted(ctx)) }
+                androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+                    free = unrestricted(ctx)
+                    onPauseOrDispose {}
+                }
+                Toggle(
+                    "Работа в фоне",
+                    if (free) "Система не ограничивает приложение — музыку в фоне не прервёт"
+                    else "Система может остановить музыку в фоне ради батареи. Включите, чтобы этого не было",
+                    free,
+                ) { if (!free) askBackground(ctx, onlyOnce = false) }
             }
         }
-        Group(null, null) {
-            Toggle("Слушать на других устройствах", s.ynisonStatus.replaceFirstChar { it.uppercase() }.let {
-                if (s.ynison) "Ynison: $it" else "Телефон или компьютер с Яндекс Музыкой включает музыку здесь, а отсюда — там"
-            }, s.ynison) { app.core.setYnison(it) }
-        }
-        Group(null, null) {
-            val ctx = androidx.compose.ui.platform.LocalContext.current
-            // Проверяем заново при каждом возвращении на экран (решение принимается в системном окне).
-            var free by remember { mutableStateOf(unrestricted(ctx)) }
-            androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
-                free = unrestricted(ctx)
-                onPauseOrDispose {}
+        Section("Вид") {
+            Group("Фон плеера", "Блоб — мягкие пятна цвета обложки, Спектр — столбики по звучанию") {
+                Segments(listOf("Блоб", "Спектр"), if (s.visualizer == "spectrum") 1 else 0, {
+                    app.core.setVisualizer(if (it == 1) "spectrum" else "blob")
+                }, Modifier.fillMaxWidth())
             }
-            Toggle(
-                "Работа в фоне",
-                if (free) "Система не ограничивает приложение — музыку в фоне не прервёт"
-                else "Система может остановить музыку в фоне ради батареи. Включите, чтобы этого не было",
-                free,
-            ) { if (!free) askBackground(ctx, onlyOnce = false) }
-        }
-        Group(null, null) {
-            Toggle("История прослушиваний", "Отправлять в Яндекс: так точнее рекомендации волны", s.reportPlays) { app.core.setReportPlays(it) }
+            Group(null, null) {
+                Toggle("Полная дата выхода", "В шапке альбома — день, месяц и год, а не только год", s.fullReleaseDate) {
+                    app.core.setFullReleaseDate(it)
+                }
+            }
         }
         val ctx = androidx.compose.ui.platform.LocalContext.current
         val version = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() }
@@ -1321,23 +1328,23 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
             )
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-            Group(
-                "Скачанное",
+            Section("Скачанное") { Group(
+                null,
                 "${tracksWord(s.libraryTracks.toInt())}, ${"%.1f".format(s.libraryGb)} ГБ; из них подобрано для офлайн-волны ${"%.1f".format(s.smartUsedGb)} ГБ",
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { confirm = true }, enabled = s.smartUsedGb > 0f) { Text("Удалить подобранное") }
                     OutlinedButton(onClick = { confirm = false }, enabled = s.libraryTracks > 0u) { Text("Удалить всё") }
                 }
-            }
-            Group(null, null) {
+            } }
+            Section("Режим") { Group(null, null) {
                 Toggle(
                     "Офлайн-режим",
                     "Без сети по своей воле: Коллекция, плейлисты и офлайн-волна из скачанного",
                     s.offlineMode,
                 ) { app.core.setOfflineMode(it) }
-            }
-            Group(null, null) {
+            } }
+            Section("Докачка для офлайн-волны") { Group(null, null) {
                 Toggle(
                     "Докачивать для офлайн-волны",
                     "Яндекс подбирает треки, которые может выбрать офлайн-волна, и они тихо скачиваются. " +
@@ -1346,7 +1353,7 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
                 ) { app.core.setSmartDownload(it) }
             }
             androidx.compose.animation.AnimatedVisibility(s.smartDownload) {
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(22.dp)) {
                     Group("Качество докачки", "Отдельно от качества стрима. «Авто» — как решит Яндекс по скорости сети") {
                         Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.smartQuality }.coerceAtLeast(0), {
                             app.core.setSmartQuality(QUALITIES[it].first)
@@ -1394,7 +1401,7 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
                         }
                     }
                 }
-            }
+            } }
         }
     }
 }
@@ -1425,22 +1432,34 @@ private fun SubmenuRow(title: String, hint: String, open: () -> Unit) {
     }
 }
 
-/** Раздел настроек: скруглённый контейнер, соседние разделы разделены зазором (MD3E). */
+/** Раздел настроек: подпись и один скруглённый контейнер, внутри пункты через равные промежутки. */
 @Composable
-private fun Group(title: String?, hint: String?, content: @Composable ColumnScope.() -> Unit) {
+private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Text(
+        title,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 32.dp, end = 24.dp, top = 20.dp, bottom = 8.dp),
+    )
     Surface(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         shape = MaterialTheme.shapes.extraLarge,
         color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp)) {
-            title?.let { Text(it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-            hint?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(12.dp))
-            }
-            content()
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(22.dp), content = content)
+    }
+}
+
+/** Пункт внутри раздела: название, пояснение, затем сам элемент управления. */
+@Composable
+private fun Group(title: String?, hint: String?, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        title?.let { Text(it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+        hint?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
         }
+        content()
     }
 }
 

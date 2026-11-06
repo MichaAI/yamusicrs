@@ -136,19 +136,20 @@ pub enum Setting {
 }
 
 impl Setting {
+    /// Порядок по смыслу: звук → сеть и устройства → вид → прочее.
     pub const ALL: [Setting; 13] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
         Setting::Crossfade,
-        Setting::ReportPlays,
-        Setting::Ynison,
+        Setting::Equalizer,
         Setting::Offline,
-        Setting::FullReleaseDate,
+        Setting::Ynison,
+        Setting::Visualizer,
         Setting::Fps,
         Setting::Dither,
-        Setting::Visualizer,
-        Setting::Equalizer,
+        Setting::FullReleaseDate,
+        Setting::ReportPlays,
         Setting::Recheck,
     ];
 
