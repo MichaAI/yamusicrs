@@ -106,6 +106,8 @@ pub enum Page {
         cover: Option<String>,
         /// Есть у страницы альбома.
         album: Option<AlbumItem>,
+        /// Страница плейлиста (а не альбома, чарта, похожих).
+        playlist: bool,
         tracks: Vec<TrackItem>,
     },
     Search {
@@ -204,10 +206,12 @@ impl Pages {
             } => {
                 let items = tracks.iter().map(TrackItem::from).collect();
                 self.tracks.insert(id, (title.clone(), tracks));
+                let playlist = seed.as_deref().is_some_and(|s| s.starts_with("playlist:"));
                 if let Some(seed) = seed {
                     self.seeds.insert(id, seed);
                 }
                 Page::Tracks {
+                    playlist,
                     title,
                     subtitle,
                     cover,

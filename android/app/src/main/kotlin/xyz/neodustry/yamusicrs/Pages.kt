@@ -486,7 +486,7 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
                     Text(p.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
                 val have = p.tracks.count { app.isDownloaded(it.id) }
-                if (have > 0) {
+                if (p.playlist && have > 0) {
                     Spacer(Modifier.height(14.dp))
                     DownloadProgress(have, p.tracks.size)
                 }
