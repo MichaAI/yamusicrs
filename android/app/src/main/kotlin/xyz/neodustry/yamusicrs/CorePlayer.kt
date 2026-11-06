@@ -137,6 +137,9 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
                 COMMAND_GET_CURRENT_MEDIA_ITEM,
                 COMMAND_GET_TIMELINE,
                 COMMAND_GET_METADATA,
+                // Без него SimpleBasePlayer.release() молча ничего не делает: при пересоздании
+                // сервиса старый плеер оставался жив, держал фокус и ставил паузу новому.
+                COMMAND_RELEASE,
             )
             .build()
         val b = State.Builder().setAvailableCommands(commands)
