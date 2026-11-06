@@ -1,56 +1,87 @@
 # yamusicrs
 
-TUI-клиент Яндекс Музыки на Rust: lossless через нативный PipeWire, Моя волна,
-синхронные тексты, обложки в kitty, локальная библиотека из нормальных файлов.
+Неофициальный клиент Яндекс Музыки на Rust. Два интерфейса поверх одного ядра:
 
-## Установка (Nix)
+- **TUI для Linux** — lossless через нативный PipeWire, Моя волна, синхронные тексты,
+  обложки в kitty, локальная библиотека из обычных файлов с тегами, MPRIS.
+- **Android-приложение** — Jetpack Compose (Material 3 Expressive), то же ядро через UniFFI,
+  звук через AAudio, офлайн-скачивание.
+
+Оба клиента умеют Ynison: видны на других устройствах в «Слушать на…» и управляются с них.
+
+## Содержание
+
+- [Состав репозитория](#состав-репозитория)
+- [Установка и сборка TUI](#установка-и-сборка-tui)
+- [Сборка Android-приложения](#сборка-android-приложения)
+- [Запуск и команды](#запуск-и-команды)
+- [Вход](#вход) · [Звук](#звук) · [Качество и библиотека](#качество-и-библиотека)
+- [Клавиши](#клавиши) · [Настройки](#настройки) · [Файлы](#файлы)
+- [Разработка](#разработка)
+
+## Состав репозитория
+
+| Путь | Что там |
+|---|---|
+| [`crates/core`](crates/README.md) | ядро без UI: API, аудиодвижок, библиотека, офлайн-волна, Ynison |
+| [`crates/tui`](crates/README.md) | десктопный TUI (бинарь `yamusicrs`), MPRIS, GPU-блоб |
+| [`crates/android`](crates/README.md) | UniFFI-мост ядра для Android, вывод через AAudio |
+| [`crates/uniffi-bindgen`](crates/README.md) | генератор Kotlin-привязок |
+| [`android/`](android/README.md) | Gradle-проект приложения (Kotlin, Compose) |
+| [`nix/`](nix/README.md) | пакет (crane), модули NixOS и home-manager |
+| [`docs/`](docs/README.md) | заметки о протоколах: Ynison, эндпоинты официальных клиентов |
+| [`tools/`](tools/README.md) | вспомогательные скрипты |
+| `data/` | ярлык `.desktop` и иконка |
+
+## Установка и сборка TUI
+
+Нужен Linux с PipeWire (≥ 0.3.49) и Vulkan (или GL) для анимированного блоба;
+без GPU блоб рисуется на CPU.
+
+### Nix (рекомендуется)
 
 ```sh
-nix run                           # из клона репозитория
+nix run .                         # из клона репозитория, без установки
 nix profile install .             # в профиль: бинарь, ярлык в меню, иконка
 ```
 
 Флейк отдаёт `packages.default`, `apps.default`, `overlays.default`,
-`nixosModules.default` и `homeManagerModules.default`.
+`nixosModules.default` и `homeManagerModules.default` — подробности и примеры
+конфигурации в [nix/README.md](nix/README.md).
 
-home-manager:
+### Без Nix
 
-```nix
-{
-  inputs.yamusicrs.url = "path:/home/me/projects/yamusicrs"; # или git-URL
-  # …
-  imports = [ inputs.yamusicrs.homeManagerModules.default ];
-  programs.yamusicrs = {
-    enable = true;
-    desktopTerminal = "kitty";   # ярлык откроет kitty (обложки/блоб видны только в kitty-подобных)
-    settings = {                 # ~/.config/yamusicrs/config.toml; пусто — файл не трогаем
-      quality = "lossless";
-      library_max_gb = 50;
-    };
-  };
-}
-```
-
-NixOS: `imports = [ inputs.yamusicrs.nixosModules.default ]; programs.yamusicrs.enable = true;`
-— ставит пакет и разрешает PipeWire частоты 44.1–192 кГц (`hiResRates`, по умолчанию вкл.).
-
-Без флейков в системе: `overlays.default` добавляет `pkgs.yamusicrs`.
-
-## Разработка
+Зависимости: Rust (edition 2024, свежий stable), `pkg-config`, `clang`/libclang
+(bindgen для PipeWire), заголовки `libpipewire-0.3`, рантайм `libvulkan`.
 
 ```sh
-nix develop                        # или direnv: .envrc уже есть
-cargo build --release              # инкрементально в ./target
-nix flake check                    # пакет, тесты, clippy, rustfmt
-nix fmt                            # nixfmt для .nix
+# Debian/Ubuntu: libpipewire-0.3-dev libclang-dev pkg-config libvulkan1
+# Arch:          pipewire clang pkgconf vulkan-icd-loader
+cargo build --release             # → target/release/yamusicrs
+cargo install --path crates/tui   # в ~/.cargo/bin
 ```
 
-Пакет собран на [crane](https://github.com/ipetkov/crane): зависимости — отдельная
-derivation, `nix build` после правки кода пересобирает только сам yamusicrs.
-В devshell и пакете путь к `libvulkan` вшит в rpath — иначе wgpu его не найдёт и
-блоб молча уйдёт на CPU (в логе будет написано почему).
+Ярлык и иконка: `data/yamusicrs.desktop` → `~/.local/share/applications/`,
+`data/yamusicrs.svg` → `~/.local/share/icons/hicolor/scalable/apps/`.
 
-Запуск и команды (`yamusicrs --help` — подробно):
+Профили: `release` — быстрая инкрементальная сборка для разработки,
+`dist` (`--profile dist`) — с thin LTO, меньше и быстрее; им собирается Nix-пакет.
+
+## Сборка Android-приложения
+
+Коротко (всё окружение — JDK 21, Android SDK/NDK, Rust-таргеты — даёт dev-оболочка):
+
+```sh
+nix develop .#android -c ./android/gradlew -p android assembleRelease
+# APK: android/app/build/outputs/apk/release/app-release.apk
+adb install -r android/app/build/outputs/apk/release/app-release.apk
+```
+
+Подробно, в том числе без Nix, — в [android/README.md](android/README.md).
+
+## Запуск и команды
+
+`yamusicrs --help` — подробно.
 
 ```
 yamusicrs                      плеер
@@ -111,7 +142,7 @@ Artist/Album (Year)/07. Title.flac
 
 | | |
 |---|---|
-| `1`–`5`, `Tab` | Волна · Коллекция · Плейлисты · Поиск · Очередь |
+| `1`–`7`, `Tab` | Волна · Коллекция · Плейлисты · Поиск · Очередь · Новинки · Настройки |
 | `↑↓`/`jk`, `PgUp/PgDn`, `g/G` | навигация |
 | `Enter` / `Esc` | играть/открыть / назад |
 | `Space`, `n`, `p` | пауза, следующий, предыдущий |
@@ -131,12 +162,66 @@ MPRIS поддерживается: медиаклавиши и `playerctl` ра
 `org.mpris.MediaPlayer2.yamusicrs`, переопределяется `YAMUSICRS_MPRIS_NAME`
 (например, для второго экземпляра: иначе он заберёт имя у первого).
 
+## Настройки
+
+Большинство параметров переключается во вкладке `7` (Настройки); то же самое
+можно править в `~/.config/yamusicrs/config.toml` (файл создаётся при первом запуске,
+нераспознанный файл заменяется значениями по умолчанию, в логе будет предупреждение).
+
+| Параметр | По умолчанию | Смысл |
+|---|---|---|
+| `quality` | `lossless` | `lossless` / `hq` / `nq` |
+| `library_dir` | `~/Music/YandexMusic` | корень локальной библиотеки |
+| `library_max_gb` | `0` | лимит библиотеки, ГиБ (0 — без лимита) |
+| `volume` | `0.8` | громкость при старте |
+| `normalize`, `normalize_target_lufs` | `true`, `-14` | нормализация R128 (ломает bit-perfect) |
+| `crossfade_secs` | `3` | кроссфейд, с; 0 — встык |
+| `kitty_images` | авто | обложки через kitty graphics protocol |
+| `gpu`, `blob_dither`, `fps` | `true`, `1`, `30` | отрисовка блоба и частота анимаций |
+| `report_plays` | `true` | отправлять историю прослушиваний в Яндекс |
+| `ynison` | `true` | видимость и управление с других устройств |
+| `fast_start`, `warm_ahead` | `true`, `5` | быстрый старт в AAC с подменой на lossless; прогрев очереди |
+| `wave_after_list` | `true` | после списка продолжать волной |
+| `offline_mode` | `false` | всегда без сети (как `--offline`) |
+| `smart_download`, `smart_quality`, `smart_limit_gb` | `false`, `hq`, `2` | умное скачивание для офлайн-волны |
+| `smart_from_hour`, `smart_to_hour`, `smart_wifi_only` | `0`, `0`, `true` | окно и условия докачки |
+
+Полный список с комментариями — в [`crates/core/src/config.rs`](crates/core/src/config.rs).
+
 ## Файлы
 
-- `~/.config/yamusicrs/config.toml` — настройки (создаётся при первом запуске)
-- `~/.local/share/yamusicrs/` — токен, индекс библиотеки
-- `~/.local/state/yamusicrs/` — лог (`YAMUSICRS_LOG=debug` для подробного), состояние
+`yamusicrs paths` печатает актуальные пути.
 
-API неофициальный, описание взято из [MarshalX/yandex-music-api](https://github.com/MarshalX/yandex-music-api).
+- `~/.config/yamusicrs/config.toml` — настройки
+- `~/.local/share/yamusicrs/` — токен, индекс библиотеки, снимок для офлайна
+- `~/.local/state/yamusicrs/` — лог (`YAMUSICRS_LOG=yamusicrs=debug` для подробного), состояние
+- `~/.cache/yamusicrs/` — кеш картинок
+- `~/Music/YandexMusic/` — библиотека
 
-Лицензия: Apache-2.0.
+Переменные окружения: `YAMUSICRS_LOG` (фильтр tracing), `YAMUSICRS_MPRIS_NAME`
+(второй экземпляр; такой экземпляр не включает Ynison, если не задать `YAMUSICRS_YNISON=1`).
+
+## Разработка
+
+```sh
+nix develop                        # или direnv: .envrc уже есть
+cargo build --release              # инкрементально в ./target
+cargo test --workspace             # тесты (часть помечена #[ignore] и требует файлов)
+nix flake check                    # пакет, тесты, clippy, rustfmt
+nix fmt                            # nixfmt для .nix
+cargo fmt                          # rustfmt.toml в корне
+```
+
+Пакет собран на [crane](https://github.com/ipetkov/crane): зависимости — отдельная
+derivation, `nix build` после правки кода пересобирает только сам yamusicrs.
+В devshell и пакете путь к `libvulkan` вшит в rpath, иначе wgpu его не найдёт и
+блоб уйдёт на CPU. Запуская тестовый экземпляр рядом с рабочим, задавайте
+`YAMUSICRS_MPRIS_NAME`.
+
+API неофициальный; описание взято из [MarshalX/yandex-music-api](https://github.com/MarshalX/yandex-music-api)
+и разбора официальных клиентов ([docs](docs/README.md)). Проект не связан с Яндексом.
+
+## Лицензия
+
+Apache-2.0, см. [LICENSE](LICENSE). Шрифт Nunito в Android-приложении — под SIL OFL
+(`android/app/src/main/assets/licenses/`).
