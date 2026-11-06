@@ -124,6 +124,9 @@ pub enum Page {
         about: Option<String>,
         /// Популярные треки (их и играет `play_from`).
         tracks: Vec<TrackItem>,
+        /// «Знакомое вам»: треки исполнителя из коллекции и волны. Играются с индекса
+        /// `tracks.len()` — в источнике страницы они идут сразу за популярными.
+        familiar: Vec<TrackItem>,
         albums: Vec<AlbumItem>,
         also: Vec<AlbumItem>,
         similar: Vec<ArtistItem>,
@@ -152,6 +155,8 @@ pub enum Req {
     Chart,
     /// Всё скачанное, недавно игранное сверху (без сети тоже).
     Downloaded,
+    /// «Мне нравится» как страница.
+    Likes,
 }
 
 /// Сырой ответ сети; в `Page` превращается уже в потоке движка.
@@ -229,12 +234,11 @@ impl Pages {
             },
             Loaded::Artist(name, b) => {
                 let info = b.artist.as_ref();
-                let tracks = if b.popular_tracks.is_empty() {
-                    b.familiar.clone()
-                } else {
-                    b.popular_tracks.clone()
-                };
-                let items = tracks.iter().map(TrackItem::from).collect();
+                let popular = b.popular_tracks.len();
+                let mut tracks = b.popular_tracks.clone();
+                tracks.extend(b.familiar.iter().cloned());
+                let items: Vec<TrackItem> = tracks.iter().map(TrackItem::from).collect();
+                let (items, familiar) = (items[..popular].to_vec(), items[popular..].to_vec());
                 self.tracks.insert(id, (name.clone(), tracks));
                 if let Some(a) = info.filter(|a| !a.id.is_empty()) {
                     self.seeds.insert(id, format!("artist:{}", a.id));
@@ -254,6 +258,7 @@ impl Pages {
                         .map(|d| d.text.clone())
                         .filter(|t| !t.is_empty()),
                     tracks: items,
+                    familiar,
                     albums: albums.iter().map(AlbumItem::from).collect(),
                     also: b.also_albums.iter().map(AlbumItem::from).collect(),
                     similar: b.similar_artists.iter().map(ArtistItem::from).collect(),
@@ -287,6 +292,24 @@ fn downloaded(e: &Engine) -> Loaded {
 
 /// Открыть страницу: ответ уйдёт в `tx` (офлайн плейлист — из снимка сразу).
 pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
+    if let Req::Likes = req {
+        let ts = match e.likes.ready() {
+            Some(l) => l.clone(),
+            None => e.snapshot.likes.clone(),
+        };
+        let _ = tx.send((
+            id,
+            Ok(Loaded::Tracks {
+                title: "Мне нравится".into(),
+                subtitle: tracks_word(ts.len()),
+                cover: None,
+                album: None,
+                tracks: if e.offline { e.offline_tracks(ts) } else { ts },
+                seed: None,
+            }),
+        ));
+        return;
+    }
     if let Req::Downloaded = req {
         let _ = tx.send((id, Ok(downloaded(e))));
         return;
@@ -322,6 +345,7 @@ pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
 async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
     match req {
         // Отдаётся из библиотеки в `open`, сюда не доходит.
+        Req::Likes => Err("Лайки читаются из памяти".into()),
         Req::Downloaded => Err("Скачанное читается без сети".into()),
         Req::Playlist { uid, kind } => {
             let full = c.playlist(&uid, &kind).await.map_err(err_str)?;

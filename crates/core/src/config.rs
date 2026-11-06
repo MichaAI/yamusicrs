@@ -46,6 +46,8 @@ pub struct Config {
     pub offline_mode: bool,
     /// В шапке альбома — полная дата выхода (день и месяц), а не только год.
     pub full_release_date: bool,
+    /// В «Плейлистах» первыми показывать «Мне нравится» и «Скачанное».
+    pub playlist_shortcuts: bool,
     /// Умное скачивание: сервер подбирает треки для офлайн-волны, они докачиваются сами.
     pub smart_download: bool,
     /// Качество умного скачивания — отдельно от качества стрима: lossless | hq | nq.
@@ -84,6 +86,7 @@ impl Default for Config {
             wave_after_list: true,
             offline_mode: false,
             full_release_date: false,
+            playlist_shortcuts: true,
             smart_download: false,
             smart_quality: Quality::Hq,
             smart_limit_gb: 2.0,

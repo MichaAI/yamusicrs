@@ -203,8 +203,20 @@ fun ShapeIconButton(
     size: Dp = 56.dp,
     container: Color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
     tint: Color = MaterialTheme.colorScheme.onSurface,
+    /** Смена значения подбрасывает иконку пружинкой (лайк и т.п.). */
+    pop: Any? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
+    val popScale = remember { Animatable(1f) }
+    var seen by remember { mutableStateOf(pop) }
+    LaunchedEffect(pop) {
+        if (pop != seen) {
+            seen = pop
+            popScale.snapTo(0.5f)
+            popScale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.3f, stiffness = 380f))
+        }
+    }
+    val tintNow by androidx.compose.animation.animateColorAsState(tint, label = "tint")
     val pressed by interaction.collectIsPressedAsState()
     val corner by animateFloatAsState(
         if (pressed) 30f else 50f,
@@ -219,7 +231,9 @@ fun ShapeIconButton(
             .clickable(interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, description, tint = tint, modifier = Modifier.size(size * 0.45f))
+        Icon(icon, description, tint = tintNow, modifier = Modifier.size(size * 0.45f).graphicsLayer {
+            scaleX = popScale.value; scaleY = popScale.value
+        })
     }
 }
 
@@ -472,9 +486,19 @@ fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain:
         photo -> modifier.clip(RoundedCornerShape(22.dp))
         else -> modifier
     }
+    // Из кеша — сразу; пришла из сети — проявляется и чуть «оседает».
+    val fade = remember(url) { Animatable(if (app.cached(url) != null) 1f else 0f) }
+    LaunchedEffect(img) { if (img != null && fade.value < 1f) fade.animateTo(1f, tween(320)) }
     Box(box) {
         img?.let {
-            Image(it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            Image(
+                it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().graphicsLayer {
+                    val f = fade.value
+                    alpha = f
+                    scaleX = 1.08f - 0.08f * f; scaleY = scaleX
+                },
+            )
         }
     }
 }

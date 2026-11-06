@@ -6,6 +6,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.SeekableTransitionState
 import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.rememberTransition
@@ -120,6 +123,10 @@ class Nav(private val app: YaApp) {
     }
 
     fun playlist(p: PlaylistItem) = push(app.core.openPlaylist(p.uid, p.kind), p.title)
+
+    fun likes() = push(app.core.likesPage(), "Мне нравится")
+
+    fun downloaded() = push(app.core.downloaded(), "Скачанное")
 
     fun similar(t: TrackItem) = push(app.core.openSimilar(t.id, t.title), "Похожие")
 
@@ -327,7 +334,7 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
         if (p.tracks.isEmpty()) item { Empty("В этом списке нет треков") }
         itemsIndexed(p.tracks, contentType = { _, _ -> "track" }) { i, t ->
             TrackRow(
-                app, t, current = now.id == t.id, playing = now.playing,
+                app, t, current = now.id == t.id, playing = now.playing, enter = i,
                 onLongClick = { nav.menu = MenuTarget(t, src, i) },
             ) { app.core.playFrom(src, i.toUInt()) }
         }
@@ -347,7 +354,11 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
 @Composable
 fun BoxScope.FloatingPlay(onClick: () -> Unit) {
     val lift = if (LocalNow.current.id != null) 100.dp else 20.dp
-    PlayButton(false, 64.dp, onClick = onClick, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = lift))
+    val pop = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { pop.animateTo(1f, spring(dampingRatio = 0.5f, stiffness = 300f)) }
+    val liftPx by animateDpAsState(lift, spring(dampingRatio = 0.7f, stiffness = 300f), label = "lift")
+    PlayButton(false, 64.dp, onClick = onClick, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = liftPx)
+        .graphicsLayer { scaleX = pop.value; scaleY = pop.value })
 }
 
 /**
@@ -404,7 +415,7 @@ private fun Chip(text: String) {
         text,
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSecondaryContainer,
-        modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.secondaryContainer)
+        modifier = Modifier.appear().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.secondaryContainer)
             .padding(horizontal = 10.dp, vertical = 4.dp),
     )
 }
@@ -428,14 +439,23 @@ fun tracksWord(n: Int): String {
 private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
     val now = LocalNow.current
     var allTracks by rememberSaveable { mutableStateOf(false) }
+    var allFamiliar by rememberSaveable { mutableStateOf(false) }
     val bg = MaterialTheme.colorScheme.background
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     Box(Modifier.fillMaxSize()) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 120.dp)) {
         item(contentType = "hero") {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val h = minOf(maxWidth, 460.dp)
                 Box(Modifier.fillMaxWidth().height(h)) {
-                    Art(app, p.artist.photo, Modifier.fillMaxSize(), corner = 0.dp)
+                    // Параллакс: фото уезжает вдвое медленнее списка и чуть темнеет.
+                    Art(app, p.artist.photo, Modifier.fillMaxSize().graphicsLayer {
+                        val off = if (listState.firstVisibleItemIndex == 0) listState.firstVisibleItemScrollOffset.toFloat() else size.height
+                        translationY = off * 0.5f
+                        val k = 1f + (off / size.height) * 0.12f
+                        scaleX = k; scaleY = k
+                        alpha = 1f - (off / size.height) * 0.6f
+                    }, corner = 0.dp)
                     // Фото растворяется в фон, имя читается поверх.
                     Box(
                         Modifier.fillMaxSize().background(
@@ -455,7 +475,7 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
                         fontWeight = FontWeight.Black,
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.align(Alignment.BottomStart).padding(horizontal = 20.dp),
+                        modifier = Modifier.align(Alignment.BottomStart).padding(horizontal = 20.dp).appear(),
                     )
                 }
             }
@@ -494,7 +514,7 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
             val shown = if (allTracks) p.tracks else p.tracks.take(5)
             itemsIndexed(shown, contentType = { _, _ -> "track" }) { i, t ->
                 TrackRow(
-                    app, t, current = now.id == t.id, playing = now.playing, rank = i + 1,
+                    app, t, current = now.id == t.id, playing = now.playing, enter = i, rank = i + 1,
                     onLongClick = { nav.menu = MenuTarget(t, src, i) },
                 ) { app.core.playFrom(src, i.toUInt()) }
             }
@@ -502,6 +522,24 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
                 item {
                     TextButton(onClick = { allTracks = !allTracks }, Modifier.padding(horizontal = 12.dp)) {
                         Text(if (allTracks) "Свернуть" else "Все ${tracksWord(p.tracks.size)}")
+                    }
+                }
+            }
+        }
+        if (p.familiar.isNotEmpty()) {
+            item { Section("Знакомое вам", 20.dp) }
+            val shown = if (allFamiliar) p.familiar else p.familiar.take(5)
+            itemsIndexed(shown, contentType = { _, _ -> "track" }) { i, t ->
+                val at = p.tracks.size + i
+                TrackRow(
+                    app, t, current = now.id == t.id, playing = now.playing, enter = i,
+                    onLongClick = { nav.menu = MenuTarget(t, src, at) },
+                ) { app.core.playFrom(src, at.toUInt()) }
+            }
+            if (p.familiar.size > 5) {
+                item {
+                    TextButton(onClick = { allFamiliar = !allFamiliar }, Modifier.padding(horizontal = 12.dp)) {
+                        Text(if (allFamiliar) "Свернуть" else "Все ${tracksWord(p.familiar.size)}")
                     }
                 }
             }
@@ -540,7 +578,7 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
         container = Color.Black.copy(alpha = 0.35f),
         tint = Color.White,
     )
-    if (p.tracks.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
+    if (p.tracks.isNotEmpty() || p.familiar.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
     }
 }
 
@@ -552,7 +590,7 @@ fun Section(title: String, inset: Dp = 24.dp) {
         title,
         style = MaterialTheme.typography.titleLarge,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(start = inset, end = inset, top = 24.dp, bottom = 8.dp),
+        modifier = Modifier.appear().padding(start = inset, end = inset, top = 24.dp, bottom = 8.dp),
     )
 }
 
@@ -576,7 +614,7 @@ fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
     // Концентрично: обложка 20 + отступ 6 = 26.
     Column(
         (if (width != null) Modifier.width(width + 12.dp) else Modifier.fillMaxWidth())
-            .clip(RoundedCornerShape(26.dp)).clickable(onClick = onClick).padding(6.dp),
+            .bounceClick(RoundedCornerShape(26.dp), onClick = onClick).padding(6.dp),
     ) {
         Art(app, a.cover, if (width != null) Modifier.size(width) else Modifier.fillMaxWidth().aspectRatio(1f), corner = 20.dp)
         Spacer(Modifier.height(8.dp))
@@ -593,7 +631,7 @@ fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
 fun PlaylistCard(app: YaApp, p: PlaylistItem, width: Dp?, onClick: () -> Unit) {
     Column(
         (if (width != null) Modifier.width(width + 12.dp) else Modifier.fillMaxWidth())
-            .clip(RoundedCornerShape(26.dp)).clickable(onClick = onClick).padding(6.dp),
+            .bounceClick(RoundedCornerShape(26.dp), onClick = onClick).padding(6.dp),
     ) {
         Box(
             if (width != null) Modifier.size(width) else Modifier.fillMaxWidth().aspectRatio(1f),
@@ -620,7 +658,7 @@ fun PlaylistCard(app: YaApp, p: PlaylistItem, width: Dp?, onClick: () -> Unit) {
 @Composable
 fun ArtistCircle(app: YaApp, a: ArtistItem, onClick: () -> Unit) {
     Column(
-        Modifier.width(100.dp).clip(RoundedCornerShape(24.dp)).clickable(onClick = onClick).padding(vertical = 6.dp),
+        Modifier.width(100.dp).bounceClick(RoundedCornerShape(24.dp), onClick = onClick).padding(vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Art(app, a.photo, Modifier.size(84.dp), corner = 42.dp)
@@ -724,7 +762,7 @@ private fun SearchResults(app: YaApp, nav: Nav, p: Page.Search, src: Source) {
             item { Section("Треки") }
             itemsIndexed(p.tracks, contentType = { _, _ -> "track" }) { i, t ->
                 TrackRow(
-                    app, t, current = now.id == t.id, playing = now.playing,
+                    app, t, current = now.id == t.id, playing = now.playing, enter = i,
                     onLongClick = { nav.menu = MenuTarget(t, src, i) },
                 ) { app.core.playFrom(src, i.toUInt()) }
             }
@@ -802,12 +840,25 @@ fun ReleasesTab(app: YaApp, nav: Nav) {
 @Composable
 fun PlaylistsGrid(app: YaApp, nav: Nav) {
     val (own, personal) = app.playlists.collectAsStateWithLifecycle().value
-    if (own.isEmpty() && personal.isEmpty()) {
+    val st by app.settings.collectAsStateWithLifecycle()
+    val likes by app.likes.collectAsStateWithLifecycle()
+    val shortcuts = st?.playlistShortcuts == true
+    if (own.isEmpty() && personal.isEmpty() && !shortcuts) {
         Empty("Плейлисты, которые вы создадите или сохраните в Яндекс Музыке, появятся здесь")
         return
     }
     LazyVerticalGrid(GridCells.Adaptive(156.dp), Modifier.fillMaxSize(), contentPadding = gridPadding()) {
         fun full(block: @Composable () -> Unit) = item(span = { GridItemSpan(maxLineSpan) }) { block() }
+        if (shortcuts) {
+            full {
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ShortcutCard(Ic.Heart, "Мне нравится", tracksWord(likes.size), MaterialTheme.colorScheme.primaryContainer,
+                        MaterialTheme.colorScheme.onPrimaryContainer, Modifier.weight(1f).appear(0)) { nav.likes() }
+                    ShortcutCard(Ic.Download, "Скачанное", tracksWord(st?.libraryTracks?.toInt() ?: 0), MaterialTheme.colorScheme.tertiaryContainer,
+                        MaterialTheme.colorScheme.onTertiaryContainer, Modifier.weight(1f).appear(1)) { nav.downloaded() }
+                }
+            }
+        }
         if (own.isNotEmpty()) {
             full { Section("Мои плейлисты", 8.dp) }
             items(own, key = { "o" + it.uid + ":" + it.kind }) { pl -> PlaylistCard(app, pl, null) { nav.playlist(pl) } }
@@ -816,6 +867,19 @@ fun PlaylistsGrid(app: YaApp, nav: Nav) {
             full { Section("Настроили для вас", 8.dp) }
             items(personal, key = { "p" + it.uid + ":" + it.kind }) { pl -> PlaylistCard(app, pl, null) { nav.playlist(pl) } }
         }
+    }
+}
+
+/** Плитка-ярлык среди плейлистов: «Мне нравится», «Скачанное». */
+@Composable
+private fun ShortcutCard(icon: ImageVector, title: String, hint: String, bg: Color, fg: Color, modifier: Modifier, onClick: () -> Unit) {
+    Column(
+        modifier.bounceClick(RoundedCornerShape(26.dp), onClick = onClick).background(bg).padding(16.dp),
+    ) {
+        Icon(icon, null, tint = fg, modifier = Modifier.size(28.dp))
+        Spacer(Modifier.height(18.dp))
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = fg, maxLines = 1)
+        Text(hint, style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.75f), maxLines = 1)
     }
 }
 
@@ -846,7 +910,7 @@ fun Downloaded(app: YaApp, nav: Nav) {
                 }
                 else -> itemsIndexed(tracks, contentType = { _, _ -> "track" }) { i, t ->
                     TrackRow(
-                        app, t, current = now.id == t.id, playing = now.playing,
+                        app, t, current = now.id == t.id, playing = now.playing, enter = i,
                         onLongClick = { nav.menu = MenuTarget(t, src, i) },
                     ) { app.core.playFrom(src, i.toUInt()) }
                 }
@@ -890,7 +954,7 @@ private fun StorageBar(s: SettingsData) {
             )
         }
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Legend(ownColor, "Сыгранное и своё, ${gb(own)} ГБ")
             if (s.smartDownload || s.smartUsedGb > 0f) Legend(smartColor, "Для офлайн-волны, ${gb(s.smartUsedGb)} из ${s.smartLimitGb.toInt()} ГБ")
         }
@@ -899,9 +963,10 @@ private fun StorageBar(s: SettingsData) {
 
 @Composable
 private fun Legend(color: Color, text: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(color))
-        Spacer(Modifier.width(6.dp))
+    // Точка — у первой строки, даже если подпись переносится.
+    Row(verticalAlignment = Alignment.Top) {
+        Box(Modifier.padding(top = 5.dp).size(8.dp).clip(RoundedCornerShape(4.dp)).background(color))
+        Spacer(Modifier.width(8.dp))
         Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -917,10 +982,13 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
         options.forEachIndexed { i, o ->
             val on = i == selected
             val bg by androidx.compose.animation.animateColorAsState(
-                if (on) MaterialTheme.colorScheme.primary else Color.Transparent, label = "seg",
+                if (on) MaterialTheme.colorScheme.primary else Color.Transparent, spring(stiffness = 400f), label = "seg",
+            )
+            val fg by androidx.compose.animation.animateColorAsState(
+                if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface, label = "segFg",
             )
             Box(
-                Modifier.weight(1f).clip(RoundedCornerShape(20.dp)).background(bg).clickable { onSelect(i) }
+                Modifier.weight(1f).bounceClick(RoundedCornerShape(20.dp)) { onSelect(i) }.background(bg)
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -928,7 +996,7 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
                     o,
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
-                    color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                    color = fg,
                     maxLines = 1,
                 )
             }
@@ -1023,6 +1091,11 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
             }
         }
         Group(null, null) {
+            Toggle("Ярлыки в плейлистах", "«Мне нравится» и «Скачанное» — первыми плитками на вкладке «Плейлисты»", s.playlistShortcuts) {
+                app.core.setPlaylistShortcuts(it)
+            }
+        }
+        Group(null, null) {
             Toggle("Слушать на других устройствах", s.ynisonStatus.replaceFirstChar { it.uppercase() }.let {
                 if (s.ynison) "Ynison: $it" else "Телефон или компьютер с Яндекс Музыкой включает музыку здесь, а отсюда — там"
             }, s.ynison) { app.core.setYnison(it) }
@@ -1068,7 +1141,31 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
             Spacer(Modifier.width(12.dp))
             Text("Офлайн и докачка", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
+        var confirm by remember { mutableStateOf<Boolean?>(null) }
+        confirm?.let { smartOnly ->
+            AlertDialog(
+                onDismissRequest = { confirm = null },
+                title = { Text(if (smartOnly) "Удалить подобранное?" else "Удалить всё скачанное?") },
+                text = {
+                    Text(
+                        if (smartOnly) "Исчезнут треки, которые Яндекс подобрал для офлайн-волны. Сыгранное и своё останется."
+                        else "Все скачанные треки пропадут с телефона, без сети играть будет нечего. Они скачаются снова, когда вы их включите.",
+                    )
+                },
+                confirmButton = { TextButton(onClick = { app.core.clearDownloads(smartOnly); confirm = null }) { Text("Удалить") } },
+                dismissButton = { TextButton(onClick = { confirm = null }) { Text("Отмена") } },
+            )
+        }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+            Group(
+                "Скачанное",
+                "${tracksWord(s.libraryTracks.toInt())}, ${"%.1f".format(s.libraryGb)} ГБ; из них подобрано для офлайн-волны ${"%.1f".format(s.smartUsedGb)} ГБ",
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { confirm = true }, enabled = s.smartUsedGb > 0f) { Text("Удалить подобранное") }
+                    OutlinedButton(onClick = { confirm = false }, enabled = s.libraryTracks > 0u) { Text("Удалить всё") }
+                }
+            }
             Group(null, null) {
                 Toggle(
                     "Офлайн-режим",

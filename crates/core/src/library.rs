@@ -214,6 +214,25 @@ impl Library {
         n
     }
 
+    /// Стирает скачанное: всё или только подобранное для офлайн-волны. Возвращает число удалённых.
+    pub fn clear(&self, only_smart: bool) -> usize {
+        let n = {
+            let mut idx = self.index.lock();
+            let ids: Vec<String> =
+                idx.tracks.iter().filter(|(_, e)| !only_smart || e.smart).map(|(k, _)| k.clone()).collect();
+            for id in &ids {
+                if let Some(e) = idx.tracks.remove(id) {
+                    self.remove_file(&e.path);
+                }
+            }
+            ids.len()
+        };
+        if n > 0 {
+            self.save_index();
+        }
+        n
+    }
+
     /// Удаляет файл и опустевшие папки альбома и артиста.
     fn remove_file(&self, rel: &Path) {
         let p = self.root.join(rel);

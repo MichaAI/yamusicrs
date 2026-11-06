@@ -741,6 +741,7 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                 if (s.liked) Ic.Heart else Ic.HeartOutline,
                 "Нравится",
                 { app.core.toggleLike() },
+                pop = s.liked,
                 size = 64.dp,
                 container = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.8f),
                 tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
@@ -867,7 +868,7 @@ private fun Likes(app: YaApp, nav: Nav, loading: Boolean) {
     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
         itemsIndexed(shown, key = { _, it -> it.index }, contentType = { _, _ -> "track" }) { _, (i, t) ->
             TrackRow(
-                app, t, current = now.id == t.id, playing = now.playing,
+                app, t, current = now.id == t.id, playing = now.playing, enter = i,
                 onLongClick = { nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Likes, i) },
             ) { app.core.playLikes(i.toUInt()) }
         }
@@ -939,6 +940,8 @@ fun TrackRow(
     dim: Boolean = false,
     /** Место в рейтинге (популярное исполнителя) — цифрой перед обложкой. */
     rank: Int? = null,
+    /** Номер среди первых строк списка — для каскадного появления. */
+    enter: Int = 99,
     onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -947,11 +950,21 @@ fun TrackRow(
         dim -> 0.55f
         else -> 1f
     }
-    val bg = if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
+    val bg by animateColorAsState(
+        if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0f),
+        label = "rowBg",
+    )
+    val titleColor by animateColorAsState(
+        if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface, label = "rowTitle",
+    )
+    val coverCorner by androidx.compose.animation.core.animateDpAsState(
+        if (current) 26.dp else 14.dp, spring(dampingRatio = 0.6f, stiffness = 300f), label = "rowCorner",
+    )
     Row(
         // Концентрично миниатюре: 14 + 10 (отступ) = 24.
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(24.dp)).background(bg)
-            .combinedClickable(onLongClick = onLongClick, onClick = { if (t.available) onClick() })
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp).appear(enter)
+            .bounceClick(RoundedCornerShape(24.dp), onLongClick = onLongClick) { if (t.available) onClick() }
+            .background(bg)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -965,10 +978,12 @@ fun TrackRow(
             )
         }
         Box(contentAlignment = Alignment.Center) {
-            Art(app, t.thumb, Modifier.size(52.dp), corner = if (current) 26.dp else 14.dp)
-            if (current) {
-                Box(Modifier.size(52.dp).clip(RoundedCornerShape(26.dp)).background(Color.Black.copy(alpha = 0.45f)))
-                EqBars(playing, MaterialTheme.colorScheme.primary)
+            Art(app, t.thumb, Modifier.size(52.dp), corner = coverCorner)
+            androidx.compose.animation.AnimatedVisibility(current, enter = fadeIn() + scaleIn(initialScale = 0.6f), exit = fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.6f)) {
+                Box(contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(52.dp).clip(RoundedCornerShape(coverCorner)).background(Color.Black.copy(alpha = 0.45f)))
+                    EqBars(playing, MaterialTheme.colorScheme.primary)
+                }
             }
         }
         Spacer(Modifier.width(14.dp))
@@ -979,7 +994,7 @@ fun TrackRow(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = if (current) FontWeight.Bold else FontWeight.Medium,
-                color = (if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface).copy(alpha = alpha),
+                color = titleColor.copy(alpha = alpha),
             )
             Text(
                 t.artists,
@@ -1112,6 +1127,7 @@ private fun MiniPlayer(
                         if (s.liked) Ic.Heart else Ic.HeartOutline,
                         "Нравится",
                         { app.core.toggleLike() },
+                pop = s.liked,
                         size = 48.dp,
                         container = Color.Transparent,
                         tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1573,6 +1589,7 @@ private fun ColumnScope.StageInfo(
             if (s.liked) Ic.Heart else Ic.HeartOutline,
             "Нравится",
             { app.core.toggleLike() },
+                pop = s.liked,
             size = 52.dp,
             container = Color.Transparent,
             tint = if (s.liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,

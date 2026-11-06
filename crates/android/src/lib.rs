@@ -196,6 +196,8 @@ pub struct SettingsData {
     pub offline_mode: bool,
     /// Полная дата выхода альбома в его шапке.
     pub full_release_date: bool,
+    /// «Мне нравится» и «Скачанное» первыми среди плейлистов.
+    pub playlist_shortcuts: bool,
     /// Умное скачивание треков для офлайн-волны.
     pub smart_download: bool,
     /// Его качество: `lossless`, `hq` или `nq`.
@@ -291,6 +293,9 @@ enum Cmd {
     SmartLimit(f32),
     SmartWindow(u8, u8),
     SmartWifiOnly(bool),
+    PlaylistShortcuts(bool),
+    /// Стереть скачанное; `true` — только подобранное для офлайн-волны.
+    ClearDownloads(bool),
     Ynison(bool),
     Transfer(String),
     RemotePlayPause,
@@ -461,6 +466,11 @@ impl Core {
         self.open(Req::Chart)
     }
 
+    /// «Мне нравится» страницей (для ярлыка среди плейлистов).
+    pub fn likes_page(&self) -> u64 {
+        self.open(Req::Likes)
+    }
+
     /// Скачанное (работает и без сети).
     pub fn downloaded(&self) -> u64 {
         self.open(Req::Downloaded)
@@ -553,6 +563,15 @@ impl Core {
     /// Окно докачки, часы [с, до); равные — круглые сутки.
     pub fn set_smart_window(&self, from: u8, to: u8) {
         self.send(Cmd::SmartWindow(from, to));
+    }
+
+    pub fn set_playlist_shortcuts(&self, on: bool) {
+        self.send(Cmd::PlaylistShortcuts(on));
+    }
+
+    /// Стереть скачанное: всё или только подобранное для офлайн-волны.
+    pub fn clear_downloads(&self, only_smart: bool) {
+        self.send(Cmd::ClearDownloads(only_smart));
     }
 
     pub fn set_smart_wifi_only(&self, on: bool) {
@@ -940,6 +959,13 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             e.cfg.full_release_date = on;
             e.cfg.save(&e.paths);
         }
+        Cmd::PlaylistShortcuts(on) => {
+            e.cfg.playlist_shortcuts = on;
+            e.cfg.save(&e.paths);
+        }
+        Cmd::ClearDownloads(only_smart) => {
+            e.library.clear(only_smart);
+        }
         Cmd::SmartDownload(on) => e.set_smart_download(on),
         Cmd::SmartQuality(q) => {
             if let Some(q) = parse_quality(&q) {
@@ -1049,6 +1075,7 @@ impl Publisher {
             ynison: e.cfg.ynison,
             offline_mode: e.cfg.offline_mode,
             full_release_date: e.cfg.full_release_date,
+            playlist_shortcuts: e.cfg.playlist_shortcuts,
             smart_download: e.cfg.smart_download,
             smart_quality: quality_str(e.cfg.smart_quality).into(),
             smart_limit_gb: e.cfg.smart_limit_gb as f32,
