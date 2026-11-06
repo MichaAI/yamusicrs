@@ -610,7 +610,7 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
         item(contentType = "hero") {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val h = minOf(maxWidth, 460.dp)
-                Box(Modifier.fillMaxWidth().height(h)) {
+                Box(Modifier.fillMaxWidth().height(h).clip(androidx.compose.ui.graphics.RectangleShape)) {
                     // Параллакс: фото уезжает вдвое медленнее списка и чуть темнеет.
                     Art(app, p.artist.photo, Modifier.fillMaxSize().graphicsLayer {
                         val off = if (listState.firstVisibleItemIndex == 0) listState.firstVisibleItemScrollOffset.toFloat() else size.height
