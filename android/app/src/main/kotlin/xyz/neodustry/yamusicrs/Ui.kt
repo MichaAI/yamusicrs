@@ -503,7 +503,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     QueueSheet(app, nav, s.queuePos?.toInt())
     DevicesSheet(app, nav, s)
     TrackMenu(app, nav)
-    ArtistPicker(nav)
+    ArtistPicker(app, nav)
     LyricsSheet(app, nav)
     }
 }

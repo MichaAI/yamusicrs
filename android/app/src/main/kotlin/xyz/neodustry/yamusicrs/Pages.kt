@@ -26,6 +26,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -74,6 +75,25 @@ import uniffi.yamusic_android.TrackItem
 /** Открытая страница: id запроса в ядре и заголовок, пока она грузится. */
 data class Route(val id: ULong, val title: String)
 
+/**
+ * Запоминает рамку обложки карточки; `tap()` перед переходом отдаёт её навигации, и страница
+ * принимает обложку на своё место.
+ */
+@Composable
+fun rememberCoverTap(url: String?): Pair<Modifier, () -> Unit> {
+    val nav = LocalNav.current
+    val box = remember { arrayOfNulls<androidx.compose.ui.geometry.Rect>(1) }
+    val mod = Modifier.onGloballyPositioned { box[0] = it.boundsInRoot() }
+    val tap = { box[0]?.let { r -> if (url != null) nav.tapped = Tap(r, url, 20.dp) }; Unit }
+    return mod to tap
+}
+
+/** Откуда летит обложка: рамка в окне, адрес картинки, скругление. */
+data class Tap(val from: androidx.compose.ui.geometry.Rect, val url: String, val corner: Dp)
+
+/** Полёт обложки на страницу `routeId`. */
+data class Fly(val routeId: ULong, val tap: Tap)
+
 /** Трек, для которого открыто меню: откуда он и под каким индексом. */
 data class MenuTarget(val track: TrackItem, val source: Source, val index: Int)
 
@@ -92,7 +112,16 @@ class Nav(private val app: YaApp) {
     /** Текст песни листом, чтобы выделить и скопировать. */
     var lyrics by mutableStateOf(false)
 
+    /** Обложка карточки, по которой только что нажали: страница, что откроется, «посадит» её на своё место. */
+    var tapped: Tap? = null
+    var fly by mutableStateOf<Fly?>(null)
+    var flyTarget by mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
+    var flyUrl: String? = null
+
     private fun push(id: ULong, title: String) {
+        fly = tapped?.let { Fly(id, it) }
+        flyTarget = null
+        tapped = null
         stage = false
         queue = false
         menu = null
@@ -133,6 +162,7 @@ class Nav(private val app: YaApp) {
     fun chart() = push(app.core.chart(), "Чарт")
 
     fun back() {
+        fly = null
         stack.removeLastOrNull()?.let { app.closePage(it.id) }
     }
 
@@ -208,6 +238,50 @@ fun PageHost(app: YaApp, nav: Nav) {
             }
         } else {
             Box(Modifier.fillMaxSize())
+        }
+    }
+    FlyOverlay(app, nav)
+}
+
+/** Обложка нажатой карточки перелетает на своё место на открывшейся странице. */
+@Composable
+private fun FlyOverlay(app: YaApp, nav: Nav) {
+    val fly = nav.fly ?: return
+    val to = nav.flyTarget
+    val t = remember(fly) { Animatable(0f) }
+    // Страница так и не отдала место (ошибка, нет обложки) — не держим.
+    LaunchedEffect(fly) {
+        kotlinx.coroutines.delay(5000)
+        if (nav.fly === fly) nav.fly = null
+    }
+    LaunchedEffect(fly, to != null) {
+        if (to == null) return@LaunchedEffect
+        // Картинка страницы к концу полёта уже в кеше — без подмены на лету.
+        nav.flyUrl?.let { app.cover(it) }
+        t.animateTo(1f, tween(520, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        if (nav.fly === fly) nav.fly = null
+    }
+    var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
+        if (to != null) {
+            val f = fly.tap.from
+            val k = t.value
+            val d = androidx.compose.ui.platform.LocalDensity.current
+            Art(
+                app, fly.tap.url,
+                Modifier
+                    .offset {
+                        androidx.compose.ui.unit.IntOffset(
+                            (androidx.compose.ui.util.lerp(f.left, to.left, k) - origin.x).roundToInt(),
+                            (androidx.compose.ui.util.lerp(f.top, to.top, k) - origin.y).roundToInt(),
+                        )
+                    }
+                    .size(
+                        with(d) { androidx.compose.ui.util.lerp(f.width, to.width, k).toDp() },
+                        with(d) { androidx.compose.ui.util.lerp(f.height, to.height, k).toDp() },
+                    ),
+                corner = androidx.compose.ui.unit.lerp(fly.tap.corner, 36.dp, k),
+            )
         }
     }
 }
@@ -296,7 +370,21 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
         item(contentType = "hero") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 if (p.cover != null) {
-                    Art(app, p.cover, Modifier.size(232.dp), corner = 36.dp)
+                    val pid = (src as? Source.Page)?.id
+                    Art(
+                        app, p.cover,
+                        Modifier.size(232.dp)
+                            .onGloballyPositioned { c ->
+                                // Сюда прилетает обложка нажатой карточки.
+                                if (nav.fly?.routeId == pid) {
+                                    val r = c.boundsInRoot()
+                                    if (nav.flyTarget != r) nav.flyTarget = r
+                                    nav.flyUrl = p.cover
+                                }
+                            }
+                            .graphicsLayer { alpha = if (nav.fly?.routeId == pid) 0f else 1f },
+                        corner = 36.dp,
+                    )
                     Spacer(Modifier.height(20.dp))
                 }
                 Text(
@@ -309,6 +397,10 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
                 )
                 val a = p.album
                 if (a != null) {
+                    p.tracks.firstOrNull()?.artistList?.takeIf { it.isNotEmpty() }?.let {
+                        AvatarStack(app, it, 40.dp, MaterialTheme.colorScheme.background)
+                        Spacer(Modifier.height(6.dp))
+                    }
                     Text(
                         a.artists,
                         style = MaterialTheme.typography.titleMedium,
@@ -611,12 +703,13 @@ fun LazyGridScope.albumGrid(app: YaApp, nav: Nav, albums: List<AlbumItem>) {
 /** Обложка альбома и подписи; `width == null` — по ширине ячейки сетки. */
 @Composable
 fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
+    val (cover, tap) = rememberCoverTap(a.cover)
     // Концентрично: обложка 20 + отступ 6 = 26.
     Column(
         (if (width != null) Modifier.width(width + 12.dp) else Modifier.fillMaxWidth())
-            .bounceClick(RoundedCornerShape(26.dp), onClick = onClick).padding(6.dp),
+            .bounceClick(RoundedCornerShape(26.dp), onClick = { tap(); onClick() }).padding(6.dp),
     ) {
-        Art(app, a.cover, if (width != null) Modifier.size(width) else Modifier.fillMaxWidth().aspectRatio(1f), corner = 20.dp)
+        Art(app, a.cover, (if (width != null) Modifier.size(width) else Modifier.fillMaxWidth().aspectRatio(1f)).then(cover), corner = 20.dp)
         Spacer(Modifier.height(8.dp))
         Text(a.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Text(a.artists, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -629,15 +722,16 @@ fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
 
 @Composable
 fun PlaylistCard(app: YaApp, p: PlaylistItem, width: Dp?, onClick: () -> Unit) {
+    val (cover, tap) = rememberCoverTap(p.cover)
     Column(
         (if (width != null) Modifier.width(width + 12.dp) else Modifier.fillMaxWidth())
-            .bounceClick(RoundedCornerShape(26.dp), onClick = onClick).padding(6.dp),
+            .bounceClick(RoundedCornerShape(26.dp), onClick = { tap(); onClick() }).padding(6.dp),
     ) {
         Box(
             if (width != null) Modifier.size(width) else Modifier.fillMaxWidth().aspectRatio(1f),
             contentAlignment = Alignment.Center,
         ) {
-            Art(app, p.cover, Modifier.fillMaxSize(), corner = 20.dp)
+            Art(app, p.cover, Modifier.fillMaxSize().then(cover), corner = 20.dp)
             if (p.cover == null) Icon(Ic.Queue, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(40.dp))
         }
         Spacer(Modifier.height(8.dp))
@@ -1311,6 +1405,10 @@ fun TrackMenu(app: YaApp, nav: Nav) {
                     Text(t.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(t.artists, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
+                if (t.artistList.isNotEmpty()) {
+                    Spacer(Modifier.width(12.dp))
+                    AvatarStack(app, t.artistList, 36.dp, MaterialTheme.colorScheme.surfaceContainer, max = 3)
+                }
             }
             Spacer(Modifier.height(8.dp))
             fun close() { nav.menu = null }
@@ -1323,7 +1421,7 @@ fun TrackMenu(app: YaApp, nav: Nav) {
             }
             // Каждый исполнитель — своим пунктом: к любому из них, а не только к первому.
             if (t.artistList.isEmpty() && t.artistId != null) MenuItem(Ic.Person, t.artists) { nav.artist(t.artistId, t.artists) }
-            t.artistList.forEach { a -> MenuItem(Ic.Person, a.name) { nav.artist(a.id, a.name) } }
+            t.artistList.forEach { a -> MenuItem(Ic.Person, a.name, lead = { Avatar(app, a, 36.dp) }) { nav.artist(a.id, a.name) } }
             if (t.albumId != null) MenuItem(Ic.Album, t.album.ifEmpty { "Альбом" }) { nav.album(t.albumId, t.album) }
             MenuItem(Ic.Similar, "Похожие треки") { nav.similar(t) }
             if (hasLyrics) MenuItem(Ic.Lyrics, "Текст песни целиком") { close(); nav.lyrics = true }
@@ -1333,7 +1431,7 @@ fun TrackMenu(app: YaApp, nav: Nav) {
 
 /** У трека несколько исполнителей — к какому перейти. */
 @Composable
-fun ArtistPicker(nav: Nav) {
+fun ArtistPicker(app: YaApp, nav: Nav) {
     val list = nav.artists ?: return
     ModalBottomSheet(
         onDismissRequest = { nav.artists = null },
@@ -1341,13 +1439,11 @@ fun ArtistPicker(nav: Nav) {
         shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
     ) {
         Column(Modifier.padding(bottom = 24.dp)) {
-            Text(
-                "Исполнители",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Black,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-            )
-            list.forEach { a -> MenuItem(Ic.Person, a.name) { nav.artist(a.id, a.name) } }
+            Row(Modifier.padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Исполнители", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                AvatarStack(app, list, 40.dp, MaterialTheme.colorScheme.surfaceContainer, max = 4)
+            }
+            list.forEach { a -> MenuItem(Ic.Person, a.name, lead = { Avatar(app, a, 40.dp) }) { nav.artist(a.id, a.name) } }
         }
     }
 }
@@ -1392,13 +1488,17 @@ fun LyricsSheet(app: YaApp, nav: Nav) {
 }
 
 @Composable
-private fun MenuItem(icon: ImageVector, text: String, onClick: () -> Unit) {
+private fun MenuItem(icon: ImageVector, text: String, lead: (@Composable () -> Unit)? = null, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(20.dp)).clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+        if (lead != null) {
+            Box(Modifier.size(24.dp).wrapContentSize(unbounded = true)) { lead() }
+        } else {
+            Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+        }
         Spacer(Modifier.width(18.dp))
         Text(text, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }

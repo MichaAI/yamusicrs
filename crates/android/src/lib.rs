@@ -65,7 +65,7 @@ impl From<&Track> for TrackItem {
                 .map(|a| ArtistItem {
                     id: a.id.clone(),
                     name: a.name.clone(),
-                    photo: None,
+                    photo: a.cover_uri().map(|u| api::cover_url(u, 200)),
                 })
                 .collect(),
             explicit: t.explicit(),
@@ -255,6 +255,8 @@ pub trait CoreListener: Send + Sync {
     fn on_settings(&self, settings: SettingsData);
     /// Карточка исполнителя играющего трека (приходит после `on_state` с этим треком).
     fn on_artist(&self, card: ArtistCard);
+    /// Фото исполнителя по запросу `request_artist_photos`; `None` — фото нет.
+    fn on_artist_photo(&self, id: String, photo: Option<String>);
 }
 
 enum Cmd {
@@ -293,6 +295,7 @@ enum Cmd {
     SmartLimit(f32),
     SmartWindow(u8, u8),
     SmartWifiOnly(bool),
+    ArtistPhotos(Vec<String>),
     PlaylistShortcuts(bool),
     /// Стереть скачанное; `true` — только подобранное для офлайн-волны.
     ClearDownloads(bool),
@@ -565,6 +568,11 @@ impl Core {
         self.send(Cmd::SmartWindow(from, to));
     }
 
+    /// Доспросить фото исполнителей (ответы придут в `on_artist_photo`).
+    pub fn request_artist_photos(&self, ids: Vec<String>) {
+        self.send(Cmd::ArtistPhotos(ids));
+    }
+
     pub fn set_playlist_shortcuts(&self, on: bool) {
         self.send(Cmd::PlaylistShortcuts(on));
     }
@@ -690,6 +698,16 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
                 None | Some(Cmd::Shutdown) => {
                     engine.shutdown();
                     return;
+                }
+                Some(Cmd::ArtistPhotos(ids)) => {
+                    for id in ids {
+                        let Some(c) = engine.client() else { break };
+                        let l = listener.clone();
+                        tokio::spawn(async move {
+                            let photo = c.artist_photo(&id).await.ok().flatten().map(|u| api::cover_url(&u, 200));
+                            l.on_artist_photo(id, photo);
+                        });
+                    }
                 }
                 Some(c) => command(&mut engine, &mut pages, &ptx, c),
             },
@@ -978,6 +996,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             e.cfg.smart_to_hour = to % 24;
             e.cfg.save(&e.paths);
         }
+        Cmd::ArtistPhotos(_) => {}
         Cmd::SmartWifiOnly(on) => {
             e.cfg.smart_wifi_only = on;
             e.cfg.save(&e.paths);

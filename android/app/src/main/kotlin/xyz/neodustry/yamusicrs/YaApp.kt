@@ -57,6 +57,20 @@ class YaApp : Application(), CoreListener {
     /** Палитра под обложку играющего трека, как тема TUI. */
     val palette = MutableStateFlow(Pal.Default)
 
+    /** Фото исполнителей, доспрошенные у ядра (id → адрес); у кого нет — не попадают. */
+    val artistPhotos = androidx.compose.runtime.mutableStateMapOf<String, String>()
+    private val askedPhotos = HashSet<String>()
+
+    /** Спросить фото тех, кого ещё не спрашивали. */
+    fun askPhotos(ids: List<String>) {
+        val fresh = synchronized(askedPhotos) { ids.filter { it.isNotEmpty() && askedPhotos.add(it) } }
+        if (fresh.isNotEmpty()) core.requestArtistPhotos(fresh)
+    }
+
+    override fun onArtistPhoto(id: String, photo: String?) {
+        if (photo != null) artistPhotos[id] = photo
+    }
+
     lateinit var core: Core
         private set
 
