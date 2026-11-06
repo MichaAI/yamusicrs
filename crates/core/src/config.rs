@@ -52,6 +52,12 @@ pub struct Config {
     pub smart_quality: Quality,
     /// Сколько места отдать умному скачиванию, ГиБ.
     pub smart_limit_gb: f64,
+    /// Окно докачки по местному времени, часы [с, до); равные — круглые сутки.
+    /// Окно через полночь (23 → 7) тоже можно.
+    pub smart_from_hour: u8,
+    pub smart_to_hour: u8,
+    /// Докачивать только не по мобильной сети (как официальный клиент).
+    pub smart_wifi_only: bool,
 }
 
 impl Default for Config {
@@ -81,6 +87,9 @@ impl Default for Config {
             smart_download: false,
             smart_quality: Quality::Hq,
             smart_limit_gb: 2.0,
+            smart_from_hour: 0,
+            smart_to_hour: 0,
+            smart_wifi_only: true,
         }
     }
 }

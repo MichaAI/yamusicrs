@@ -51,16 +51,26 @@ pub enum Origin {
     Network { buf: Arc<StreamBuffer> },
 }
 
+/// Ранг качества для библиотеки (что лучше чего). «Авто» — как высокое: lossless оно не обещает.
 pub fn quality_rank(q: Quality) -> u8 {
     match q {
         Quality::Lossless => 3,
-        Quality::Hq => 2,
+        Quality::Hq | Quality::Auto => 2,
         Quality::Nq => 1,
     }
 }
 
-fn quality_from_rank(r: u8) -> Quality {
+/// Код для атомика текущего качества (ранги «Авто» и высокого совпадают).
+fn quality_code(q: Quality) -> u8 {
+    match q {
+        Quality::Auto => 0,
+        q => quality_rank(q),
+    }
+}
+
+fn quality_from_code(r: u8) -> Quality {
     match r {
+        0 => Quality::Auto,
         3 => Quality::Lossless,
         2 => Quality::Hq,
         _ => Quality::Nq,
@@ -72,7 +82,7 @@ impl Fetcher {
         Self {
             client,
             library,
-            quality: Arc::new(AtomicU8::new(quality_rank(quality))),
+            quality: Arc::new(AtomicU8::new(quality_code(quality))),
             active: Arc::default(),
             fast: Arc::new(AtomicBool::new(true)),
             warm: Arc::default(),
@@ -149,11 +159,11 @@ impl Fetcher {
     }
 
     pub fn quality(&self) -> Quality {
-        quality_from_rank(self.quality.load(Ordering::Relaxed))
+        quality_from_code(self.quality.load(Ordering::Relaxed))
     }
 
     pub fn set_quality(&self, q: Quality) {
-        self.quality.store(quality_rank(q), Ordering::Relaxed);
+        self.quality.store(quality_code(q), Ordering::Relaxed);
     }
 
     pub async fn open(&self, track: &Track) -> Result<(Source, Origin)> {
@@ -303,6 +313,8 @@ impl Fetcher {
                 c
             });
             let mut stream = resp.bytes_stream();
+            // Замер скорости для «Авто» — по самой загрузке, как это делает плеер мобильного клиента.
+            let (t0, mut got) = (Instant::now(), 0u64);
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk?;
                 let mut chunk = &chunk[..];
@@ -319,12 +331,17 @@ impl Fetcher {
                     c.apply_keystream(&mut chunk);
                 }
                 buf.push(&chunk)?;
+                got += chunk.len() as u64;
                 if let Some(l) = left.as_mut() {
                     *l -= chunk.len() as u64;
                     if *l == 0 {
                         break;
                     }
                 }
+            }
+            let ms = t0.elapsed().as_millis() as u64;
+            if got >= 256 * 1024 && ms > 0 {
+                crate::api::NET.measured((got * 8 / ms).min(i32::MAX as u64) as i32);
             }
             return Ok(());
         }

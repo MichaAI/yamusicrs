@@ -938,7 +938,8 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
 
 // ── настройки ───────────────────────────────────────────────────────────────
 
-private val QUALITIES = listOf("lossless" to "Lossless", "hq" to "Высокое", "nq" to "Экономия")
+private val QUALITIES = listOf("lossless" to "Lossless", "auto" to "Авто", "hq" to "Высокое", "nq" to "Экономия")
+private val QUALITIES_AUTO = QUALITIES
 private val CROSSFADES = listOf(0f, 3f, 6f, 10f)
 private val SMART_LIMITS = listOf(1f, 2f, 5f, 10f, 20f)
 
@@ -946,9 +947,25 @@ private val SMART_LIMITS = listOf(1f, 2f, 5f, 10f, 20f)
 fun SettingsTab(app: YaApp) {
     val st by app.settings.collectAsStateWithLifecycle()
     val s: SettingsData = st ?: return
+    var sub by rememberSaveable { mutableStateOf(false) }
+    androidx.activity.compose.BackHandler(sub) { sub = false }
+    AnimatedContent(
+        sub,
+        transitionSpec = {
+            val dir = if (targetState) 1 else -1
+            (slideInHorizontally { it * dir / 4 } + fadeIn()) togetherWith (slideOutHorizontally { -it * dir / 4 } + fadeOut())
+        },
+        label = "settingsSub",
+    ) { inSub ->
+        if (inSub) OfflineSettings(app, s) { sub = false } else MainSettings(app, s) { sub = true }
+    }
+}
+
+@Composable
+private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
         Header("Настройки", "") {}
-        Group("Качество", "Lossless — FLAC без потерь, Высокое — AAC 256, Экономия — для мобильного интернета") {
+        Group("Качество", "Lossless — FLAC без потерь, Авто — выбирает Яндекс по скорости сети, Высокое — AAC 256, Экономия — для мобильного интернета") {
             Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.quality }.coerceAtLeast(0), {
                 app.core.setQuality(QUALITIES[it].first)
             }, Modifier.fillMaxWidth())
@@ -989,44 +1006,16 @@ fun SettingsTab(app: YaApp) {
                 app.core.setWaveAfterList(it)
             }
         }
+        // Офлайн-режим и докачка — своим экраном: настроек там много.
         Group(null, null) {
-            Toggle(
-                "Офлайн-режим",
-                "Без сети по своей воле: Коллекция, плейлисты и офлайн-волна из скачанного",
-                s.offlineMode,
-            ) { app.core.setOfflineMode(it) }
-        }
-        Group(null, null) {
-            Toggle(
-                "Докачивать для офлайн-волны",
-                "Яндекс подбирает треки, которые может выбрать офлайн-волна, и они тихо скачиваются. " +
-                    "Подобранное, но не сыгранное, он может потом попросить удалить; своё не удаляется",
-                s.smartDownload,
-            ) { app.core.setSmartDownload(it) }
-            androidx.compose.animation.AnimatedVisibility(s.smartDownload) {
-                Column {
-                    Spacer(Modifier.height(16.dp))
-                    Text("Качество докачки", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(8.dp))
-                    Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.smartQuality }.coerceAtLeast(0), {
-                        app.core.setSmartQuality(QUALITIES[it].first)
-                    }, Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(16.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Место", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f))
-                        Text("занято ${"%.1f".format(s.smartUsedGb)} ГБ", style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Segments(
-                        SMART_LIMITS.map { "${it.toInt()} ГБ" },
-                        SMART_LIMITS.indexOfFirst { it >= s.smartLimitGb - 0.01f }.let { if (it < 0) SMART_LIMITS.size - 1 else it },
-                        { app.core.setSmartLimit(SMART_LIMITS[it]) },
-                        Modifier.fillMaxWidth(),
-                    )
-                }
-            }
+            SubmenuRow(
+                "Офлайн и докачка",
+                when {
+                    s.offlineMode -> "Сейчас офлайн: играет только скачанное"
+                    s.smartDownload -> "Треки для офлайн-волны докачиваются: ${"%.1f".format(s.smartUsedGb)} из ${s.smartLimitGb.toInt()} ГБ"
+                    else -> "Офлайн-режим, докачка треков для офлайн-волны"
+                },
+            ) { openSub() }
         }
         Group(null, null) {
             Toggle("Полная дата выхода", "В шапке альбома — день, месяц и год, а не только год", s.fullReleaseDate) {
@@ -1065,6 +1054,113 @@ fun SettingsTab(app: YaApp) {
             modifier = Modifier.fillMaxWidth().padding(24.dp),
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+private val SMART_WINDOWS = listOf("Всегда", "Ночью", "Свои часы")
+
+/** Офлайн-режим и докачка для офлайн-волны: подменю настроек. «Назад» — сверху и жестом. */
+@Composable
+private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            ShapeIconButton(Ic.Back, "Назад", back, size = 48.dp)
+            Spacer(Modifier.width(12.dp))
+            Text("Офлайн и докачка", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+            Group(null, null) {
+                Toggle(
+                    "Офлайн-режим",
+                    "Без сети по своей воле: Коллекция, плейлисты и офлайн-волна из скачанного",
+                    s.offlineMode,
+                ) { app.core.setOfflineMode(it) }
+            }
+            Group(null, null) {
+                Toggle(
+                    "Докачивать для офлайн-волны",
+                    "Яндекс подбирает треки, которые может выбрать офлайн-волна, и они тихо скачиваются. " +
+                        "Подобранное, но не сыгранное, он может потом попросить удалить; своё не удаляется",
+                    s.smartDownload,
+                ) { app.core.setSmartDownload(it) }
+            }
+            androidx.compose.animation.AnimatedVisibility(s.smartDownload) {
+                Column {
+                    Group("Качество докачки", "Отдельно от качества стрима. «Авто» — как решит Яндекс по скорости сети") {
+                        Segments(QUALITIES_AUTO.map { it.second }, QUALITIES_AUTO.indexOfFirst { it.first == s.smartQuality }.coerceAtLeast(0), {
+                            app.core.setSmartQuality(QUALITIES_AUTO[it].first)
+                        }, Modifier.fillMaxWidth())
+                    }
+                    Group("Место", "Сколько отдать подобранным трекам; занято ${"%.1f".format(s.smartUsedGb)} ГБ") {
+                        Segments(
+                            SMART_LIMITS.map { "${it.toInt()} ГБ" },
+                            SMART_LIMITS.indexOfFirst { it >= s.smartLimitGb - 0.01f }.let { if (it < 0) SMART_LIMITS.size - 1 else it },
+                            { app.core.setSmartLimit(SMART_LIMITS[it]) },
+                            Modifier.fillMaxWidth(),
+                        )
+                    }
+                    val from = s.smartFromHour.toInt()
+                    val to = s.smartToHour.toInt()
+                    val mode = when {
+                        from == to -> 0
+                        from == 1 && to == 7 -> 1
+                        else -> 2
+                    }
+                    Group(
+                        "Когда качать",
+                        when (mode) {
+                            0 -> "В любое время, как только Яндекс подберёт треки"
+                            1 -> "С 1 до 7 ночи — пока телефон заряжается и не нужен"
+                            else -> "С $from:00 до $to:00 по местному времени"
+                        },
+                    ) {
+                        Segments(SMART_WINDOWS, mode, {
+                            when (it) {
+                                0 -> app.core.setSmartWindow(0u, 0u)
+                                1 -> app.core.setSmartWindow(1u, 7u)
+                                else -> if (mode != 2) app.core.setSmartWindow(22u, 8u)
+                            }
+                        }, Modifier.fillMaxWidth())
+                        if (mode == 2) {
+                            Spacer(Modifier.height(12.dp))
+                            HourSlider("С", from) { app.core.setSmartWindow(it.toUByte(), to.toUByte()) }
+                            HourSlider("До", to) { app.core.setSmartWindow(from.toUByte(), it.toUByte()) }
+                        }
+                    }
+                    Group(null, null) {
+                        Toggle("Только по Wi-Fi", "По мобильной сети не качать — как в официальном приложении", s.smartWifiOnly) {
+                            app.core.setSmartWifiOnly(it)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Час суток ползунком; отпустили — значение уходит в ядро. */
+@Composable
+private fun HourSlider(label: String, hour: Int, set: (Int) -> Unit) {
+    var h by remember(hour) { mutableFloatStateOf(hour.toFloat()) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.width(32.dp), style = MaterialTheme.typography.labelLarge)
+        Slider(h, { h = it.roundToInt().toFloat() }, Modifier.weight(1f), valueRange = 0f..23f, steps = 22,
+            onValueChangeFinished = { set(h.toInt()) })
+        Text("${h.toInt()}:00", Modifier.width(52.dp), textAlign = TextAlign.End, color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Пункт, открывающий подменю: заголовок, что там сейчас, стрелка. */
+@Composable
+private fun SubmenuRow(title: String, hint: String, open: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable(onClick = open), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(12.dp))
+        Icon(Ic.Back, null, Modifier.size(24.dp).graphicsLayer { rotationZ = 180f }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

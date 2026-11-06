@@ -108,10 +108,14 @@ pub enum Setting {
     Crossfade,
     ReportPlays,
     Ynison,
+    /// Открывает подменю «Офлайн и докачка».
+    Offline,
     OfflineMode,
     SmartDownload,
     SmartQuality,
     SmartLimit,
+    SmartWindow,
+    SmartWifiOnly,
     FullReleaseDate,
     Fps,
     Dither,
@@ -120,22 +124,34 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 14] = [
+    pub const ALL: [Setting; 11] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
         Setting::Crossfade,
         Setting::ReportPlays,
         Setting::Ynison,
-        Setting::OfflineMode,
-        Setting::SmartDownload,
-        Setting::SmartQuality,
-        Setting::SmartLimit,
+        Setting::Offline,
         Setting::FullReleaseDate,
         Setting::Fps,
         Setting::Dither,
         Setting::Recheck,
     ];
+
+    /// Подменю «Офлайн и докачка».
+    pub const OFFLINE: [Setting; 6] = [
+        Setting::OfflineMode,
+        Setting::SmartDownload,
+        Setting::SmartQuality,
+        Setting::SmartLimit,
+        Setting::SmartWindow,
+        Setting::SmartWifiOnly,
+    ];
+
+    /// Открывает подменю, а не меняет значение.
+    pub fn is_action(self) -> bool {
+        matches!(self, Setting::Recheck | Setting::Offline)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -145,6 +161,9 @@ impl Setting {
             Setting::Crossfade => "Плавный переход",
             Setting::ReportPlays => "Отправлять прослушивания",
             Setting::Ynison => "Ynison (Слушать на…)",
+            Setting::Offline => "Офлайн и докачка ›",
+            Setting::SmartWindow => "Когда докачивать",
+            Setting::SmartWifiOnly => "Докачивать только не по мобильной сети",
             Setting::OfflineMode => "Офлайн-режим",
             Setting::SmartDownload => "Докачивать для офлайн-волны",
             Setting::SmartQuality => "Качество докачки",
@@ -158,12 +177,15 @@ impl Setting {
 
     pub fn hint(self) -> &'static str {
         match self {
-            Setting::Quality => "Для следующих треков. Скачанные похуже тихо заменятся при проигрывании, если сервер даст лучше. Клавиша Q.",
+            Setting::Quality => "Для следующих треков. «Авто» — как в мобильной Яндекс Музыке: качество выбирает сервер по замеренной скорости загрузки. Скачанные похуже тихо заменятся при проигрывании, если сервер даст лучше. Клавиша Q.",
             Setting::Normalize => "Подгоняет громкость треков по R128 из метаданных Яндекса. Выключено — bit-perfect. Клавиша N.",
             Setting::TargetLufs => "К какой громкости выравнивать, LUFS. Работает, только когда выравнивание включено.",
             Setting::Crossfade => "Наплыв между треками, 0 — встык. Клавиша x.",
             Setting::ReportPlays => "Передавать Яндексу историю прослушиваний (влияет на рекомендации и «недавно слушали»).",
             Setting::Ynison => "yamusicrs появляется в «Слушать на…» в приложениях Яндекс Музыки: оттуда можно переключить музыку сюда и управлять ею. Включённое здесь забирает воспроизведение у телефона.",
+            Setting::Offline => "Офлайн-режим и докачка треков для офлайн-волны. Enter — открыть, Esc — назад.",
+            Setting::SmartWindow => "Окно по местному времени: стрелками — сдвиг начала, Enter — следующий вариант (всегда, ночью 1–7, 22–8).",
+            Setting::SmartWifiOnly => "Как официальный клиент: по мобильной сети не качать. На компьютере сеть считается Wi-Fi.",
             Setting::OfflineMode => "Не ходить в сеть: Коллекция, плейлисты и офлайн-волна из скачанного. Запоминается между запусками (как флаг --offline).",
             Setting::SmartDownload => "Как в мобильной Яндекс Музыке: сервер подбирает треки, которые может выбрать офлайн-волна, и они тихо докачиваются в библиотеку. Подобранное, но не сыгранное, сервер может потом попросить удалить; своё и сыгранное не удаляется.",
             Setting::SmartQuality => "Отдельно от качества стрима: докачка может быть экономнее.",
@@ -250,6 +272,8 @@ pub enum View {
     /// Сетка «Новые релизы».
     Releases,
     Settings,
+    /// Подменю настроек «Офлайн и докачка».
+    OfflineSettings,
     Tracks {
         id: u64,
         title: String,
@@ -1099,7 +1123,7 @@ impl App {
             },
             View::Queue => self.engine.queue.items.len(),
             View::Releases => self.releases.as_ref().and_then(Loadable::ready).map_or(0, Vec::len),
-            View::Settings => Setting::ALL.len(),
+            View::Settings | View::OfflineSettings => self.settings_list().len(),
             View::Tracks { tracks, .. } => tracks.ready().map_or(0, Vec::len),
             View::Artist { brief, .. } => brief.ready().map_or(0, |b| artist_rows(b).len()),
             View::Albums { albums, .. } => albums.ready().map_or(0, Vec::len),
@@ -1270,7 +1294,7 @@ impl App {
                 }
             }
             View::Queue => self.engine.play_index(orig),
-            View::Settings => self.change_setting(sel, 0),
+            View::Settings | View::OfflineSettings => self.change_setting(sel, 0),
             View::Releases => {
                 if let Some(a) = self
                     .releases
@@ -1357,6 +1381,11 @@ impl App {
 
     // ── офлайн ───────────────────────────────────────────────────────────────
 
+    /// Строки текущего экрана настроек (основной или подменю).
+    pub fn settings_list(&self) -> &'static [Setting] {
+        if matches!(self.page().view, View::OfflineSettings) { &Setting::OFFLINE } else { &Setting::ALL }
+    }
+
     /// Текущее значение строки настроек.
     pub fn setting_value(&self, s: Setting) -> String {
         match s {
@@ -1377,6 +1406,20 @@ impl App {
                 self.engine.cfg.smart_limit_gb,
                 self.engine.library.smart_bytes() as f64 / (1024.0 * 1024.0 * 1024.0)
             ),
+            Setting::Offline => {
+                if self.engine.cfg.offline_mode {
+                    "офлайн".into()
+                } else if self.engine.cfg.smart_download {
+                    "докачка вкл".into()
+                } else {
+                    String::new()
+                }
+            }
+            Setting::SmartWindow => match (self.engine.cfg.smart_from_hour, self.engine.cfg.smart_to_hour) {
+                (a, b) if a == b => "всегда".into(),
+                (a, b) => format!("с {a}:00 до {b}:00"),
+            },
+            Setting::SmartWifiOnly => if self.engine.cfg.smart_wifi_only { "да" } else { "нет" }.into(),
             Setting::FullReleaseDate => if self.engine.cfg.full_release_date { "да" } else { "только год" }.into(),
             Setting::Fps => self.engine.cfg.fps.to_string(),
             Setting::Dither => match self.engine.cfg.blob_dither {
@@ -1392,7 +1435,7 @@ impl App {
 
     /// Меняет настройку `i`: `dir` ±1 — стрелки, 0 — Enter/клик (следующее значение или действие).
     fn change_setting(&mut self, i: usize, dir: isize) {
-        let Some(&s) = Setting::ALL.get(i) else { return };
+        let Some(&s) = self.settings_list().get(i) else { return };
         let step = |len: usize, cur: usize| -> usize {
             if dir == 0 {
                 (cur + 1) % len
@@ -1402,8 +1445,8 @@ impl App {
         };
         match s {
             Setting::Quality => {
-                const QS: [Quality; 3] = [Quality::Nq, Quality::Hq, Quality::Lossless];
-                let cur = QS.iter().position(|q| *q == self.engine.quality()).unwrap_or(2);
+                const QS: [Quality; 4] = [Quality::Nq, Quality::Hq, Quality::Auto, Quality::Lossless];
+                let cur = QS.iter().position(|q| *q == self.engine.quality()).unwrap_or(3);
                 let next = QS[step(QS.len(), cur)];
                 if next != self.engine.quality() {
                     self.engine.set_quality(next);
@@ -1436,7 +1479,7 @@ impl App {
                 self.engine.set_smart_download(on);
             }
             Setting::SmartQuality => {
-                const QS: [Quality; 3] = [Quality::Nq, Quality::Hq, Quality::Lossless];
+                const QS: [Quality; 4] = [Quality::Nq, Quality::Hq, Quality::Auto, Quality::Lossless];
                 let cur = QS.iter().position(|q| *q == self.engine.cfg.smart_quality).unwrap_or(1);
                 self.engine.cfg.smart_quality = QS[step(QS.len(), cur)];
                 self.engine.cfg.save(&self.engine.paths);
@@ -1447,6 +1490,31 @@ impl App {
                     .position(|g| *g >= self.engine.cfg.smart_limit_gb)
                     .unwrap_or(SMART_LIMIT_STEPS.len() - 1);
                 self.engine.cfg.smart_limit_gb = SMART_LIMIT_STEPS[step(SMART_LIMIT_STEPS.len(), cur)];
+                self.engine.cfg.save(&self.engine.paths);
+            }
+            Setting::Offline if dir == 0 => self.push(View::OfflineSettings),
+            Setting::Offline => {}
+            Setting::SmartWindow => {
+                let c = &mut self.engine.cfg;
+                if dir == 0 {
+                    // Всегда → ночью 1–7 → 22–8 → всегда.
+                    (c.smart_from_hour, c.smart_to_hour) = match (c.smart_from_hour, c.smart_to_hour) {
+                        (a, b) if a == b => (1, 7),
+                        (1, 7) => (22, 8),
+                        _ => (0, 0),
+                    };
+                } else {
+                    // Сдвиг всего окна на час.
+                    let sh = |h: u8| ((h as i32 + dir as i32).rem_euclid(24)) as u8;
+                    if c.smart_from_hour != c.smart_to_hour {
+                        c.smart_from_hour = sh(c.smart_from_hour);
+                        c.smart_to_hour = sh(c.smart_to_hour);
+                    }
+                }
+                c.save(&self.engine.paths);
+            }
+            Setting::SmartWifiOnly => {
+                self.engine.cfg.smart_wifi_only = !self.engine.cfg.smart_wifi_only;
                 self.engine.cfg.save(&self.engine.paths);
             }
             Setting::FullReleaseDate => {
@@ -2714,7 +2782,7 @@ impl App {
             }
         }
         // Настройки: ←→ меняют значение (перемотка — с Shift).
-        if matches!(self.page().view, View::Settings) && !self.lyrics_mode && !(self.stage_mode && self.engine.now.is_some()) {
+        if matches!(self.page().view, View::Settings | View::OfflineSettings) && !self.lyrics_mode && !(self.stage_mode && self.engine.now.is_some()) {
             let sel = self.page().sel;
             match k.code {
                 KeyCode::Left if !shift => return self.change_setting(sel, -1),

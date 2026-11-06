@@ -77,6 +77,29 @@ class YaApp : Application(), CoreListener {
         override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
     }
 
+    /**
+     * Тип сети и оценка канала — ядру для качества «Авто» (их же шлёт мобильный клиент)
+     * и для докачки «только по Wi-Fi». Ethernet и прочее сервер видит как Wi-Fi, как у официального.
+     */
+    private fun watchNetwork() {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+                val kind = when {
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobile"
+                    else -> "other"
+                }
+                val kbps = caps.linkDownstreamBandwidthKbps.takeIf { it > 0 } ?: -1
+                core.setNetwork(kind, kbps)
+            }
+
+            override fun onLost(network: android.net.Network) {
+                core.setNetwork("none", -1)
+            }
+        })
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -85,6 +108,7 @@ class YaApp : Application(), CoreListener {
             .filter { it.isNotBlank() }.distinct().joinToString(" ")
             .replaceFirstChar { it.uppercase() }
         core = Core(filesDir.absolutePath, cacheDir.absolutePath, music.absolutePath, name, this)
+        watchNetwork()
         scope.launch {
             state.map { it?.track?.cover }.distinctUntilChanged().collectLatest { url ->
                 val bmp = url?.let { cover(it) } ?: return@collectLatest

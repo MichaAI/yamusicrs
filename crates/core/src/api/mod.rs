@@ -53,15 +53,67 @@ pub enum Quality {
     Lossless,
     Hq,
     Nq,
+    /// Как «Авто» мобильного клиента: качество выбирает сервер по скорости и типу сети
+    /// из [`NET`].
+    Auto,
 }
 
 impl Quality {
-    fn as_str(self) -> &'static str {
+    /// Строка для `get-file-info` и `currentQuality` (как ebe.v0 официального клиента).
+    pub fn as_str(self) -> &'static str {
         match self {
             Quality::Lossless => "lossless",
             Quality::Hq => "hq",
             Quality::Nq => "nq",
+            Quality::Auto => "auto",
         }
+    }
+}
+
+/// Что известно о сети — для качества «Авто». Мобильный клиент шлёт то же самое:
+/// скорость, замеренную плеером на загрузках, оценку канала от системы и тип сети.
+pub struct NetHints {
+    /// Замер по нашим загрузкам, кбит/с; −1 — ещё не мерили.
+    pub measured_kbps: std::sync::atomic::AtomicI32,
+    /// Оценка системы (Android: linkDownstreamBandwidthKbps); −1 — нет.
+    pub estimated_kbps: std::sync::atomic::AtomicI32,
+    /// 0 — прочая (как Wi-Fi), 1 — Wi-Fi, 2 — мобильная, 3 — нет сети.
+    pub network: std::sync::atomic::AtomicU8,
+}
+
+pub static NET: NetHints = NetHints {
+    measured_kbps: std::sync::atomic::AtomicI32::new(-1),
+    estimated_kbps: std::sync::atomic::AtomicI32::new(-1),
+    network: std::sync::atomic::AtomicU8::new(0),
+};
+
+impl NetHints {
+    /// Новый замер скорости загрузки: сглаживаем, чтобы один медленный ответ не ронял качество.
+    pub fn measured(&self, kbps: i32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let old = self.measured_kbps.load(Relaxed);
+        let v = if old < 0 { kbps } else { (old as i64 * 7 / 10 + kbps as i64 * 3 / 10) as i32 };
+        self.measured_kbps.store(v, Relaxed);
+    }
+
+    /// Параметры «Авто» для `get-file-info` (пустые значения не шлются, как у официального клиента).
+    fn query(&self) -> Vec<(&'static str, String)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut q = Vec::new();
+        let m = self.measured_kbps.load(Relaxed);
+        if m >= 0 {
+            q.push(("measuredNetworkSpeedKbps", m.to_string()));
+        }
+        let e = self.estimated_kbps.load(Relaxed);
+        if e >= 0 {
+            q.push(("estimatedNetworkSpeedKbps", e.to_string()));
+        }
+        match self.network.load(Relaxed) {
+            0 | 1 => q.push(("network", "wifi".into())),
+            2 => q.push(("network", "mobile".into())),
+            _ => {}
+        }
+        q
     }
 }
 
@@ -222,6 +274,7 @@ impl Client {
                 ("transports", transport.to_string()),
                 ("sign", sign),
             ]);
+        let rb = if quality == Quality::Auto { rb.query(&NET.query()) } else { rb };
         let fi: FileInfo = self.send(rb).await?;
         Ok(fi.download_info)
     }

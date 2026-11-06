@@ -117,6 +117,17 @@ enum Debug {
     /// Без звука: подменить hq-поток трека на lossless на секунде --at и отчитаться о склейке.
     #[command(hide = true)]
     Swap(SwapArgs),
+    /// Без звука: что сервер даёт на get-file-info в каждом качестве (и «Авто» со скоростью сети).
+    #[command(hide = true)]
+    Fileinfo {
+        track: String,
+        /// Скорость для «Авто», кбит/с.
+        #[arg(long)]
+        kbps: Option<i32>,
+        /// Сеть для «Авто»: wifi | mobile.
+        #[arg(long)]
+        network: Option<String>,
+    },
     Tinyml {
         /// JSON-ответ сервера с `offlineRecommenderSource`.
         #[arg(value_name = "ПРОГРАММА", help_heading = "Аргументы")]
@@ -236,6 +247,24 @@ async fn run() -> color_eyre::Result<()> {
     match cli.command {
         Some(Command::Debug { what: Debug::Play(p) }) => return play_files(p.files, p.crossfade).await,
         Some(Command::Debug { what: Debug::Swap(a) }) => return swap_bench(&paths, a).await,
+        Some(Command::Debug { what: Debug::Fileinfo { track, kbps, network } }) => {
+            use color_eyre::eyre::eyre;
+            let tok = api::auth::StoredToken::load(&paths.token_file).ok_or_else(|| eyre!("нет токена"))?;
+            let client = api::Client::new(tok.access_token);
+            if let Some(k) = kbps {
+                api::NET.measured_kbps.store(k, std::sync::atomic::Ordering::Relaxed);
+            }
+            if network.as_deref() == Some("mobile") {
+                api::NET.network.store(2, std::sync::atomic::Ordering::Relaxed);
+            }
+            for q in [api::Quality::Nq, api::Quality::Hq, api::Quality::Auto, api::Quality::Lossless] {
+                match client.file_info(&track, q).await {
+                    Ok(i) => println!("{:8} → {} {:?} байт", q.as_str(), i.codec, i.size),
+                    Err(e) => println!("{:8} → ошибка: {e}", q.as_str()),
+                }
+            }
+            return Ok(());
+        }
         Some(Command::Debug {
             what: Debug::Tinyml { program, request },
         }) => return tinyml_bench(&program, &request),

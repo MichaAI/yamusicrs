@@ -1680,7 +1680,8 @@ impl Engine {
     pub fn cycle_quality(&mut self) {
         let Some(f) = &self.fetcher else { return };
         let q = match f.quality() {
-            Quality::Lossless => Quality::Hq,
+            Quality::Lossless => Quality::Auto,
+            Quality::Auto => Quality::Hq,
             Quality::Hq => Quality::Nq,
             Quality::Nq => Quality::Lossless,
         };
@@ -2481,6 +2482,7 @@ pub fn quality_label(q: Quality) -> &'static str {
     match q {
         Quality::Lossless => "Lossless",
         Quality::Hq => "Высокое",
+        Quality::Auto => "Авто",
         Quality::Nq => "Экономия",
     }
 }

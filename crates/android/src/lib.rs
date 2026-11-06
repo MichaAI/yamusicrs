@@ -204,6 +204,11 @@ pub struct SettingsData {
     pub smart_limit_gb: f32,
     /// Сколько уже занято умным скачиванием, ГиБ.
     pub smart_used_gb: f32,
+    /// Окно докачки по местному времени, часы [с, до); равные — круглые сутки.
+    pub smart_from_hour: u8,
+    pub smart_to_hour: u8,
+    /// Докачивать только не по мобильной сети.
+    pub smart_wifi_only: bool,
     /// Вся библиотека: треков и ГиБ (с точностью 0,1).
     pub library_tracks: u32,
     pub library_gb: f32,
@@ -284,6 +289,8 @@ enum Cmd {
     SmartDownload(bool),
     SmartQuality(String),
     SmartLimit(f32),
+    SmartWindow(u8, u8),
+    SmartWifiOnly(bool),
     Ynison(bool),
     Transfer(String),
     RemotePlayPause,
@@ -508,6 +515,20 @@ impl Core {
         self.send(Cmd::WaveAfterList(on));
     }
 
+    /// Сеть сменилась (для качества «Авто»): `wifi`, `mobile`, `other` или `none`;
+    /// `estimated_kbps` — оценка канала от системы, −1 — нет.
+    pub fn set_network(&self, kind: String, estimated_kbps: i32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let n = match kind.as_str() {
+            "wifi" => 1,
+            "mobile" => 2,
+            "none" => 3,
+            _ => 0,
+        };
+        api::NET.network.store(n, Relaxed);
+        api::NET.estimated_kbps.store(estimated_kbps, Relaxed);
+    }
+
     pub fn set_offline_mode(&self, on: bool) {
         self.send(Cmd::OfflineMode(on));
     }
@@ -527,6 +548,15 @@ impl Core {
 
     pub fn set_smart_limit(&self, gb: f32) {
         self.send(Cmd::SmartLimit(gb));
+    }
+
+    /// Окно докачки, часы [с, до); равные — круглые сутки.
+    pub fn set_smart_window(&self, from: u8, to: u8) {
+        self.send(Cmd::SmartWindow(from, to));
+    }
+
+    pub fn set_smart_wifi_only(&self, on: bool) {
+        self.send(Cmd::SmartWifiOnly(on));
     }
 
     pub fn set_ynison(&self, on: bool) {
@@ -873,11 +903,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             }
         }
         Cmd::Quality(q) => {
-            let q = match q.as_str() {
-                "hq" => api::Quality::Hq,
-                "nq" => api::Quality::Nq,
-                _ => api::Quality::Lossless,
-            };
+            let q = parse_quality(&q).unwrap_or(api::Quality::Lossless);
             if q != e.quality() {
                 e.set_quality(q);
             }
@@ -920,6 +946,15 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
                 e.cfg.smart_quality = q;
                 e.cfg.save(&e.paths);
             }
+        }
+        Cmd::SmartWindow(from, to) => {
+            e.cfg.smart_from_hour = from % 24;
+            e.cfg.smart_to_hour = to % 24;
+            e.cfg.save(&e.paths);
+        }
+        Cmd::SmartWifiOnly(on) => {
+            e.cfg.smart_wifi_only = on;
+            e.cfg.save(&e.paths);
         }
         Cmd::SmartLimit(gb) => {
             e.cfg.smart_limit_gb = gb.max(0.0) as f64;
@@ -1019,6 +1054,9 @@ impl Publisher {
             smart_limit_gb: e.cfg.smart_limit_gb as f32,
             // Округлено до 0,1 ГиБ: иначе настройки пересылаются на каждый скачанный мегабайт.
             smart_used_gb: gib(e.library.smart_bytes()),
+            smart_from_hour: e.cfg.smart_from_hour,
+            smart_to_hour: e.cfg.smart_to_hour,
+            smart_wifi_only: e.cfg.smart_wifi_only,
             library_tracks: e.library.stats().0 as u32,
             library_gb: gib(e.library.stats().1),
             ynison_status: e.ynison_label(),
@@ -1107,11 +1145,7 @@ fn khz(rate: u32) -> String {
 }
 
 fn quality_str(q: api::Quality) -> &'static str {
-    match q {
-        api::Quality::Lossless => "lossless",
-        api::Quality::Hq => "hq",
-        api::Quality::Nq => "nq",
-    }
+    q.as_str()
 }
 
 fn parse_quality(s: &str) -> Option<api::Quality> {
@@ -1119,6 +1153,7 @@ fn parse_quality(s: &str) -> Option<api::Quality> {
         "lossless" => api::Quality::Lossless,
         "hq" => api::Quality::Hq,
         "nq" => api::Quality::Nq,
+        "auto" => api::Quality::Auto,
         _ => return None,
     })
 }

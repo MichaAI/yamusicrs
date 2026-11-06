@@ -1,7 +1,8 @@
 //! Умное скачивание, как в мобильном клиенте (`rotor/get-cache-recommendation`): сервер смотрит,
 //! что уже скачано, и отвечает, какие треки докачать для офлайн-волны, а какие из подобранных им
 //! раньше удалить. Сыгранное и скачанное самим пользователем не удаляется никогда.
-//! Интервалы загрузки из ответа (ночь, Wi-Fi) не соблюдаем: качаем в фоне сразу.
+//! Когда качать, решает пользователь (окно по часам и «только не мобильная сеть»);
+//! интервалы из ответа сервера не используются.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,12 +48,33 @@ impl SmartState {
     }
 }
 
-/// Строка качества, как её шлёт официальный клиент.
-fn quality_str(q: Quality) -> &'static str {
-    match q {
-        Quality::Lossless => "lossless",
-        Quality::Hq => "high",
-        Quality::Nq => "low",
+/// Когда и где можно докачивать.
+#[derive(Clone, Copy)]
+struct Allowed {
+    from: u8,
+    to: u8,
+    wifi_only: bool,
+}
+
+impl Allowed {
+    fn of(cfg: &crate::config::Config) -> Self {
+        Self { from: cfg.smart_from_hour % 24, to: cfg.smart_to_hour % 24, wifi_only: cfg.smart_wifi_only }
+    }
+
+    /// `None` — можно; иначе — почему нельзя (для лога).
+    fn blocked(self) -> Option<&'static str> {
+        use chrono::Timelike;
+        if self.wifi_only && crate::api::NET.network.load(std::sync::atomic::Ordering::Relaxed) == 2 {
+            return Some("мобильная сеть");
+        }
+        if self.from != self.to {
+            let h = chrono::Local::now().hour() as u8;
+            let inside = if self.from < self.to { (self.from..self.to).contains(&h) } else { h >= self.from || h < self.to };
+            if !inside {
+                return Some("не то время");
+            }
+        }
+        None
     }
 }
 
@@ -68,6 +90,9 @@ impl Engine {
         self.smart_checked = Some(Instant::now());
         // Лайки нужны, чтобы отделить «Мне нравится» от прочего скачанного.
         if !matches!(self.likes, super::Loadable::Ready(_)) || chrono::Utc::now().timestamp() < self.smart.next_request {
+            return;
+        }
+        if Allowed::of(&self.cfg).blocked().is_some() {
             return;
         }
         self.smart_start();
@@ -106,12 +131,12 @@ impl Engine {
             "smartCacheStorageTotalSizeMb": mb(limit),
             "smartCacheStorageOccupiedSizeMb": mb(self.library.smart_bytes()),
             "totalOccupiedSizeMb": mb(total),
-            "currentQuality": quality_str(self.cfg.smart_quality),
+            "currentQuality": self.cfg.smart_quality.as_str(),
         });
-        let (q, lib) = (self.cfg.smart_quality, self.library.clone());
+        let (q, lib, allowed) = (self.cfg.smart_quality, self.library.clone(), Allowed::of(&self.cfg));
         self.smart_running = true;
         self.spawn(move |c, tx| async move {
-            let r = run(c, fetcher, lib, body, q, limit).await.map_err(err_str);
+            let r = run(c, fetcher, lib, body, q, limit, allowed).await.map_err(err_str);
             let _ = tx.send(Msg::SmartDone(r));
         });
     }
@@ -146,6 +171,7 @@ async fn run(
     body: serde_json::Value,
     q: Quality,
     limit: u64,
+    allowed: Allowed,
 ) -> color_eyre::Result<SmartReport> {
     let rec = c.cache_recommendation(&body).await?;
     let next = rec.next_request_time.unwrap_or_else(|| chrono::Utc::now().timestamp() + 24 * 3600);
@@ -157,6 +183,11 @@ async fn run(
     let mut added = 0;
     'all: for chunk in want.chunks(50) {
         for t in c.tracks(chunk).await? {
+            if let Some(why) = allowed.blocked() {
+                // Остальное докачается в следующем окне: сервер спросим снова через полчаса.
+                tracing::info!("умное скачивание: пауза ({why})");
+                return Ok(SmartReport { next: chrono::Utc::now().timestamp() + 30 * 60, added, deleted });
+            }
             if lib.smart_bytes() >= limit {
                 tracing::info!("умное скачивание: место под него кончилось");
                 break 'all;

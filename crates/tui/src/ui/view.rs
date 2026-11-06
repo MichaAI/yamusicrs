@@ -754,7 +754,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, ctx: &Ctx) {
                 ("Space", "пауза"),
                 ("?", "все клавиши"),
             ],
-            View::Settings => &[
+            View::Settings | View::OfflineSettings => &[
                 ("↑↓", "выбор"),
                 ("←→", "значение"),
                 ("Enter", "изменить"),
@@ -815,6 +815,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
         View::Queue => format!("Очередь · {}", app.engine.queue.title),
         View::Releases => "Новые релизы".into(),
         View::Settings => "Настройки".into(),
+        View::OfflineSettings => "Офлайн и докачка".into(),
         View::Tracks {
             title, album: Some(a), ..
         } if app.engine.liked_albums.contains(a) => format!("\u{f004} {title}"),
@@ -924,7 +925,7 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             mixed_list(f, inner, app, &rows, ctx);
         }
         View::Releases => draw_releases(f, inner, app, ctx),
-        View::Settings => draw_settings(f, inner, app, ctx),
+        View::Settings | View::OfflineSettings => draw_settings(f, inner, app, ctx),
         View::Search => draw_search(f, inner, app, ctx),
         View::Queue => {
             let tracks = app.engine.queue.items.clone();
@@ -1581,21 +1582,21 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 
 /// Вкладка «Настройки»: строки «название — значение», под ними пояснение к выбранной.
 fn draw_settings(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
-    use crate::app::Setting;
-    let sel = app.page().sel.min(Setting::ALL.len() - 1);
-    let rows: Vec<RowKind> = Setting::ALL
+    let items = app.settings_list();
+    let sel = app.page().sel.min(items.len() - 1);
+    let rows: Vec<RowKind> = items
         .iter()
         .enumerate()
         .map(|(i, s)| {
             let v = app.setting_value(*s);
-            let v = if i == sel && *s != Setting::Recheck { format!("‹ {v} ›") } else { v };
+            let v = if i == sel && !s.is_action() { format!("‹ {v} ›") } else { v };
             RowKind::Other(s.label().into(), v)
         })
         .collect();
     let hint_h = 4.min(area.height.saturating_sub(rows.len() as u16));
     let [list, hint] = Layout::vertical([Constraint::Min(1), Constraint::Length(hint_h)]).areas(area);
     mixed_list(f, list, app, &rows, ctx);
-    let text = Setting::ALL[sel].hint();
+    let text = items[sel].hint();
     let p = Paragraph::new(Line::styled(text, ctx.dim())).wrap(ratatui::widgets::Wrap { trim: true });
     let hint = Rect {
         x: hint.x + 2,
