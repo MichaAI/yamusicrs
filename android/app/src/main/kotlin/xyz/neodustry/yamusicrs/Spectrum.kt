@@ -35,6 +35,7 @@ private const val BARS = 32
 @Composable
 fun SpectrumBackdrop(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier) {
     val levels = remember { FloatArray(BARS) }
+    val target = remember { FloatArray(BARS) }
     var tick by remember { mutableIntStateOf(0) }
     val play by rememberUpdatedState(playing)
     LaunchedEffect(Unit) {
@@ -46,9 +47,14 @@ fun SpectrumBackdrop(colors: List<Color>, playing: Boolean, modifier: Modifier =
                 val raw = if (play) Viz.core?.spectrum().orEmpty() else emptyList()
                 for (i in 0 until BARS) {
                     // 64 полос ядра → BARS столбцов (максимум из пары).
-                    val v = if (raw.size >= BARS * 2) maxOf(raw[i * 2], raw[i * 2 + 1]) else 0f
-                    val target = v.pow(1.6f)
-                    levels[i] = if (target > levels[i]) target else levels[i] - (levels[i] - target) * min(dt * 6f, 1f)
+                    target[i] = if (raw.size >= BARS * 2) maxOf(raw[i * 2], raw[i * 2 + 1]).pow(1.3f) else 0f
+                }
+                // Сглаживание по соседям, затем плавный подъём и более медленный спад по времени кадра.
+                val up = min(dt * 14f, 1f)
+                val down = min(dt * 4f, 1f)
+                for (i in 0 until BARS) {
+                    val t = 0.25f * target[maxOf(i - 1, 0)] + 0.5f * target[i] + 0.25f * target[min(i + 1, BARS - 1)]
+                    levels[i] += (t - levels[i]) * (if (t > levels[i]) up else down)
                 }
                 tick++
             }

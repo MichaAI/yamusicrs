@@ -2164,9 +2164,14 @@ fn draw_aura(
     let band = if spectrum { band } else { None };
     let levels = band.map(|_| spectrum_levels(app, ctx));
     // Пиксели кадра в пропорциях области: ~256 по ширине.
-    let pw = 256u32;
-    let ph =
-        ((pw as f32 * rect.height as f32 * ctx.cell_aspect / rect.width.max(1) as f32).round() as u32).clamp(16, 512);
+    // Со спектром столбики должны быть чёткими: кадр в разрешении экрана (на GPU это почти даром).
+    let pw = match (band.is_some(), app.gfx.backend()) {
+        (true, "GPU") => 1280u32,
+        (true, _) => 512,
+        _ => 256,
+    };
+    let ph = ((pw as f32 * rect.height as f32 * ctx.cell_aspect / rect.width.max(1) as f32).round() as u32)
+        .clamp(16, if band.is_some() { 1280 } else { 512 });
     let params = crate::render::Blob {
         colors,
         phase: app.wave_phase,
@@ -2220,12 +2225,20 @@ fn spectrum_levels(app: &mut App, ctx: &Ctx) -> [f32; crate::render::BARS] {
     const N: usize = crate::render::BARS;
     let raw = if app.engine.player.paused() { Vec::new() } else { app.engine.player.shared().spectrum() };
     app.spec.resize(N, 0.0);
-    let k = (ctx.dt * 7.0).min(1.0);
+    // Цель: максимум по группе полос, затем сглаживание по соседям — столбики не дёргаются поодиночке.
+    let mut target = [0.0f32; N];
+    for (i, t) in target.iter_mut().enumerate() {
+        let (a, b) = (i * raw.len() / N, ((i + 1) * raw.len() / N).max(i * raw.len() / N + 1));
+        *t = raw.get(a..b.min(raw.len())).map_or(0.0, |s| s.iter().cloned().fold(0.0, f32::max)).powf(1.3);
+    }
+    let blurred: [f32; N] = std::array::from_fn(|i| {
+        0.25 * target[i.saturating_sub(1)] + 0.5 * target[i] + 0.25 * target[(i + 1).min(N - 1)]
+    });
+    // Вверх — мягко, вниз — ещё медленнее; шаг по реальному времени кадра.
+    let (up, down) = ((ctx.dt * 14.0).min(1.0), (ctx.dt * 4.0).min(1.0));
     let mut out = [0.0; N];
     for (i, lv) in app.spec.iter_mut().enumerate() {
-        let (a, b) = (i * raw.len() / N, ((i + 1) * raw.len() / N).max(i * raw.len() / N + 1));
-        let v = raw.get(a..b.min(raw.len())).map_or(0.0, |s| s.iter().cloned().fold(0.0, f32::max)).powf(1.6);
-        *lv = if v > *lv { v } else { *lv + (v - *lv) * k };
+        *lv += (blurred[i] - *lv) * if blurred[i] > *lv { up } else { down };
         out[i] = *lv;
     }
     out

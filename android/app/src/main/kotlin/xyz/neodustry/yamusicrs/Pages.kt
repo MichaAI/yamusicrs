@@ -54,6 +54,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.ToggleButton
+import androidx.compose.material3.ToggleButtonDefaults
+import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -1150,6 +1152,20 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
                     options.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
                     else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
                 },
+                // Невыбранные кнопки — на ступень выше карточки, иначе сливаются с ней.
+                colors = ToggleButtonDefaults.toggleButtonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    checkedContainerColor = MaterialTheme.colorScheme.primary,
+                    checkedContentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                // Невыбранные кнопки — на ступень выше карточки, иначе сливаются с ней.
+                colors = ToggleButtonDefaults.toggleButtonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    checkedContainerColor = MaterialTheme.colorScheme.primary,
+                    checkedContentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
                 contentPadding = PaddingValues(horizontal = 4.dp),
             ) {
                 Text(o, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Clip)
