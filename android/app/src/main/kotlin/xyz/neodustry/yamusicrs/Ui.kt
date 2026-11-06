@@ -1735,7 +1735,8 @@ private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
                         line.text,
                         style = base,
                         color = ink,
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                        // 0.94 × 1.06 ≈ 1: увеличенная активная строка не вылезает за край и не режется clip.
+                        modifier = Modifier.fillMaxWidth(0.94f).clip(RoundedCornerShape(14.dp))
                             .clickable { app.core.seek(line.timeMs) }
                             .padding(vertical = 5.dp, horizontal = 4.dp)
                             .graphicsLayer {

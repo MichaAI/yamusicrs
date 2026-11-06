@@ -1612,9 +1612,12 @@ fun TrackMenu(app: YaApp, nav: Nav) {
             MenuItem(if (liked) Ic.Heart else Ic.HeartOutline, if (liked) "Убрать из «Мне нравится»" else "Мне нравится") {
                 app.core.likeFrom(m.source, m.index.toUInt()); close()
             }
-            // Каждый исполнитель — своим пунктом: к любому из них, а не только к первому.
-            if (t.artistList.isEmpty() && t.artistId != null) MenuItem(Ic.Person, t.artists) { nav.artist(t.artistId, t.artists) }
-            t.artistList.forEach { a -> MenuItem(Ic.Person, a.name, lead = { Avatar(app, a, 36.dp) }) { nav.artist(a.id, a.name) } }
+            // Один пункт на всех: у нескольких исполнителей он открывает их список (подменю).
+            when {
+                t.artistList.size > 1 -> MenuItem(Ic.Person, "Исполнители") { nav.artistOf(t) }
+                t.artistList.size == 1 -> t.artistList[0].let { a -> MenuItem(Ic.Person, a.name, lead = { Avatar(app, a, 36.dp) }) { nav.artist(a.id, a.name) } }
+                t.artistId != null -> MenuItem(Ic.Person, t.artists) { nav.artist(t.artistId, t.artists) }
+            }
             if (t.albumId != null) MenuItem(Ic.Album, t.album.ifEmpty { "Альбом" }) { nav.album(t.albumId, t.album) }
             MenuItem(Ic.Similar, "Похожие треки") { nav.similar(t) }
             val ctx = androidx.compose.ui.platform.LocalContext.current
