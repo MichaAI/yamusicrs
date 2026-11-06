@@ -88,7 +88,22 @@ data class Route(
     val seq: Int = 0,
     /** «Весь список» вкладки исполнителя: страница ядра — `id`, вкладка — `tab`. */
     val tab: Int = -1,
+    /** Адрес для «Поделиться» (без параметров), если у страницы он есть. */
+    val share: String? = null,
 )
+
+private const val MUSIC_HOST = "https://music.yandex.ru"
+
+/** Ссылка в том виде, как её отдаёт «Поделиться» официального клиента. */
+fun shareLink(path: String): String =
+    "$MUSIC_HOST$path?utm_medium=copy_link&ref_id=${java.util.UUID.randomUUID()}"
+
+fun shareText(context: android.content.Context, path: String) {
+    val send = android.content.Intent(android.content.Intent.ACTION_SEND)
+        .setType("text/plain")
+        .putExtra(android.content.Intent.EXTRA_TEXT, shareLink(path))
+    context.startActivity(android.content.Intent.createChooser(send, null).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+}
 
 /**
  * Запоминает рамку обложки карточки; `tap()` перед переходом отдаёт её навигации, и страница
@@ -159,7 +174,7 @@ class Nav(private val app: YaApp) {
 
     private var seq = 0
 
-    private fun push(id: ULong, title: String, tab: Int = -1) {
+    private fun push(id: ULong, title: String, tab: Int = -1, share: String? = null) {
         fly = tapped?.let { Fly(id, it) }
         flyTarget = null
         tapped = null
@@ -168,7 +183,7 @@ class Nav(private val app: YaApp) {
         menu = null
         artists = null
         lyrics = false
-        stack.add(Route(id, title, ++seq, tab))
+        stack.add(Route(id, title, ++seq, tab, share))
     }
 
     /** К исполнителю трека; если их несколько — сначала выбрать, к какому. */
@@ -185,17 +200,17 @@ class Nav(private val app: YaApp) {
     }
 
     fun artist(id: String?, name: String) {
-        push(app.core.openArtist(id ?: return), name)
+        push(app.core.openArtist(id ?: return), name, share = "/artist/$id")
     }
 
     /** Весь список вкладки исполнителя — отдельным экраном (страница ядра та же). */
     fun artistTracks(pageId: ULong, tab: Int, title: String) = push(pageId, title, tab)
 
     fun album(id: String?, title: String) {
-        push(app.core.openAlbum(id ?: return), title)
+        push(app.core.openAlbum(id ?: return), title, share = "/album/$id")
     }
 
-    fun playlist(p: PlaylistItem) = push(app.core.openPlaylist(p.uid, p.kind), p.title)
+    fun playlist(p: PlaylistItem) = push(app.core.openPlaylist(p.uid, p.kind), p.title, share = "/users/${p.uid}/playlists/${p.kind}")
 
     fun similar(t: TrackItem) = push(app.core.openSimilar(t.id, t.title), "Похожие")
 
@@ -348,8 +363,8 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
             TopBar(route.title, nav)
             Empty(p.error)
         }
-        is Page.Tracks -> TracksPage(app, nav, p, src)
-        is Page.Artist -> if (route.tab >= 0) ArtistTracks(app, nav, p, src, route) else ArtistPage(app, nav, p, src)
+        is Page.Tracks -> TracksPage(app, nav, p, src, route.share)
+        is Page.Artist -> if (route.tab >= 0) ArtistTracks(app, nav, p, src, route) else ArtistPage(app, nav, p, src, route.share)
         is Page.Albums -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
             TopBar(p.title, nav)
             LazyVerticalGrid(GridCells.Adaptive(156.dp), contentPadding = gridPadding()) {
@@ -475,7 +490,7 @@ private fun gridPadding() = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp
 // ── страница треков: плейлист, альбом, похожие, чарт ────────────────────────
 
 @Composable
-private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
+private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share: String?) {
     val now = LocalNow.current
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
     val nowAt = remember(p.tracks, now.id) { p.tracks.indexOfFirst { it.id == now.id }.takeIf { it >= 0 } }
@@ -558,6 +573,15 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
         size = 48.dp,
         container = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f),
     )
+    if (share != null) {
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        ShapeIconButton(
+            Ic.Share, "Поделиться", { shareText(ctx, share) },
+            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp),
+            size = 48.dp,
+            container = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f),
+        )
+    }
     if (p.tracks.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
     ListJumps(app, list, p.tracks.size, 2, nowAt, nowAt?.let { p.tracks[it].thumb })
     }
@@ -649,7 +673,7 @@ fun tracksWord(n: Int): String {
  * под ним — волна по нему, популярное с местами, дискография, похожие, об исполнителе.
  */
 @Composable
-private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
+private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source, share: String?) {
     val now = LocalNow.current
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val bg = MaterialTheme.colorScheme.background
@@ -789,6 +813,16 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
         container = Color.Black.copy(alpha = 0.35f),
         tint = Color.White,
     )
+    if (share != null) {
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        ShapeIconButton(
+            Ic.Share, "Поделиться", { shareText(ctx, share) },
+            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp),
+            size = 48.dp,
+            container = Color.Black.copy(alpha = 0.35f),
+            tint = Color.White,
+        )
+    }
     if (p.tracks.isNotEmpty() || p.collection.isNotEmpty() || p.wave.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
     }
 }
@@ -1583,6 +1617,10 @@ fun TrackMenu(app: YaApp, nav: Nav) {
             t.artistList.forEach { a -> MenuItem(Ic.Person, a.name, lead = { Avatar(app, a, 36.dp) }) { nav.artist(a.id, a.name) } }
             if (t.albumId != null) MenuItem(Ic.Album, t.album.ifEmpty { "Альбом" }) { nav.album(t.albumId, t.album) }
             MenuItem(Ic.Similar, "Похожие треки") { nav.similar(t) }
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            MenuItem(Ic.Share, "Поделиться") {
+                shareText(ctx, if (t.albumId != null) "/album/${t.albumId}/track/${t.id}" else "/track/${t.id}"); close()
+            }
             if (hasLyrics) MenuItem(Ic.Lyrics, "Текст песни целиком") { close(); nav.lyrics = true }
         }
     }
