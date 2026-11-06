@@ -81,7 +81,14 @@ import uniffi.yamusic_android.TrackItem
 // ── навигация ────────────────────────────────────────────────────────────────
 
 /** Открытая страница: id запроса в ядре и заголовок, пока она грузится. */
-data class Route(val id: ULong, val title: String)
+data class Route(
+    val id: ULong,
+    val title: String,
+    /** Порядковый номер открытия: ключ перехода и его направление (id ядра у «полного списка» общий с родителем). */
+    val seq: Int = 0,
+    /** «Весь список» вкладки исполнителя: страница ядра — `id`, вкладка — `tab`. */
+    val tab: Int = -1,
+)
 
 /**
  * Запоминает рамку обложки карточки; `tap()` перед переходом отдаёт её навигации, и страница
@@ -150,7 +157,9 @@ class Nav(private val app: YaApp) {
     var flyTarget by mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
     var flyUrl: String? = null
 
-    private fun push(id: ULong, title: String) {
+    private var seq = 0
+
+    private fun push(id: ULong, title: String, tab: Int = -1) {
         fly = tapped?.let { Fly(id, it) }
         flyTarget = null
         tapped = null
@@ -159,7 +168,7 @@ class Nav(private val app: YaApp) {
         menu = null
         artists = null
         lyrics = false
-        stack.add(Route(id, title))
+        stack.add(Route(id, title, ++seq, tab))
     }
 
     /** К исполнителю трека; если их несколько — сначала выбрать, к какому. */
@@ -179,6 +188,9 @@ class Nav(private val app: YaApp) {
         push(app.core.openArtist(id ?: return), name)
     }
 
+    /** Весь список вкладки исполнителя — отдельным экраном (страница ядра та же). */
+    fun artistTracks(pageId: ULong, tab: Int, title: String) = push(pageId, title, tab)
+
     fun album(id: String?, title: String) {
         push(app.core.openAlbum(id ?: return), title)
     }
@@ -191,7 +203,7 @@ class Nav(private val app: YaApp) {
 
     fun back() {
         fly = null
-        stack.removeLastOrNull()?.let { app.closePage(it.id) }
+        stack.removeLastOrNull()?.let { if (it.tab < 0) app.closePage(it.id) }
     }
 
     fun clear() {
@@ -241,7 +253,7 @@ fun PageHost(app: YaApp, nav: Nav) {
     }
     pageTransition.AnimatedContent(
         transitionSpec = {
-            val fwd = (targetState?.id ?: 0u) > (initialState?.id ?: 0u)
+            val fwd = (targetState?.seq ?: 0) > (initialState?.seq ?: 0)
             if (fwd) {
                 (slideInHorizontally { it / 3 } + fadeIn()) togetherWith (slideOutHorizontally { -it / 3 } + fadeOut())
             } else {
@@ -250,7 +262,7 @@ fun PageHost(app: YaApp, nav: Nav) {
                     (slideOutHorizontally { dir * it / 4 } + scaleOut(targetScale = 0.88f) + fadeOut(tween(easing = { f -> (f * 1.6f - 0.6f).coerceIn(0f, 1f) })))
             }.using(SizeTransform(clip = false))
         },
-        contentKey = { it?.id },
+        contentKey = { it?.seq },
     ) { route ->
         if (route != null) {
             // Уходящая назад страница скругляется, пока едет.
@@ -316,14 +328,14 @@ private fun FlyOverlay(app: YaApp, nav: Nav) {
 
 /** Переход вглубь стека (а не назад). */
 private fun fwdOf(t: androidx.compose.animation.core.Transition<Route?>) =
-    (t.targetState?.id ?: 0u) > (t.currentState?.id ?: 0u)
+    (t.targetState?.seq ?: 0) > (t.currentState?.seq ?: 0)
 
 @Composable
 private fun PageView(app: YaApp, nav: Nav, route: Route) {
     val pages by app.pages.collectAsStateWithLifecycle()
     val src = Source.Page(route.id)
     // Закрытая страница ещё уезжает — держим последний ответ, а не спиннер.
-    var last by remember(route.id) { mutableStateOf<Page?>(null) }
+    var last by remember(route.seq) { mutableStateOf<Page?>(null) }
     val fresh = pages[route.id]
     if (fresh != null && fresh !== last) last = fresh
     val shown = fresh ?: last
@@ -337,7 +349,7 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
             Empty(p.error)
         }
         is Page.Tracks -> TracksPage(app, nav, p, src)
-        is Page.Artist -> ArtistPage(app, nav, p, src)
+        is Page.Artist -> if (route.tab >= 0) ArtistTracks(app, nav, p, src, route) else ArtistPage(app, nav, p, src)
         is Page.Albums -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
             TopBar(p.title, nav)
             LazyVerticalGrid(GridCells.Adaptive(156.dp), contentPadding = gridPadding()) {
@@ -710,11 +722,7 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
             }
         }
         // Популярное, своё и услышанное в волне — отдельными вкладками, каждая со всем списком.
-        val tabs = listOfNotNull(
-            p.tracks.takeIf { it.isNotEmpty() }?.let { Triple("Популярное", it, 0) },
-            p.collection.takeIf { it.isNotEmpty() }?.let { Triple("В коллекции", it, p.tracks.size) },
-            p.wave.takeIf { it.isNotEmpty() }?.let { Triple("В волне", it, p.tracks.size + p.collection.size) },
-        )
+        val tabs = artistTabs(p)
         if (tabs.isNotEmpty()) {
             val cur = tab.coerceIn(0, tabs.size - 1)
             val (_, shown, base) = tabs[cur]
@@ -725,12 +733,26 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
             } else {
                 item { Section(tabs[0].first, 20.dp) }
             }
-            itemsIndexed(shown, key = { i, t -> "$cur:$i:${t.id}" }, contentType = { _, _ -> "track" }) { i, t ->
+            itemsIndexed(shown.take(ARTIST_PREVIEW), key = { i, t -> "$cur:$i:${t.id}" }, contentType = { _, _ -> "track" }) { i, t ->
                 val at = base + i
                 TrackRow(
                     app, t, current = now.id == t.id, playing = now.playing, rank = if (cur == 0 && tabs[0].first == "Популярное") i + 1 else null,
                     onLongClick = { nav.menu = MenuTarget(t, src, at) },
                 ) { app.core.playFrom(src, at.toUInt()) }
+            }
+            if (shown.size > ARTIST_PREVIEW) {
+                item(contentType = "more") {
+                    val pid = (src as? Source.Page)?.id
+                    Row(
+                        Modifier.padding(start = 20.dp, top = 8.dp).height(44.dp).clip(RoundedCornerShape(22.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                            .clickable(enabled = pid != null) { nav.artistTracks(pid!!, cur, p.artist.name) }
+                            .padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Показать все · ${shown.size}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
         albumRow(app, nav, "Дискография", p.albums, 20.dp)
@@ -768,6 +790,37 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source) {
         tint = Color.White,
     )
     if (p.tracks.isNotEmpty() || p.collection.isNotEmpty() || p.wave.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
+    }
+}
+
+private const val ARTIST_PREVIEW = 5
+
+/** Вкладки исполнителя: название, треки, смещение в общем списке источника. */
+private fun artistTabs(p: Page.Artist) = listOfNotNull(
+    p.tracks.takeIf { it.isNotEmpty() }?.let { Triple("Популярное", it, 0) },
+    p.collection.takeIf { it.isNotEmpty() }?.let { Triple("В коллекции", it, p.tracks.size) },
+    p.wave.takeIf { it.isNotEmpty() }?.let { Triple("В волне", it, p.tracks.size + p.collection.size) },
+)
+
+/** Весь список одной вкладки исполнителя. */
+@Composable
+private fun ArtistTracks(app: YaApp, nav: Nav, p: Page.Artist, src: Source, route: Route) {
+    val now = LocalNow.current
+    val (name, shown, base) = artistTabs(p).getOrNull(route.tab) ?: return Empty("Пусто")
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        TopBar("$name · ${route.title}", nav)
+        Box(Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+                itemsIndexed(shown, key = { i, t -> "$i:${t.id}" }, contentType = { _, _ -> "track" }) { i, t ->
+                    val at = base + i
+                    TrackRow(
+                        app, t, current = now.id == t.id, playing = now.playing, rank = if (name == "Популярное") i + 1 else null,
+                        onLongClick = { nav.menu = MenuTarget(t, src, at) },
+                    ) { app.core.playFrom(src, at.toUInt()) }
+                }
+            }
+            FloatingPlay { app.core.playFrom(src, base.toUInt()) }
+        }
     }
 }
 

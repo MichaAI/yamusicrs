@@ -442,7 +442,8 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                     userScrollEnabled = !(pager.settledPage == Tab.Wave.ordinal && hasTrack && !s.waveLoading),
                     flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.2f),
                 ) { page ->
-                    Box(Modifier.fillMaxSize().nestedScroll(KeepHorizontal)) {
+                    // У «Коллекции» внутри свой пейджер разделов: край отдаёт свайп вкладкам сам.
+                    Box(Modifier.fillMaxSize().then(if (Tab.entries[page] == Tab.Library) Modifier else Modifier.nestedScroll(KeepHorizontal))) {
                     when (Tab.entries[page]) {
                         Tab.Wave -> WaveTab(app, pal, s, waveHoles)
                         Tab.Library -> LibraryTab(app, nav, s.likesLoading)
@@ -831,17 +832,27 @@ private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () ->
 
 @Composable
 private fun LibraryTab(app: YaApp, nav: Nav, loading: Boolean) {
-    var mode by rememberSaveable { mutableIntStateOf(0) }
+    val pager = rememberPagerState { 3 }
+    val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Header("Коллекция", "") {}
         Segments(
-            listOf("Мне нравится", "Плейлисты", "Скачанное"), mode, { mode = it },
+            listOf("Мне нравится", "Плейлисты", "Скачанное"), pager.targetPage, { scope.launch { pager.animateScrollToPage(it) } },
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         )
-        when (mode) {
-            0 -> Likes(app, nav, loading)
-            1 -> PlaylistsGrid(app, nav)
-            else -> Downloaded(app, nav)
+        // Свайп сначала листает разделы; с их краёв — уже вкладки приложения.
+        HorizontalPager(
+            pager,
+            Modifier.fillMaxSize(),
+            flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.2f),
+        ) { page ->
+            Column(Modifier.fillMaxSize()) {
+                when (page) {
+                    0 -> Likes(app, nav, loading)
+                    1 -> PlaylistsGrid(app, nav)
+                    else -> Downloaded(app, nav)
+                }
+            }
         }
     }
 }
