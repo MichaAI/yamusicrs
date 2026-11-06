@@ -28,6 +28,9 @@ pub struct Entry {
     /// Для какого качества (ранг 1..=3) делалась последняя проверка.
     #[serde(default)]
     pub checked_rank: u8,
+    /// Скачан умным скачиванием и ещё не игрался: такой сервер может попросить удалить.
+    #[serde(default)]
+    pub smart: bool,
 }
 
 impl Entry {
@@ -95,6 +98,8 @@ impl Library {
         let p = self.root.join(&e.path);
         if p.is_file() {
             e.last_played = chrono::Utc::now().timestamp();
+            // Сыгранный трек уже свой, а не подобранный сервером.
+            e.smart = false;
             Some((p, e.clone()))
         } else {
             idx.tracks.remove(id);
@@ -169,6 +174,59 @@ impl Library {
         n
     }
 
+    /// Отмечает трек скачанным умным скачиванием.
+    pub fn mark_smart(&self, track_id: &str) {
+        let id = track_id.split(':').next().unwrap_or(track_id);
+        if let Some(e) = self.index.lock().tracks.get_mut(id) {
+            e.smart = true;
+        }
+        self.save_index();
+    }
+
+    /// Все скачанные: id, когда играли (или скачали) и подобран ли сервером.
+    pub fn entries(&self) -> Vec<(String, i64, bool)> {
+        self.index.lock().tracks.iter().map(|(k, e)| (k.clone(), e.last_played, e.smart)).collect()
+    }
+
+    /// Сколько занимает умное скачивание, байт.
+    pub fn smart_bytes(&self) -> u64 {
+        self.index.lock().tracks.values().filter(|e| e.smart).map(|e| e.size).sum()
+    }
+
+    /// Удаляет треки умного скачивания из списка (свои и сыгранные не трогает). Возвращает число удалённых.
+    pub fn remove_smart(&self, ids: &[String]) -> usize {
+        let mut n = 0;
+        {
+            let mut idx = self.index.lock();
+            for id in ids {
+                let id = id.split(':').next().unwrap_or(id);
+                if idx.tracks.get(id).is_some_and(|e| e.smart)
+                    && let Some(e) = idx.tracks.remove(id)
+                {
+                    self.remove_file(&e.path);
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.save_index();
+        }
+        n
+    }
+
+    /// Удаляет файл и опустевшие папки альбома и артиста.
+    fn remove_file(&self, rel: &Path) {
+        let p = self.root.join(rel);
+        let _ = std::fs::remove_file(&p);
+        let mut dir = p.parent();
+        while let Some(d) = dir {
+            if d == self.root || std::fs::remove_dir(d).is_err() {
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+
     pub fn stats(&self) -> (usize, u64) {
         let idx = self.index.lock();
         (idx.tracks.len(), idx.tracks.values().map(|e| e.size).sum())
@@ -217,6 +275,7 @@ impl Library {
                 last_played: now,
                 checked_at: now,
                 checked_rank: dl.requested_rank,
+                smart: false,
             },
         );
         // Апгрейд качества: старый файл (например, .m4a вместо нового .flac) больше не нужен.
@@ -250,16 +309,7 @@ impl Library {
             if total <= self.max_bytes {
                 break;
             }
-            let p = self.root.join(&rel);
-            let _ = std::fs::remove_file(&p);
-            // Чистим опустевшие папки альбома и артиста.
-            let mut dir = p.parent();
-            while let Some(d) = dir {
-                if d == self.root || std::fs::remove_dir(d).is_err() {
-                    break;
-                }
-                dir = d.parent();
-            }
+            self.remove_file(&rel);
             idx.tracks.remove(&id);
             total -= size;
         }

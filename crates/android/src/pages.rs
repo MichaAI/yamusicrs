@@ -18,6 +18,8 @@ pub struct AlbumItem {
     pub title: String,
     pub artists: String,
     pub year: Option<i32>,
+    /// Полная дата выхода («12 марта 2024»), если сервер её отдал.
+    pub released: Option<String>,
     /// «Альбом», «Сингл», «Сборник»…
     pub kind: String,
     pub cover: Option<String>,
@@ -33,6 +35,7 @@ impl From<&Album> for AlbumItem {
             title: a.full_title(),
             artists: a.artist_names(),
             year: a.year,
+            released: a.release_label(),
             kind: a.kind_label().into(),
             cover: a.cover_uri().map(|u| api::cover_url(u, 400)),
             thumb: a.cover_uri().map(|u| api::cover_url(u, 200)),
@@ -147,6 +150,8 @@ pub enum Req {
     Search(String),
     Releases,
     Chart,
+    /// Всё скачанное, недавно игранное сверху (без сети тоже).
+    Downloaded,
 }
 
 /// Сырой ответ сети; в `Page` превращается уже в потоке движка.
@@ -258,8 +263,34 @@ impl Pages {
     }
 }
 
+/// Скачанное: треки из библиотеки, о которых знает снимок; свежие сверху.
+fn downloaded(e: &Engine) -> Loaded {
+    let mut entries = e.library.entries();
+    entries.sort_by_key(|(_, ts, _)| std::cmp::Reverse(*ts));
+    let smart = entries.iter().filter(|(.., s)| *s).count();
+    let ts: Vec<Track> = entries.iter().filter_map(|(id, ..)| e.snapshot.find(id).cloned()).collect();
+    let (_, bytes) = e.library.stats();
+    let gb = format!("{:.1}", bytes as f64 / (1024.0 * 1024.0 * 1024.0)).replace('.', ",");
+    let mut subtitle = format!("{}, {gb} ГБ на диске", tracks_word(ts.len()));
+    if smart > 0 {
+        subtitle.push_str(&format!("\n{smart} подобрано для офлайн-волны"));
+    }
+    Loaded::Tracks {
+        title: "Скачанное".into(),
+        subtitle,
+        cover: None,
+        album: None,
+        tracks: e.offline_tracks(ts),
+        seed: None,
+    }
+}
+
 /// Открыть страницу: ответ уйдёт в `tx` (офлайн плейлист — из снимка сразу).
 pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
+    if let Req::Downloaded = req {
+        let _ = tx.send((id, Ok(downloaded(e))));
+        return;
+    }
     if let Req::Playlist { uid, kind } = &req
         && e.offline
     {
@@ -290,6 +321,8 @@ pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
 
 async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
     match req {
+        // Отдаётся из библиотеки в `open`, сюда не доходит.
+        Req::Downloaded => Err("Скачанное читается без сети".into()),
         Req::Playlist { uid, kind } => {
             let full = c.playlist(&uid, &kind).await.map_err(err_str)?;
             let tracks = c.playlist_tracks(&full).await.map_err(err_str)?;

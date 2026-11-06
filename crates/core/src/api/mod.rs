@@ -807,6 +807,12 @@ impl Client {
         Ok(serde_json::from_value(v["offlineRecommenderSource"].clone())?)
     }
 
+    /// Умное скачивание (как в мобильном клиенте): что докачать для офлайн-волны и что удалить.
+    /// `body` — `SmartDownloadingTracksRequestDto` официального клиента.
+    pub async fn cache_recommendation(&self, body: &Value) -> Result<CacheRecommendation> {
+        self.post_json("/rotor/get-cache-recommendation", body).await
+    }
+
     pub async fn rotor_new(&self, seeds: &[String]) -> Result<RotorSession> {
         self.post_json(
             "/rotor/session/new",

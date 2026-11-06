@@ -6,6 +6,8 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.SeekableTransitionState
 import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.scaleOut
@@ -282,7 +284,8 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
     val nowAt = remember(p.tracks, now.id) { p.tracks.indexOfFirst { it.id == now.id }.takeIf { it >= 0 } }
     Box(Modifier.fillMaxSize()) {
     LazyColumn(Modifier.fillMaxSize().statusBarsPadding(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
-        item(contentType = "bar") { TopBar("", nav) }
+        // Место под «Назад»: сама кнопка висит поверх списка и не уезжает с ним.
+        item(contentType = "bar") { Spacer(Modifier.height(64.dp)) }
         item(contentType = "hero") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 if (p.cover != null) {
@@ -310,7 +313,8 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Chip(a.kind)
-                        a.year?.let { Chip(it.toString()) }
+                        val full = app.settings.collectAsStateWithLifecycle().value?.fullReleaseDate == true
+                        (a.released?.takeIf { full } ?: a.year?.toString())?.let { Chip(it) }
                         if (p.tracks.isNotEmpty()) Chip(tracksWord(p.tracks.size))
                     }
                 } else if (p.subtitle.isNotEmpty()) {
@@ -328,6 +332,12 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
             ) { app.core.playFrom(src, i.toUInt()) }
         }
     }
+    ShapeIconButton(
+        Ic.Back, "Назад", { nav.back() },
+        Modifier.statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp),
+        size = 48.dp,
+        container = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f),
+    )
     if (p.tracks.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
     ListJumps(app, list, p.tracks.size, 2, nowAt, nowAt?.let { p.tracks[it].thumb })
     }
@@ -809,6 +819,93 @@ fun PlaylistsGrid(app: YaApp, nav: Nav) {
     }
 }
 
+/**
+ * Скачанное: сверху — сколько места занято (своё и подобранное для офлайн-волны — двумя цветами
+ * одной полосы, против лимита докачки), ниже — треки, недавно игранные первыми. Работает без сети.
+ */
+@Composable
+fun Downloaded(app: YaApp, nav: Nav) {
+    // Снимок библиотеки берётся при каждом заходе на сегмент; ушли — страница в ядре закрывается.
+    val id = remember { app.core.downloaded() }
+    DisposableEffect(id) { onDispose { app.closePage(id) } }
+    val pages by app.pages.collectAsStateWithLifecycle()
+    val st by app.settings.collectAsStateWithLifecycle()
+    val now = LocalNow.current
+    val p = pages[id] as? Page.Tracks
+    val tracks = p?.tracks.orEmpty()
+    val src = Source.Page(id)
+    val list = androidx.compose.foundation.lazy.rememberLazyListState()
+    val nowAt = remember(tracks, now.id) { tracks.indexOfFirst { it.id == now.id }.takeIf { it >= 0 } }
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
+            item(contentType = "storage") { st?.let { StorageBar(it) } }
+            when {
+                p == null -> item { Box(Modifier.fillMaxWidth().padding(48.dp), contentAlignment = Alignment.Center) { LoadingIndicator() } }
+                tracks.isEmpty() -> item {
+                    Empty("Здесь появится то, что вы слушали: каждый сыгранный трек сохраняется и потом играет без сети")
+                }
+                else -> itemsIndexed(tracks, contentType = { _, _ -> "track" }) { i, t ->
+                    TrackRow(
+                        app, t, current = now.id == t.id, playing = now.playing,
+                        onLongClick = { nav.menu = MenuTarget(t, src, i) },
+                    ) { app.core.playFrom(src, i.toUInt()) }
+                }
+            }
+        }
+        if (tracks.isNotEmpty()) FloatingPlay { app.core.playFrom(src, 0u) }
+        ListJumps(app, list, tracks.size, 1, nowAt, nowAt?.let { tracks[it].thumb })
+    }
+}
+
+/** Полоса места: всё скачанное, из него подобранное для офлайн-волны — другим цветом. */
+@Composable
+private fun StorageBar(s: SettingsData) {
+    val cs = MaterialTheme.colorScheme
+    fun gb(v: Float) = "%.1f".format(v)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp)) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Icon(Ic.Download, null, Modifier.size(28.dp), tint = cs.primary)
+            Spacer(Modifier.width(10.dp))
+            Text("${gb(s.libraryGb)} ГБ", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+            Spacer(Modifier.width(8.dp))
+            Text(tracksWord(s.libraryTracks.toInt()), style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 3.dp))
+        }
+        Spacer(Modifier.height(10.dp))
+        // Шкала — до большего из «всё скачанное» и «всё скачанное + свободный лимит докачки».
+        val own = (s.libraryGb - s.smartUsedGb).coerceAtLeast(0f)
+        val scale = maxOf(s.libraryGb, own + if (s.smartDownload) s.smartLimitGb else 0f, 0.1f)
+        val ownF by animateFloatAsState(own / scale, label = "own")
+        val smartF by animateFloatAsState(s.smartUsedGb / scale, label = "smart")
+        val ownColor = cs.primary
+        val smartColor = cs.tertiary
+        val track = cs.surfaceContainerHighest
+        Canvas(Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(6.dp))) {
+            drawRect(track)
+            drawRect(ownColor, size = androidx.compose.ui.geometry.Size(size.width * ownF, size.height))
+            drawRect(
+                smartColor,
+                topLeft = androidx.compose.ui.geometry.Offset(size.width * ownF, 0f),
+                size = androidx.compose.ui.geometry.Size(size.width * smartF, size.height),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Legend(ownColor, "Сыгранное и своё, ${gb(own)} ГБ")
+            if (s.smartDownload || s.smartUsedGb > 0f) Legend(smartColor, "Для офлайн-волны, ${gb(s.smartUsedGb)} из ${s.smartLimitGb.toInt()} ГБ")
+        }
+    }
+}
+
+@Composable
+private fun Legend(color: Color, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(color))
+        Spacer(Modifier.width(6.dp))
+        Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 /** Переключатель-пилюли (сегменты). */
 @Composable
 fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
@@ -843,6 +940,7 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
 
 private val QUALITIES = listOf("lossless" to "Lossless", "hq" to "Высокое", "nq" to "Экономия")
 private val CROSSFADES = listOf(0f, 3f, 6f, 10f)
+private val SMART_LIMITS = listOf(1f, 2f, 5f, 10f, 20f)
 
 @Composable
 fun SettingsTab(app: YaApp) {
@@ -889,6 +987,50 @@ fun SettingsTab(app: YaApp) {
         Group(null, null) {
             Toggle("Волна после списка", "Плейлист, альбом или «Мне нравится» доиграли — дальше волна по ним, а не тишина", s.waveAfterList) {
                 app.core.setWaveAfterList(it)
+            }
+        }
+        Group(null, null) {
+            Toggle(
+                "Офлайн-режим",
+                "Без сети по своей воле: Коллекция, плейлисты и офлайн-волна из скачанного",
+                s.offlineMode,
+            ) { app.core.setOfflineMode(it) }
+        }
+        Group(null, null) {
+            Toggle(
+                "Докачивать для офлайн-волны",
+                "Яндекс подбирает треки, которые может выбрать офлайн-волна, и они тихо скачиваются. " +
+                    "Подобранное, но не сыгранное, он может потом попросить удалить; своё не удаляется",
+                s.smartDownload,
+            ) { app.core.setSmartDownload(it) }
+            androidx.compose.animation.AnimatedVisibility(s.smartDownload) {
+                Column {
+                    Spacer(Modifier.height(16.dp))
+                    Text("Качество докачки", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.smartQuality }.coerceAtLeast(0), {
+                        app.core.setSmartQuality(QUALITIES[it].first)
+                    }, Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(16.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Место", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f))
+                        Text("занято ${"%.1f".format(s.smartUsedGb)} ГБ", style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Segments(
+                        SMART_LIMITS.map { "${it.toInt()} ГБ" },
+                        SMART_LIMITS.indexOfFirst { it >= s.smartLimitGb - 0.01f }.let { if (it < 0) SMART_LIMITS.size - 1 else it },
+                        { app.core.setSmartLimit(SMART_LIMITS[it]) },
+                        Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+        Group(null, null) {
+            Toggle("Полная дата выхода", "В шапке альбома — день, месяц и год, а не только год", s.fullReleaseDate) {
+                app.core.setFullReleaseDate(it)
             }
         }
         Group(null, null) {

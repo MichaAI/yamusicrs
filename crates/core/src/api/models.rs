@@ -144,6 +144,22 @@ impl Album {
         join_artists(&self.artists)
     }
 
+    /// Полная дата выхода по-русски («12 марта 2024»), если сервер её отдал.
+    pub fn release_label(&self) -> Option<String> {
+        const MONTHS: [&str; 12] = [
+            "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря",
+        ];
+        let d = self.release_date.as_deref()?;
+        let (y, m, day) = (d.get(..4)?, d.get(5..7)?.parse::<usize>().ok()?, d.get(8..10)?.parse::<u32>().ok()?);
+        Some(format!("{day} {} {y}", MONTHS.get(m.checked_sub(1)?)?))
+    }
+
+    /// Дата для шапки альбома: полная (если включено и есть) или год.
+    pub fn date_label(&self, full: bool) -> Option<String> {
+        full.then(|| self.release_label()).flatten().or_else(|| self.year.map(|y| y.to_string()))
+    }
+
     /// Тип релиза для подписи под обложкой.
     pub fn kind_label(&self) -> &'static str {
         match self.kind.as_deref() {
@@ -674,4 +690,14 @@ pub enum Found {
     Album(Album),
     Artist(Artist),
     Playlist(Playlist),
+}
+
+/// Ответ `rotor/get-cache-recommendation`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CacheRecommendation {
+    pub tracks_to_add: Vec<String>,
+    pub tracks_to_delete: Vec<String>,
+    /// Когда спросить снова, unix-секунды.
+    pub next_request_time: Option<i64>,
 }

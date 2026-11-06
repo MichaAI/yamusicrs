@@ -108,6 +108,11 @@ pub enum Setting {
     Crossfade,
     ReportPlays,
     Ynison,
+    OfflineMode,
+    SmartDownload,
+    SmartQuality,
+    SmartLimit,
+    FullReleaseDate,
     Fps,
     Dither,
     /// Действие: перепроверить качество скачанных треков.
@@ -115,13 +120,18 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 9] = [
+    pub const ALL: [Setting; 14] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
         Setting::Crossfade,
         Setting::ReportPlays,
         Setting::Ynison,
+        Setting::OfflineMode,
+        Setting::SmartDownload,
+        Setting::SmartQuality,
+        Setting::SmartLimit,
+        Setting::FullReleaseDate,
         Setting::Fps,
         Setting::Dither,
         Setting::Recheck,
@@ -135,6 +145,11 @@ impl Setting {
             Setting::Crossfade => "Плавный переход",
             Setting::ReportPlays => "Отправлять прослушивания",
             Setting::Ynison => "Ynison (Слушать на…)",
+            Setting::OfflineMode => "Офлайн-режим",
+            Setting::SmartDownload => "Докачивать для офлайн-волны",
+            Setting::SmartQuality => "Качество докачки",
+            Setting::SmartLimit => "Место под докачку",
+            Setting::FullReleaseDate => "Полная дата выхода альбома",
             Setting::Fps => "Кадров в секунду",
             Setting::Dither => "Дизеринг блоба",
             Setting::Recheck => "Перепроверить качество скачанного",
@@ -149,6 +164,11 @@ impl Setting {
             Setting::Crossfade => "Наплыв между треками, 0 — встык. Клавиша x.",
             Setting::ReportPlays => "Передавать Яндексу историю прослушиваний (влияет на рекомендации и «недавно слушали»).",
             Setting::Ynison => "yamusicrs появляется в «Слушать на…» в приложениях Яндекс Музыки: оттуда можно переключить музыку сюда и управлять ею. Включённое здесь забирает воспроизведение у телефона.",
+            Setting::OfflineMode => "Не ходить в сеть: Коллекция, плейлисты и офлайн-волна из скачанного. Запоминается между запусками (как флаг --offline).",
+            Setting::SmartDownload => "Как в мобильной Яндекс Музыке: сервер подбирает треки, которые может выбрать офлайн-волна, и они тихо докачиваются в библиотеку. Подобранное, но не сыгранное, сервер может потом попросить удалить; своё и сыгранное не удаляется.",
+            Setting::SmartQuality => "Отдельно от качества стрима: докачка может быть экономнее.",
+            Setting::SmartLimit => "Сколько места отдать подобранным трекам.",
+            Setting::FullReleaseDate => "В шапке альбома — день, месяц и год выхода, а не только год.",
             Setting::Fps => "Частота кадров анимаций (блоб, прокрутка, перебор символов).",
             Setting::Dither => "Шум против «колец» на градиентах блоба, в ступенях 8 бит; 0 — выключен.",
             Setting::Recheck => "Сервер не дал lossless — трек помечается и не перепроверяется 30 дней. Enter снимает пометки: каждый трек хуже lossless спросит сервер заново при следующем проигрывании и, если дадут лучше, перекачается.",
@@ -157,6 +177,8 @@ impl Setting {
 }
 
 const FPS_STEPS: [u32; 5] = [15, 24, 30, 60, 120];
+/// Место под умное скачивание, ГиБ.
+const SMART_LIMIT_STEPS: [f64; 6] = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0];
 
 /// Строка в результатах поиска.
 #[derive(Clone)]
@@ -747,8 +769,8 @@ impl App {
 
     fn open_album(&mut self, album: api::Album) {
         let id = self.new_view_id();
-        let subtitle = match album.year {
-            Some(y) => format!("{} · {y}", album.artist_names()),
+        let subtitle = match album.date_label(self.engine.cfg.full_release_date) {
+            Some(d) => format!("{} · {d}", album.artist_names()),
             None => album.artist_names(),
         };
         self.push(View::Tracks {
@@ -1347,6 +1369,15 @@ impl App {
             },
             Setting::ReportPlays => if self.engine.cfg.report_plays { "да" } else { "нет" }.into(),
             Setting::Ynison => self.engine.ynison_label(),
+            Setting::OfflineMode => if self.engine.cfg.offline_mode { "вкл" } else { "выкл" }.into(),
+            Setting::SmartDownload => if self.engine.cfg.smart_download { "вкл" } else { "выкл" }.into(),
+            Setting::SmartQuality => quality_label(self.engine.cfg.smart_quality).into(),
+            Setting::SmartLimit => format!(
+                "{} ГБ, занято {:.1}",
+                self.engine.cfg.smart_limit_gb,
+                self.engine.library.smart_bytes() as f64 / (1024.0 * 1024.0 * 1024.0)
+            ),
+            Setting::FullReleaseDate => if self.engine.cfg.full_release_date { "да" } else { "только год" }.into(),
             Setting::Fps => self.engine.cfg.fps.to_string(),
             Setting::Dither => match self.engine.cfg.blob_dither {
                 0 => "выкл".into(),
@@ -1396,6 +1427,32 @@ impl App {
             }
             Setting::ReportPlays => self.engine.toggle_report_plays(),
             Setting::Ynison => self.engine.toggle_ynison(),
+            Setting::OfflineMode => {
+                let on = !self.engine.cfg.offline_mode;
+                self.engine.set_offline_mode(on);
+            }
+            Setting::SmartDownload => {
+                let on = !self.engine.cfg.smart_download;
+                self.engine.set_smart_download(on);
+            }
+            Setting::SmartQuality => {
+                const QS: [Quality; 3] = [Quality::Nq, Quality::Hq, Quality::Lossless];
+                let cur = QS.iter().position(|q| *q == self.engine.cfg.smart_quality).unwrap_or(1);
+                self.engine.cfg.smart_quality = QS[step(QS.len(), cur)];
+                self.engine.cfg.save(&self.engine.paths);
+            }
+            Setting::SmartLimit => {
+                let cur = SMART_LIMIT_STEPS
+                    .iter()
+                    .position(|g| *g >= self.engine.cfg.smart_limit_gb)
+                    .unwrap_or(SMART_LIMIT_STEPS.len() - 1);
+                self.engine.cfg.smart_limit_gb = SMART_LIMIT_STEPS[step(SMART_LIMIT_STEPS.len(), cur)];
+                self.engine.cfg.save(&self.engine.paths);
+            }
+            Setting::FullReleaseDate => {
+                self.engine.cfg.full_release_date = !self.engine.cfg.full_release_date;
+                self.engine.cfg.save(&self.engine.paths);
+            }
             Setting::Fps => {
                 let cur = FPS_STEPS.iter().position(|f| *f >= self.engine.cfg.fps).unwrap_or(FPS_STEPS.len() - 1);
                 self.engine.cfg.fps = FPS_STEPS[step(FPS_STEPS.len(), cur)];

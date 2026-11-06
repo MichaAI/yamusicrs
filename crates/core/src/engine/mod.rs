@@ -23,11 +23,16 @@ use crate::offline_wave;
 use crate::tinyml::EventKind;
 use crate::ynison;
 
+mod smart;
 mod yn;
+
+pub use smart::SmartReport;
 
 /// Ответы фоновых задач движка. Интерфейс получает их из канала, отданного в
 /// [`Engine::new`], и возвращает в [`Engine::on_msg`].
 pub enum Msg {
+    /// Проход умного скачивания закончился.
+    SmartDone(Result<SmartReport, String>),
     Wheel(Result<Vec<api::WheelItem>, String>),
     Resumed {
         resume: crate::config::Resume,
@@ -260,6 +265,10 @@ pub struct Engine {
     pub owave: Option<offline_wave::Session>,
     pub owave_tracks: HashMap<i32, Track>,
     pub owave_fetching: bool,
+    /// Умное скачивание: идёт проход, когда последний раз проверяли, когда спросить сервер.
+    smart_running: bool,
+    smart_checked: Option<Instant>,
+    smart: smart::SmartState,
     pub data_dir: std::path::PathBuf,
     pub library: Arc<Library>,
     pub player: Player,
@@ -373,6 +382,9 @@ impl Engine {
             owave: None,
             owave_tracks: HashMap::new(),
             owave_fetching: false,
+            smart_running: false,
+            smart_checked: None,
+            smart: smart::SmartState::load(&data_dir),
             data_dir,
             library,
             player,
@@ -438,7 +450,7 @@ impl Engine {
             cfg,
         };
         e.resume_local();
-        if offline {
+        if offline || e.cfg.offline_mode {
             e.enter_offline();
         } else {
             e.start_auth();
@@ -507,6 +519,33 @@ impl Engine {
         }
     }
 
+    /// Офлайн-режим из настроек: включённый рвёт связь с сервером и играет только скачанное,
+    /// выключенный — подключается заново, не уходя с главного экрана.
+    pub fn set_offline_mode(&mut self, on: bool) {
+        if on == self.cfg.offline_mode {
+            return;
+        }
+        self.cfg.offline_mode = on;
+        self.cfg.save(&self.paths);
+        if on {
+            if !self.offline {
+                self.ynison_stop();
+                self.client = None;
+                self.fetcher = None;
+                self.pl_ops = None;
+                self.enter_offline();
+            }
+        } else if self.offline {
+            match StoredToken::load(&self.paths.token_file) {
+                Some(tok) => {
+                    self.toast("Подключаюсь…".into());
+                    tokio::spawn(connect(tok, self.tx.clone()));
+                }
+                None => self.begin_login(None),
+            }
+        }
+    }
+
     /// Снять пометки «lossless нет»: скачанное перепроверится при проигрывании.
     pub fn recheck_library(&mut self) {
         match self.library.reset_checks() {
@@ -518,6 +557,8 @@ impl Engine {
     /// Вызывать часто (каждый кадр): синхронизирует «что играет» с аудиодвижком,
     /// сторожит вывод, сохраняет сессию, держит Ynison в курсе.
     pub fn tick(&mut self) {
+        // Умное скачивание не зависит от того, играет ли что-то.
+        self.smart_tick();
         let Some(pos) = self.player.position() else {
             return;
         };
@@ -559,6 +600,9 @@ impl Engine {
 
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
+            // Пока подключались, включили офлайн-режим — сеть не нужна.
+            Msg::SmartDone(r) => self.on_smart_done(r),
+            Msg::Authed(Ok(_)) if self.cfg.offline_mode => {}
             Msg::Authed(Ok((c, s, t))) => self.on_authed(c, s, t),
             Msg::Wheel(r) => match r {
                 Ok(items) => {

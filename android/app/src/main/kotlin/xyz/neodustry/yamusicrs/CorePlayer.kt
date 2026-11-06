@@ -73,6 +73,8 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
                 invalidateState()
             }
         }
+        // Соседи в плейлисте сессии берутся из очереди.
+        scope.launch { app.queue.collect { invalidateState() } }
     }
 
     private fun PlayerState?.playing() = this != null && track != null && !paused
@@ -134,6 +136,7 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
                 COMMAND_SEEK_TO_PREVIOUS,
                 COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
                 COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
+                COMMAND_SEEK_TO_MEDIA_ITEM,
                 COMMAND_GET_CURRENT_MEDIA_ITEM,
                 COMMAND_GET_TIMELINE,
                 COMMAND_GET_METADATA,
@@ -150,15 +153,39 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
             .setAlbumTitle(t.album)
             .setArtworkUri(t.cover?.let(Uri::parse))
             .build()
+        // Плейлист сессии — предыдущий, текущий и следующий трек. С одним треком Media3 решает,
+        // что дальше ничего нет, и молча глотает «следующий» от внешних пультов (KDE Connect,
+        // часы, Android Auto): BasePlayer.seekToNext() без следующего элемента не доходит до handleSeek.
+        val items = app.queue.value.second
+        val pos = s.queuePos?.toInt()
+        val inQueue = pos != null && pos in items.indices && items[pos].id == t.id
+        val hasPrev = pos != null && pos > 0
+        val hasNext = s.wave || (pos != null && pos + 1 < s.queueLen.toInt()) || app.settings.value?.waveAfterList == true
+        fun neighbour(uid: String, n: uniffi.yamusic_android.TrackItem?): MediaItemData {
+            val m = MediaMetadata.Builder()
+                .setTitle(n?.title ?: "")
+                .setArtist(n?.artists)
+                .setArtworkUri(n?.cover?.let(Uri::parse))
+                .build()
+            return MediaItemData.Builder(uid)
+                .setMediaItem(MediaItem.Builder().setMediaId(uid).setMediaMetadata(m).build())
+                .build()
+        }
         val item = MediaItem.Builder().setMediaId(t.id).setMediaMetadata(meta).build()
-        val data = MediaItemData.Builder(t.id)
+        val data = MediaItemData.Builder("cur:${t.id}")
             .setMediaItem(item)
             .setDurationUs(t.durationMs.toLong() * 1000)
             .setIsSeekable(true)
             .build()
+        val list = buildList {
+            if (hasPrev) add(neighbour("prev", if (inQueue) items.getOrNull(pos!! - 1) else null))
+            add(data)
+            if (hasNext) add(neighbour("next", if (inQueue) items.getOrNull(pos!! + 1) else null))
+        }
+        curIndex = if (hasPrev) 1 else 0
         val playing = !s.paused
-        return b.setPlaylist(listOf(data))
-            .setCurrentMediaItemIndex(0)
+        return b.setPlaylist(list)
+            .setCurrentMediaItemIndex(curIndex)
             .setPlaybackState(if (s.loading) STATE_BUFFERING else STATE_READY)
             .setPlayWhenReady(playing, PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             .setContentPositionMs(
@@ -173,10 +200,17 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
         return Futures.immediateVoidFuture()
     }
 
+    /** Где в плейлисте сессии текущий трек (0 или 1 — есть ли перед ним предыдущий). */
+    private var curIndex = 0
+
     override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
-        when (seekCommand) {
-            COMMAND_SEEK_TO_NEXT, COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> app.core.next()
-            COMMAND_SEEK_TO_PREVIOUS, COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> app.core.prev()
+        ylog("медиасессия: seek cmd=$seekCommand item=$mediaItemIndex pos=$positionMs")
+        when {
+            seekCommand == COMMAND_SEEK_TO_NEXT || seekCommand == COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> app.core.next()
+            seekCommand == COMMAND_SEEK_TO_PREVIOUS || seekCommand == COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> app.core.prev()
+            // Выбор соседа по номеру (очередь в пульте).
+            mediaItemIndex > curIndex -> app.core.next()
+            mediaItemIndex < curIndex -> app.core.prevTrack()
             else -> app.core.seek(positionMs.coerceAtLeast(0).toULong())
         }
         return Futures.immediateVoidFuture()

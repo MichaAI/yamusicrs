@@ -30,6 +30,9 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.key
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.rememberCoroutineScope
@@ -568,42 +571,93 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState, holes: BlobHoles) {
     }
 }
 
+/** Что сейчас нарисовано на главном: трек и карточка его исполнителя (меняются вместе, когда всё загружено). */
+private data class WaveShown(val t: TrackItem, val artist: uniffi.yamusic_android.ArtistCard?)
+
 /**
  * Что-то играет (волна или любой список): в центре — исполнитель (имя крупно, его фото), обложка трека поверх фото,
  * под ними пауза, название трека (тап — сцена) и «нравится».
+ *
+ * Новый трек показывается, только когда его карточка исполнителя и картинки уже в кеше — иначе мелькает
+ * обложка на месте фото. Трек сменился не свайпом — новая картинка раскрывается кругом из обложки трека;
+ * свайпом — карточка улетает старой и возвращается новой.
  */
 @Composable
 private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier, holes: BlobHoles) {
     val card by app.artist.collectAsStateWithLifecycle()
-    val artist = card?.takeIf { it.artistId == t.artistId }
     val nav = LocalNav.current
-    // Свайп вбок по всему экрану — соседний трек: фото с обложкой уезжают за пальцем, улетают и возвращаются новыми.
     val scope = rememberCoroutineScope()
     val dx = remember { Animatable(0f) }
     val skip = with(LocalDensity.current) { 56.dp.toPx() }
     val (canNext, canPrev) = skipBounds(app, s)
-    val still by remember { derivedStateOf { dx.value == 0f } }
+    var shown by remember { mutableStateOf(WaveShown(t, card?.takeIf { it.artistId == t.artistId })) }
+    var old by remember { mutableStateOf<WaveShown?>(null) }
+    val reveal = remember { Animatable(1f) }
+    // Карточка улетает после свайпа: новый трек подменяется молча, пока её не видно.
+    var flying by remember { mutableStateOf(false) }
+    val curCard by rememberUpdatedState(card)
+    LaunchedEffect(t.id) {
+        if (shown.t.id == t.id) return@LaunchedEffect
+        val a = kotlinx.coroutines.withTimeoutOrNull(1500) {
+            snapshotFlow { curCard }.first { it?.artistId == t.artistId }
+        }
+        kotlinx.coroutines.withTimeoutOrNull(1500) {
+            listOfNotNull(a?.cutout, a?.photo, t.cover).forEach { app.cover(it) }
+        }
+        val next = WaveShown(t, a)
+        if (flying) {
+            old = null
+            shown = next
+            reveal.snapTo(1f)
+        } else {
+            old = shown
+            shown = next
+            try {
+                reveal.snapTo(0f)
+                reveal.animateTo(1f, tween(700, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+            } finally {
+                old = null
+            }
+        }
+    }
+    // Карточка исполнителя пришла позже, чем её ждали, — дорисовываем фото на месте.
+    LaunchedEffect(card) {
+        val c = card ?: return@LaunchedEffect
+        if (c.artistId == shown.t.artistId && shown.artist != c && shown.t.id == t.id) {
+            listOfNotNull(c.cutout, c.photo).forEach { app.cover(it) }
+            shown = shown.copy(artist = c)
+        }
+    }
+    val still by remember { derivedStateOf { dx.value == 0f && old == null } }
+    val cur = shown
+    val artist = cur.artist
     Column(
         modifier.fillMaxWidth().pointerInput(Unit) {
             detectHorizontalDragGestures(
                 onDragEnd = {
                     scope.launch {
                         val w = size.width.toFloat()
-                        when {
-                            dx.value < -skip && canNext.value -> {
-                                app.core.next()
-                                dx.animateTo(-w, tween(160))
-                                dx.snapTo(w * 0.4f)
-                                dx.animateTo(0f, spring(dampingRatio = 0.8f))
-                            }
-                            dx.value > skip && canPrev.value -> {
-                                app.core.prevTrack()
-                                dx.animateTo(w, tween(160))
-                                dx.snapTo(-w * 0.4f)
-                                dx.animateTo(0f, spring(dampingRatio = 0.8f))
-                            }
-                            else -> dx.animateTo(0f, spring(dampingRatio = 0.7f))
+                        val dir = when {
+                            dx.value < -skip && canNext.value -> -1f
+                            dx.value > skip && canPrev.value -> 1f
+                            else -> 0f
                         }
+                        if (dir == 0f) {
+                            dx.animateTo(0f, spring(dampingRatio = 0.7f))
+                            return@launch
+                        }
+                        flying = true
+                        val from = shown.t.id
+                        if (dir < 0) app.core.next() else app.core.prevTrack()
+                        try {
+                            dx.animateTo(dir * w, tween(160))
+                            // Возвращается уже новым: ждём, пока подменится (картинки в кеше).
+                            kotlinx.coroutines.withTimeoutOrNull(2000) { snapshotFlow { shown.t.id }.first { it != from } }
+                        } finally {
+                            flying = false
+                        }
+                        dx.snapTo(-dir * w * 0.4f)
+                        dx.animateTo(0f, spring(dampingRatio = 0.8f))
                     }
                 },
                 onDragCancel = { scope.launch { dx.animateTo(0f) } },
@@ -622,7 +676,7 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
             color = MaterialTheme.colorScheme.primary,
         )
         ScrambleText(
-            artist?.name ?: t.artists,
+            artist?.name ?: cur.t.artists,
             MaterialTheme.typography.displayMedium.copy(fontWeight = FontWeight.Black, textAlign = TextAlign.Center),
             MaterialTheme.colorScheme.onSurface,
             Modifier.padding(horizontal = 24.dp).basicMarquee(initialDelayMillis = 2000),
@@ -637,35 +691,29 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
         ) {
             val side = minOf(maxWidth - 64.dp, maxHeight - 48.dp, 360.dp).coerceAtLeast(120.dp)
             val small = (side * 0.34f).coerceIn(72.dp, 120.dp)
+            val full = maxWidth
             Box(Modifier.size(side, side + small / 2), contentAlignment = Alignment.TopCenter) {
-                val cutout = artist?.cutout
-                if (cutout != null) {
-                    // Вырезанное фото — без рамки, прямо на блобе; низ растворяется к обложке.
-                    // Вырезка шире квадрата — на всю ширину экрана, низом к обложке, без обрезки.
-                    Art(
-                        app, cutout,
-                        Modifier.requiredSize(this@BoxWithConstraints.maxWidth, side).graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                            .drawWithContent {
-                                drawContent()
-                                drawRect(
-                                    Brush.verticalGradient(0.7f to Color.Black, 1f to Color.Transparent),
-                                    blendMode = BlendMode.DstIn,
-                                )
-                            },
-                        plain = true,
-                        align = Alignment.BottomCenter,
-                    )
-                } else {
-                    // Фото исполнителя (или обложка, если фото нет); концентрично: 48 снаружи.
-                    Art(app, artist?.photo ?: t.cover, Modifier.size(side).blobHole(holes, 48.dp, still), corner = 48.dp)
-                }
-                // Обложка трека наполовину на фото, в ободке цвета фона — читается как отдельный слой.
-                // Фото нет — крупно и так обложка, второй раз её не показываем.
-                if (cutout != null || artist?.photo != null) Box(
-                    Modifier.align(Alignment.BottomCenter).size(small + 8.dp).blobHole(holes, 28.dp, still).clip(RoundedCornerShape(28.dp))
-                        .background(MaterialTheme.colorScheme.background).padding(4.dp),
+                old?.let { o -> key(o.t.id) { WaveArt(app, o, side, small, full, holes, false) } }
+                // Круг растёт из обложки трека и накрывает старую картинку новой. Клип — в фазе отрисовки.
+                val smallPx = with(LocalDensity.current) { small.toPx() }
+                Box(
+                    Modifier.matchParentSize().drawWithContent {
+                        val f = reveal.value
+                        // Прерванное раскрытие (трек сменился снова) не оставляет обрезанной картинки.
+                        if (f >= 1f || old == null) {
+                            drawContent()
+                        } else {
+                            val c = Offset(size.width / 2, size.height - smallPx / 2)
+                            val r = kotlin.math.hypot(this.size.width.toDouble(), c.y.toDouble()).toFloat() * 1.3f * f
+                            val circle = androidx.compose.ui.graphics.Path().apply {
+                                addOval(androidx.compose.ui.geometry.Rect(c, r.coerceAtLeast(smallPx / 2 * f)))
+                            }
+                            clipPath(circle) { this@drawWithContent.drawContent() }
+                        }
+                    },
+                    contentAlignment = Alignment.TopCenter,
                 ) {
-                    Art(app, t.cover, Modifier.fillMaxSize(), corner = 24.dp)
+                    key(cur.t.id) { WaveArt(app, cur, side, small, full, holes, still) }
                 }
             }
         }
@@ -682,10 +730,10 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                     .clickable { nav.stage = true }.padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text(t.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1,
+                Text(cur.t.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1,
                     modifier = Modifier.basicMarquee(initialDelayMillis = 2000))
-                if (artist != null && t.album.isNotEmpty()) {
-                    Text(t.album, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (artist != null && cur.t.album.isNotEmpty()) {
+                    Text(cur.t.album, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
@@ -699,6 +747,41 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
             )
         }
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+/** Фото (или вырезка) исполнителя и обложка трека поверх его низа. `full` — ширина экрана для вырезки. */
+@Composable
+private fun BoxScope.WaveArt(app: YaApp, w: WaveShown, side: Dp, small: Dp, full: Dp, holes: BlobHoles, opaque: Boolean) {
+    val artist = w.artist
+    val cutout = artist?.cutout
+    if (cutout != null) {
+        // Вырезанное фото — без рамки, прямо на блобе; низ растворяется к обложке.
+        // Вырезка шире квадрата — на всю ширину экрана, низом к обложке, без обрезки.
+        Art(
+            app, cutout,
+            Modifier.requiredSize(full, side).graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                .drawWithContent {
+                    drawContent()
+                    drawRect(
+                        Brush.verticalGradient(0.7f to Color.Black, 1f to Color.Transparent),
+                        blendMode = BlendMode.DstIn,
+                    )
+                },
+            plain = true,
+            align = Alignment.BottomCenter,
+        )
+    } else {
+        // Фото исполнителя (или обложка, если фото нет); концентрично: 48 снаружи.
+        Art(app, artist?.photo ?: w.t.cover, Modifier.size(side).blobHole(holes, 48.dp, opaque), corner = 48.dp)
+    }
+    // Обложка трека наполовину на фото, в ободке цвета фона — читается как отдельный слой.
+    // Фото нет — крупно и так обложка, второй раз её не показываем.
+    if (cutout != null || artist?.photo != null) Box(
+        Modifier.align(Alignment.BottomCenter).size(small + 8.dp).blobHole(holes, 28.dp, opaque).clip(RoundedCornerShape(28.dp))
+            .background(MaterialTheme.colorScheme.background).padding(4.dp),
+    ) {
+        Art(app, w.t.cover, Modifier.fillMaxSize(), corner = 24.dp)
     }
 }
 
@@ -750,8 +833,15 @@ private fun LibraryTab(app: YaApp, nav: Nav, loading: Boolean) {
     var mode by rememberSaveable { mutableIntStateOf(0) }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Header("Коллекция", "") {}
-        Segments(listOf("Мне нравится", "Плейлисты"), mode, { mode = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
-        if (mode == 0) Likes(app, nav, loading) else PlaylistsGrid(app, nav)
+        Segments(
+            listOf("Мне нравится", "Плейлисты", "Скачанное"), mode, { mode = it },
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+        when (mode) {
+            0 -> Likes(app, nav, loading)
+            1 -> PlaylistsGrid(app, nav)
+            else -> Downloaded(app, nav)
+        }
     }
 }
 
@@ -1493,19 +1583,7 @@ private fun ColumnScope.StageInfo(
     // Кнопки фиксированной ширины, очередь забирает остаток: длинное «128 из 1500» не сдавливает соседей.
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         val idle = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f)
-        ShapeIconButton(
-            Ic.Lyrics,
-            "Текст песни",
-            toggleLyrics,
-            size = 48.dp,
-            container = if (showLyrics && hasLyrics) MaterialTheme.colorScheme.primary else idle,
-            // У трека нет текста — кнопка тусклая.
-            tint = when {
-                !hasLyrics -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                showLyrics -> MaterialTheme.colorScheme.onPrimary
-                else -> MaterialTheme.colorScheme.onSurface
-            },
-        )
+        LyricsButton(showLyrics, hasLyrics, idle, toggleLyrics)
         Row(
             Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(24.dp)).background(idle)
                 .clickable { nav.queue = true }.padding(horizontal = 14.dp),
@@ -1535,6 +1613,59 @@ private fun ColumnScope.StageInfo(
 }
 
 /**
+ * Кнопка текста. Есть текст и он открыт — залита акцентом. Текста у трека нет — серая;
+ * если режим включён, под иконкой точка: текст откроется сам на треке, где он есть.
+ * Цвета и точка переходят анимацией.
+ */
+@Composable
+private fun LyricsButton(on: Boolean, has: Boolean, idle: Color, toggle: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val spec = tween<Color>(300)
+    val container by animateColorAsState(if (on && has) cs.primary else idle, spec, label = "lyrBg")
+    val tint by animateColorAsState(
+        when {
+            !has -> cs.onSurface.copy(alpha = 0.35f)
+            on -> cs.onPrimary
+            else -> cs.onSurface
+        },
+        spec,
+        label = "lyrTint",
+    )
+    val dot by animateFloatAsState(
+        if (on && !has) 1f else 0f,
+        spring(dampingRatio = 0.5f, stiffness = 500f),
+        label = "lyrDot",
+    )
+    Box {
+        ShapeIconButton(Ic.Lyrics, "Текст песни", toggle, size = 48.dp, container = container, tint = tint)
+        // Точка рисуется в фазе отрисовки — без слоя, который пересоздаётся каждый кадр.
+        val dotColor = cs.primary
+        Box(
+            Modifier.matchParentSize().drawBehind {
+                if (dot > 0f) {
+                    drawCircle(dotColor, radius = 2.5.dp.toPx() * dot, center = Offset(size.width / 2, size.height - 9.5.dp.toPx()))
+                }
+            },
+        )
+    }
+}
+
+/**
+ * Строки плавно гаснут к верхнему и нижнему краю контейнера, а не обрезаются. Слой постоянный
+ * (меняется только содержимое), маска рисуется в фазе отрисовки.
+ */
+private fun Modifier.fadeEdges(edge: Dp) = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        val e = (edge.toPx() / size.height).coerceIn(0f, 0.5f)
+        drawRect(
+            Brush.verticalGradient(0f to Color.Transparent, e to Color.Black, 1f - e to Color.Black, 1f to Color.Transparent),
+            blendMode = BlendMode.DstIn,
+        )
+    }
+
+/**
  * Текст песни. Синхронный: строки одного размера (без прыжков вёрстки), текущая — белая и
  * чуть крупнее масштабом, пройденные гаснут, будущие приглушены; держится на трети высоты,
  * тап по строке — перемотка. Обычный — плотным абзацем, пустые строки — паузы между куплетами.
@@ -1548,7 +1679,7 @@ private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
     )
     val ink = MaterialTheme.colorScheme.onSurface
     if (!l.synced) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 16.dp)) {
+        Column(Modifier.fillMaxSize().fadeEdges(48.dp).verticalScroll(rememberScrollState()).padding(vertical = 16.dp)) {
             l.lines.forEach {
                 if (it.text.isBlank()) Spacer(Modifier.height(14.dp))
                 else Text(it.text, style = base.copy(fontWeight = FontWeight.Bold, lineHeight = 28.sp), color = ink.copy(alpha = 0.9f))
@@ -1560,7 +1691,7 @@ private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
     val list = rememberLazyListState()
     LaunchedEffect(cur) { if (cur >= 0) list.animateScrollToItem(cur) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(top = maxHeight / 3, bottom = maxHeight * 2 / 3)) {
+        LazyColumn(Modifier.fillMaxSize().fadeEdges(64.dp), state = list, contentPadding = PaddingValues(top = maxHeight / 3, bottom = maxHeight * 2 / 3)) {
             itemsIndexed(l.lines) { i, line ->
                 val active = i == cur
                 val alpha by animateFloatAsState(

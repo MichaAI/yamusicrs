@@ -201,6 +201,25 @@ impl Fetcher {
         Ok(Some((Source::stream(buf.clone()), Origin::Network { buf })))
     }
 
+    /// Скачивает трек целиком в библиотеку, не играя (умное скачивание).
+    /// `false` — уже был скачан или сохранить не вышло.
+    pub async fn save(&self, track: &Track, q: Quality) -> Result<bool> {
+        if self.library.contains(&track.id) || self.active.lock().contains_key(&track.id) {
+            return Ok(false);
+        }
+        let info = self.client.file_info(&track.id, q).await?;
+        let urls = info.urls();
+        if urls.is_empty() {
+            return Err(eyre!("сервер не дал ссылку на файл"));
+        }
+        let key = cipher_key(&info)?;
+        let buf = StreamBuffer::new(info.size)?;
+        self.download(&urls, key, &buf, 0, None).await?;
+        buf.finish();
+        self.persist(track.clone(), info.codec.clone(), quality_rank(q), buf).await;
+        Ok(self.library.contains(&track.id))
+    }
+
     /// Запускает загрузку в фоне; по завершении трек ложится в библиотеку.
     /// `rank` — какое качество просили (по нему библиотека решает, искать ли лучше).
     fn start_download(&self, track: &Track, info: &DownloadInfo, rank: u8) -> Result<Arc<StreamBuffer>> {

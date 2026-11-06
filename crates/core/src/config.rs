@@ -42,6 +42,16 @@ pub struct Config {
     pub warm_ahead: usize,
     /// Список (плейлист, альбом…) доиграл — дальше волна по нему, а не тишина.
     pub wave_after_list: bool,
+    /// Офлайн по своей воле: без сети, только скачанное (как флаг --offline, но запоминается).
+    pub offline_mode: bool,
+    /// В шапке альбома — полная дата выхода (день и месяц), а не только год.
+    pub full_release_date: bool,
+    /// Умное скачивание: сервер подбирает треки для офлайн-волны, они докачиваются сами.
+    pub smart_download: bool,
+    /// Качество умного скачивания — отдельно от качества стрима: lossless | hq | nq.
+    pub smart_quality: Quality,
+    /// Сколько места отдать умному скачиванию, ГиБ.
+    pub smart_limit_gb: f64,
 }
 
 impl Default for Config {
@@ -66,6 +76,11 @@ impl Default for Config {
             fast_start: true,
             warm_ahead: 5,
             wave_after_list: true,
+            offline_mode: false,
+            full_release_date: false,
+            smart_download: false,
+            smart_quality: Quality::Hq,
+            smart_limit_gb: 2.0,
         }
     }
 }

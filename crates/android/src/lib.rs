@@ -192,6 +192,21 @@ pub struct SettingsData {
     pub wave_after_list: bool,
     /// Ynison: видно в «Слушать на…», можно управлять другими устройствами.
     pub ynison: bool,
+    /// Офлайн-режим по своей воле: только скачанное.
+    pub offline_mode: bool,
+    /// Полная дата выхода альбома в его шапке.
+    pub full_release_date: bool,
+    /// Умное скачивание треков для офлайн-волны.
+    pub smart_download: bool,
+    /// Его качество: `lossless`, `hq` или `nq`.
+    pub smart_quality: String,
+    /// Сколько места ему отдать, ГиБ.
+    pub smart_limit_gb: f32,
+    /// Сколько уже занято умным скачиванием, ГиБ.
+    pub smart_used_gb: f32,
+    /// Вся библиотека: треков и ГиБ (с точностью 0,1).
+    pub library_tracks: u32,
+    pub library_gb: f32,
     /// Состояние Ynison для подписи («играет здесь», «Яндекс не пускает…»).
     pub ynison_status: String,
     /// Недавние поисковые запросы, свежие первыми.
@@ -264,6 +279,11 @@ enum Cmd {
     ReportPlays(bool),
     FastStart(bool),
     WaveAfterList(bool),
+    OfflineMode(bool),
+    FullReleaseDate(bool),
+    SmartDownload(bool),
+    SmartQuality(String),
+    SmartLimit(f32),
     Ynison(bool),
     Transfer(String),
     RemotePlayPause,
@@ -434,6 +454,11 @@ impl Core {
         self.open(Req::Chart)
     }
 
+    /// Скачанное (работает и без сети).
+    pub fn downloaded(&self) -> u64 {
+        self.open(Req::Downloaded)
+    }
+
     /// Страница закрыта — её треки больше не нужны.
     pub fn close_page(&self, id: u64) {
         self.send(Cmd::ClosePage(id));
@@ -481,6 +506,27 @@ impl Core {
 
     pub fn set_wave_after_list(&self, on: bool) {
         self.send(Cmd::WaveAfterList(on));
+    }
+
+    pub fn set_offline_mode(&self, on: bool) {
+        self.send(Cmd::OfflineMode(on));
+    }
+
+    pub fn set_full_release_date(&self, on: bool) {
+        self.send(Cmd::FullReleaseDate(on));
+    }
+
+    pub fn set_smart_download(&self, on: bool) {
+        self.send(Cmd::SmartDownload(on));
+    }
+
+    /// `lossless`, `hq` или `nq`.
+    pub fn set_smart_quality(&self, q: String) {
+        self.send(Cmd::SmartQuality(q));
+    }
+
+    pub fn set_smart_limit(&self, gb: f32) {
+        self.send(Cmd::SmartLimit(gb));
     }
 
     pub fn set_ynison(&self, on: bool) {
@@ -863,6 +909,22 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             e.cfg.wave_after_list = on;
             e.cfg.save(&e.paths);
         }
+        Cmd::OfflineMode(on) => e.set_offline_mode(on),
+        Cmd::FullReleaseDate(on) => {
+            e.cfg.full_release_date = on;
+            e.cfg.save(&e.paths);
+        }
+        Cmd::SmartDownload(on) => e.set_smart_download(on),
+        Cmd::SmartQuality(q) => {
+            if let Some(q) = parse_quality(&q) {
+                e.cfg.smart_quality = q;
+                e.cfg.save(&e.paths);
+            }
+        }
+        Cmd::SmartLimit(gb) => {
+            e.cfg.smart_limit_gb = gb.max(0.0) as f64;
+            e.cfg.save(&e.paths);
+        }
         Cmd::Ynison(on) => {
             let flag = ynison_flag(&e.paths);
             let _ = if on { std::fs::write(&flag, b"1") } else { std::fs::remove_file(&flag) };
@@ -942,12 +1004,7 @@ impl Publisher {
             l.on_playlists(own, personal);
         }
         let settings = SettingsData {
-            quality: match e.quality() {
-                api::Quality::Lossless => "lossless",
-                api::Quality::Hq => "hq",
-                api::Quality::Nq => "nq",
-            }
-            .into(),
+            quality: quality_str(e.quality()).into(),
             normalize: e.normalize(),
             target_lufs: e.cfg.normalize_target_lufs,
             crossfade_secs: e.crossfade(),
@@ -955,6 +1012,15 @@ impl Publisher {
             fast_start: e.cfg.fast_start,
             wave_after_list: e.cfg.wave_after_list,
             ynison: e.cfg.ynison,
+            offline_mode: e.cfg.offline_mode,
+            full_release_date: e.cfg.full_release_date,
+            smart_download: e.cfg.smart_download,
+            smart_quality: quality_str(e.cfg.smart_quality).into(),
+            smart_limit_gb: e.cfg.smart_limit_gb as f32,
+            // Округлено до 0,1 ГиБ: иначе настройки пересылаются на каждый скачанный мегабайт.
+            smart_used_gb: gib(e.library.smart_bytes()),
+            library_tracks: e.library.stats().0 as u32,
+            library_gb: gib(e.library.stats().1),
             ynison_status: e.ynison_label(),
             search_history: e.state.search_history.clone(),
         };
@@ -1038,4 +1104,26 @@ fn khz(rate: u32) -> String {
     } else {
         format!("{:.1}", rate as f32 / 1000.0)
     }
+}
+
+fn quality_str(q: api::Quality) -> &'static str {
+    match q {
+        api::Quality::Lossless => "lossless",
+        api::Quality::Hq => "hq",
+        api::Quality::Nq => "nq",
+    }
+}
+
+fn parse_quality(s: &str) -> Option<api::Quality> {
+    Some(match s {
+        "lossless" => api::Quality::Lossless,
+        "hq" => api::Quality::Hq,
+        "nq" => api::Quality::Nq,
+        _ => return None,
+    })
+}
+
+/// Байты → ГиБ с точностью 0,1: иначе настройки пересылаются на каждый скачанный мегабайт.
+fn gib(b: u64) -> f32 {
+    (b as f64 / (1024.0 * 1024.0 * 1024.0) * 10.0).round() as f32 / 10.0
 }
