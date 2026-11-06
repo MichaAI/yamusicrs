@@ -52,6 +52,11 @@ import androidx.compose.ui.draw.shadow
 import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.material3.ButtonGroupDefaults
+import androidx.compose.material3.ToggleButton
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.ui.composed
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
@@ -418,9 +423,12 @@ private fun PendingHero(app: YaApp, nav: Nav, route: Route, tap: Tap?) {
 }
 
 @Composable
-private fun TopBar(title: String, nav: Nav) {
+private fun TopBar(title: String, nav: Nav) = TopBar(title) { nav.back() }
+
+@Composable
+private fun TopBar(title: String, back: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        ShapeIconButton(Ic.Back, "Назад", { nav.back() }, size = 48.dp)
+        ShapeIconButton(Ic.Back, "Назад", back, size = 48.dp)
         Spacer(Modifier.width(12.dp))
         Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
@@ -1127,34 +1135,24 @@ private fun Legend(color: Color, text: String) {
     }
 }
 
-/** Переключатель-пилюли (сегменты). */
+/** Выбор одного из вариантов: связанная группа кнопок MD3E (выбранная — полностью круглая). */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
-    // Концентрично: снаружи 24, отступ 4, внутри 20.
-    Row(
-        modifier.clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
         options.forEachIndexed { i, o ->
-            val on = i == selected
-            val bg by androidx.compose.animation.animateColorAsState(
-                if (on) MaterialTheme.colorScheme.primary else Color.Transparent, spring(stiffness = 400f), label = "seg",
-            )
-            val fg by androidx.compose.animation.animateColorAsState(
-                if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface, label = "segFg",
-            )
-            Box(
-                Modifier.weight(1f).bounceClick(RoundedCornerShape(20.dp)) { onSelect(i) }.background(bg)
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center,
+            ToggleButton(
+                checked = i == selected,
+                onCheckedChange = { onSelect(i) },
+                modifier = Modifier.weight(1f),
+                shapes = when (i) {
+                    0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                    options.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                    else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
+                },
+                contentPadding = PaddingValues(horizontal = 4.dp),
             ) {
-                Text(
-                    o,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
-                    color = fg,
-                    maxLines = 1,
-                )
+                Text(o, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Clip)
             }
         }
     }
@@ -1163,7 +1161,6 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
 // ── настройки ───────────────────────────────────────────────────────────────
 
 private val QUALITIES = listOf("lossless" to "Lossless", "auto" to "Авто", "hq" to "Высокое", "nq" to "Экономия")
-private val QUALITIES_AUTO = QUALITIES
 private val CROSSFADES = listOf(0f, 3f, 6f, 10f)
 private val SMART_LIMITS = listOf(1f, 2f, 5f, 10f, 20f)
 
@@ -1307,11 +1304,7 @@ private val SMART_WINDOWS = listOf("Всегда", "Ночью", "Свои ча�
 @Composable
 private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            ShapeIconButton(Ic.Back, "Назад", back, size = 48.dp)
-            Spacer(Modifier.width(12.dp))
-            Text("Офлайн и докачка", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        }
+        TopBar("Офлайн и докачка", back)
         var confirm by remember { mutableStateOf<Boolean?>(null) }
         confirm?.let { smartOnly ->
             AlertDialog(
@@ -1355,8 +1348,8 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
             androidx.compose.animation.AnimatedVisibility(s.smartDownload) {
                 Column {
                     Group("Качество докачки", "Отдельно от качества стрима. «Авто» — как решит Яндекс по скорости сети") {
-                        Segments(QUALITIES_AUTO.map { it.second }, QUALITIES_AUTO.indexOfFirst { it.first == s.smartQuality }.coerceAtLeast(0), {
-                            app.core.setSmartQuality(QUALITIES_AUTO[it].first)
+                        Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.smartQuality }.coerceAtLeast(0), {
+                            app.core.setSmartQuality(QUALITIES[it].first)
                         }, Modifier.fillMaxWidth())
                     }
                     Group("Место", "Сколько отдать подобранным трекам; занято ${"%.1f".format(s.smartUsedGb)} ГБ") {
@@ -1432,17 +1425,22 @@ private fun SubmenuRow(title: String, hint: String, open: () -> Unit) {
     }
 }
 
-/** Пункт настроек: плоский, без карточки; пункты разделены тонкой линией. */
+/** Раздел настроек: скруглённый контейнер, соседние разделы разделены зазором (MD3E). */
 @Composable
 private fun Group(title: String?, hint: String?, content: @Composable ColumnScope.() -> Unit) {
-    HorizontalDivider(Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 18.dp)) {
-        title?.let { Text(it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        hint?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
+    Surface(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp)) {
+            title?.let { Text(it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            hint?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(12.dp))
+            }
+            content()
         }
-        content()
     }
 }
 
@@ -1454,7 +1452,10 @@ private fun Toggle(title: String, hint: String, on: Boolean, set: (Boolean) -> U
             Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.width(12.dp))
-        Switch(on, set)
+        Switch(
+            on, set,
+            thumbContent = if (on) ({ Icon(Ic.Check, null, Modifier.size(SwitchDefaults.IconSize)) }) else null,
+        )
     }
 }
 

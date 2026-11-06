@@ -100,6 +100,16 @@ impl Tab {
 }
 
 /// Строка вкладки «Настройки».
+/// Пресеты эквалайзера на 10 полос (31 Гц … 16 кГц), дБ.
+fn eq_presets() -> Vec<(&'static str, Vec<f32>)> {
+    vec![
+        ("плоский", vec![0.0; 10]),
+        ("бас", vec![6.0, 5.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        ("вокал", vec![-2.0, -2.0, -1.0, 0.0, 2.0, 3.0, 3.0, 1.0, 0.0, -1.0]),
+        ("яркий", vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 4.0, 5.0, 5.0]),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Quality,
@@ -119,12 +129,14 @@ pub enum Setting {
     FullReleaseDate,
     Fps,
     Dither,
+    Visualizer,
+    Equalizer,
     /// Действие: перепроверить качество скачанных треков.
     Recheck,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 11] = [
+    pub const ALL: [Setting; 13] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
@@ -135,6 +147,8 @@ impl Setting {
         Setting::FullReleaseDate,
         Setting::Fps,
         Setting::Dither,
+        Setting::Visualizer,
+        Setting::Equalizer,
         Setting::Recheck,
     ];
 
@@ -171,6 +185,8 @@ impl Setting {
             Setting::FullReleaseDate => "Полная дата выхода альбома",
             Setting::Fps => "Кадров в секунду",
             Setting::Dither => "Дизеринг блоба",
+            Setting::Visualizer => "Фон плеера",
+            Setting::Equalizer => "Эквалайзер",
             Setting::Recheck => "Перепроверить качество скачанного",
         }
     }
@@ -192,6 +208,8 @@ impl Setting {
             Setting::SmartLimit => "Сколько места отдать подобранным трекам.",
             Setting::FullReleaseDate => "В шапке альбома — день, месяц и год выхода, а не только год.",
             Setting::Fps => "Частота кадров анимаций (блоб, прокрутка, перебор символов).",
+            Setting::Visualizer => "Блоб — мягкие пятна цвета обложки, спектр — столбики по звучанию.",
+            Setting::Equalizer => "10 полос; пресеты: плоский, бас, вокал, яркий. Точная настройка — eq_gains в config.toml. Плоский и выключенный не трогают звук.",
             Setting::Dither => "Шум против «колец» на градиентах блоба, в ступенях 8 бит; 0 — выключен.",
             Setting::Recheck => "Сервер не дал lossless — трек помечается и не перепроверяется 30 дней. Enter снимает пометки: каждый трек хуже lossless спросит сервер заново при следующем проигрывании и, если дадут лучше, перекачается.",
         }
@@ -455,6 +473,8 @@ pub struct App {
     pub blob_colors: [[f32; 3]; 4],
     /// Плавные энергия и скорость блоба.
     pub blob_energy: f32,
+    /// Сглаженные уровни столбиков спектра.
+    pub spec: Vec<f32>,
     pub blob_speed: f32,
     pub images: Images,
     pub gfx: crate::render::Gfx,
@@ -596,6 +616,7 @@ impl App {
             search: None,
             wave_phase: 0.0,
             blob_energy: 0.0,
+            spec: Vec::new(),
             blob_speed: 0.3,
             blob_colors: [
                 [255.0, 204.0, 0.0],
@@ -1426,6 +1447,10 @@ impl App {
                 0 => "выкл".into(),
                 d => d.to_string(),
             },
+            Setting::Visualizer => if self.engine.cfg.visualizer == "spectrum" { "спектр" } else { "блоб" }.into(),
+            Setting::Equalizer => if !self.engine.cfg.eq_enabled { "выкл" } else {
+                eq_presets().iter().find(|(_, g)| self.engine.cfg.eq_gains == *g).map_or("свой", |(n, _)| *n)
+            }.into(),
             Setting::Recheck => match self.engine.library.below_lossless() {
                 0 => "всё уже в lossless".into(),
                 n => format!("{n} тр. хуже lossless"),
@@ -1529,6 +1554,24 @@ impl App {
             Setting::Dither => {
                 self.engine.cfg.blob_dither = step(5, self.engine.cfg.blob_dither.min(4) as usize) as u32;
                 self.engine.cfg.save(&self.engine.paths);
+            }
+            Setting::Visualizer => {
+                self.engine.cfg.visualizer = if self.engine.cfg.visualizer == "spectrum" { "blob" } else { "spectrum" }.into();
+                self.engine.cfg.save(&self.engine.paths);
+            }
+            Setting::Equalizer => {
+                // Выкл → пресеты по кругу → выкл.
+                let cur = if self.engine.cfg.eq_enabled {
+                    eq_presets().iter().position(|(_, g)| self.engine.cfg.eq_gains == *g).map_or(0, |i| i + 1)
+                } else {
+                    0
+                };
+                let next = step(eq_presets().len() + 1, cur);
+                self.engine.cfg.eq_enabled = next > 0;
+                if next > 0 {
+                    self.engine.cfg.eq_gains = eq_presets()[next - 1].1.clone();
+                }
+                self.engine.apply_eq();
             }
             Setting::Recheck if dir == 0 => self.engine.recheck_library(),
             Setting::Recheck => {}

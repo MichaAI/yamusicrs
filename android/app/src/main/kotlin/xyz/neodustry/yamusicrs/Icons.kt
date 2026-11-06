@@ -13,6 +13,7 @@ object Ic {
             .addPath(PathParser().parsePathString(path).toNodes(), fill = SolidColor(Color.Black))
             .build()
 
+    val Check = icon("check", "M9,16.17L4.83,12l-1.42,1.41L9,19 21,7l-1.41,-1.41z")
     val Play = icon("play", "M8,5v14l11,-7z")
     val Pause = icon("pause", "M6,19h4V5H6v14zM14,5v14h4V5h-4z")
     val Next = icon("next", "M6,18l8.5,-6L6,6v12zM16,6v12h2V6h-2z")

@@ -2155,6 +2155,15 @@ fn draw_aura(
     // «Энергия» (размах движения шаров) тоже догоняет цель плавно.
     app.blob_energy += (energy - app.blob_energy) * (ctx.dt * 2.0).min(1.0);
     let energy = app.blob_energy;
+    let spectrum = app.engine.cfg.visualizer == "spectrum";
+    app.engine.player.set_spectrum(spectrum);
+    if spectrum {
+        app.images.hide_blob();
+        if !app.show_help {
+            draw_spectrum(f, app, ctx, rect, colors);
+        }
+        return colors;
+    }
     // Пиксели кадра в пропорциях области: ~256 по ширине.
     let pw = 256u32;
     let ph =
@@ -2193,6 +2202,47 @@ fn draw_aura(
         blob_halfblocks(f, rect, colors, app.wave_phase);
     }
     colors
+}
+
+/// Спектр вместо блоба: столбики из блоков 1/8 высоты от нижнего края области, цвет — из палитры.
+fn draw_spectrum(f: &mut Frame, app: &mut App, ctx: &Ctx, r: Rect, colors: Cols) {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let bars = (r.width as usize / 2).clamp(8, 64);
+    let raw = if app.engine.player.paused() { Vec::new() } else { app.engine.player.shared().spectrum() };
+    app.spec.resize(bars, 0.0);
+    let k = (ctx.dt * 7.0).min(1.0);
+    for (i, lv) in app.spec.iter_mut().enumerate() {
+        let (a, b) = (i * raw.len() / bars, ((i + 1) * raw.len() / bars).max(i * raw.len() / bars + 1));
+        let v = raw.get(a..b.min(raw.len())).map_or(0.0, |s| s.iter().cloned().fold(0.0, f32::max)).powf(1.6);
+        *lv = if v > *lv { v } else { *lv + (v - *lv) * k };
+    }
+    let (lo, hi) = (colors[1], colors[2]);
+    let buf = f.buffer_mut();
+    let rows = (r.height as f32 * 0.7).max(1.0);
+    for (i, lv) in app.spec.iter().enumerate() {
+        let x0 = r.x + (i as u32 * r.width as u32 / bars as u32) as u16;
+        let x1 = r.x + ((i as u32 + 1) * r.width as u32 / bars as u32) as u16;
+        let eighths = (lv * rows * 8.0).round() as usize;
+        for row in 0..r.height {
+            let from_bottom = row as usize;
+            let full = eighths / 8;
+            let ch = if from_bottom < full {
+                '█'
+            } else if from_bottom == full && eighths % 8 > 0 {
+                BLOCKS[eighths % 8 - 1]
+            } else {
+                break;
+            };
+            let t = from_bottom as f32 / rows;
+            let c = |j: usize| (lo[j] + (hi[j] - lo[j]) * t.min(1.0)) as u8;
+            let y = r.y + r.height - 1 - row;
+            for x in x0..x1.saturating_sub(if x1 - x0 > 1 { 1 } else { 0 }) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(ch).set_fg(Color::Rgb(c(0), c(1), c(2)));
+                }
+            }
+        }
+    }
 }
 
 /// Четыре цвета палитры блоба (0..255).
