@@ -299,9 +299,14 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
     val fresh = pages[route.id]
     if (fresh != null && fresh !== last) last = fresh
     when (val p = fresh ?: last) {
-        null -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            TopBar(route.title, nav)
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator(Modifier.size(72.dp)) }
+        null -> {
+            val tap = nav.fly?.takeIf { it.routeId == route.id }?.tap
+            if (tap != null) {
+                PendingHero(app, nav, route, tap)
+            } else Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                TopBar(route.title, nav)
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator(Modifier.size(72.dp)) }
+            }
         }
         is Page.Failed -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
             TopBar(route.title, nav)
@@ -319,6 +324,51 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
             TopBar(p.query, nav)
             SearchResults(app, nav, p, src)
         }
+    }
+}
+
+/**
+ * Пока список треков грузится, шапка уже стоит на своём месте: обложка известна заранее,
+ * так что она летит сразу, а не после ответа сети.
+ */
+@Composable
+private fun PendingHero(app: YaApp, nav: Nav, route: Route, tap: Tap) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            Spacer(Modifier.height(64.dp))
+            Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Art(
+                    app, tap.url,
+                    Modifier.size(232.dp)
+                        .onGloballyPositioned { c ->
+                            if (nav.fly?.routeId == route.id) {
+                                val r = c.boundsInRoot()
+                                if (nav.flyTarget != r) nav.flyTarget = r
+                                nav.flyUrl = tap.url
+                            }
+                        }
+                        .graphicsLayer { alpha = if (nav.fly?.routeId == route.id) 0f else 1f },
+                    corner = 36.dp,
+                )
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    route.title,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Black,
+                    textAlign = TextAlign.Center,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(32.dp))
+                LoadingIndicator(Modifier.size(48.dp))
+            }
+        }
+        ShapeIconButton(
+            Ic.Back, "Назад", { nav.back() },
+            Modifier.statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp),
+            size = 48.dp,
+            container = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f),
+        )
     }
 }
 
