@@ -2,7 +2,6 @@
 
 package xyz.neodustry.yamusicrs
 
-import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -22,6 +21,7 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.animation.core.SeekableTransitionState
@@ -403,8 +403,38 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     val scope = rememberCoroutineScope()
     val nav = remember { Nav(app) }
     // Со вкладки, кроме первой, «назад» ведёт на «Волну», а не закрывает приложение.
-    androidx.activity.compose.BackHandler(!nav.stage && nav.stack.isEmpty() && pager.currentPage != 0) {
-        scope.launch { pager.animateScrollToPage(0) }
+    val libPager = rememberPagerState { 3 }
+    var settingsSub by rememberSaveable { mutableStateOf(false) }
+    val settingsPull = remember { Animatable(0f) }
+    nav.tabNow = { pager.currentPage }
+    // «Назад» поднимается на шаг: подменю настроек → раздел коллекции «Мне нравится» → «Волна».
+    // Предиктивно: страница уезжает за пальцем (до трети), отпустили — доезжаем, передумали — назад.
+    WindowBackHandler(enabled = !nav.stage && nav.stack.isEmpty() && pager.currentPage != 0) { progress ->
+        val tab = Tab.entries[pager.currentPage]
+        val inSub = tab == Tab.Settings && settingsSub
+        val inSection = tab == Tab.Library && libPager.currentPage != 0
+        val target = if (inSection) libPager else pager
+        try {
+            if (inSub) {
+                progress.collect { settingsPull.snapTo(it.progress) }
+                settingsSub = false
+                settingsPull.animateTo(0f, spring(stiffness = 300f))
+            } else {
+                val width = (target.layoutInfo.pageSize + target.layoutInfo.pageSpacing).toFloat()
+                target.scroll {
+                    var shown = 0f
+                    progress.collect {
+                        val want = it.progress * width * 0.33f
+                        scrollBy(-(want - shown))
+                        shown = want
+                    }
+                }
+                target.animateScrollToPage(0)
+            }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            if (inSub) settingsPull.animateTo(0f, spring(dampingRatio = 0.8f)) else target.animateScrollToPage(target.settledPage)
+            throw e
+        }
     }
     // Позже объявленный обработчик главнее: сначала сворачивается сцена, потом страницы.
     // «Назад» со страниц и сцены — предиктивный (PredictiveBackHandler в PageHost и Stage).
@@ -424,7 +454,18 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     LaunchedEffect(nav.stage) {
         if (stageState.currentState != nav.stage || stageState.targetState != nav.stage) stageState.animateTo(nav.stage)
     }
-    // «Назад» со сцены — предиктивный: сцену за пальцем сжимает сама Stage (PredictiveBackHandler в ней).
+    // «Назад» со сцены — предиктивный: переход сцена → мини-плеер идёт за пальцем (сцена
+    // морфится в пилюлю), отпустили — доезжает, передумали — сцена раскрывается обратно.
+    WindowBackHandler(enabled = nav.stage && hasTrack) { progress ->
+        try {
+            progress.collect { stageState.seekTo(it.progress, false) }
+            stageState.animateTo(false)
+            nav.stage = false
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            stageState.animateTo(true)
+            throw e
+        }
+    }
     val now = NowMark(s.track?.id, !s.paused)
     // Непрозрачное поверх блобов: у экрана волны и у сцены — свои.
     val waveHoles = remember { BlobHoles() }
@@ -446,10 +487,10 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
                     Box(Modifier.fillMaxSize().then(if (Tab.entries[page] == Tab.Library) Modifier else Modifier.nestedScroll(KeepHorizontal))) {
                     when (Tab.entries[page]) {
                         Tab.Wave -> WaveTab(app, pal, s, waveHoles)
-                        Tab.Library -> LibraryTab(app, nav, s.likesLoading)
+                        Tab.Library -> LibraryTab(app, nav, s.likesLoading, libPager)
                         Tab.Search -> SearchTab(app, nav)
                         Tab.Releases -> ReleasesTab(app, nav)
-                        Tab.Settings -> SettingsTab(app)
+                        Tab.Settings -> SettingsTab(app, settingsSub, { settingsSub = it }, { settingsPull.value })
                     }
                     }
                 }
@@ -831,8 +872,7 @@ private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () ->
 // ── коллекция и очередь ──────────────────────────────────────────────────────
 
 @Composable
-private fun LibraryTab(app: YaApp, nav: Nav, loading: Boolean) {
-    val pager = rememberPagerState { 3 }
+private fun LibraryTab(app: YaApp, nav: Nav, loading: Boolean, pager: PagerState) {
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Header("Коллекция", "") {}
@@ -1215,22 +1255,7 @@ private fun Stage(
     val scrim by animateFloatAsState(if (lyricsOn) 0.62f else 0f, tween(400), label = "scrim")
     // Чем дальше утянули, тем сильнее скругление и меньше масштаб — видно, что сворачивается.
     // («Назад» сворачивает сцену в мини-плеер за пальцем — это переход в Main.)
-    // Жест «назад» сворачивает сцену за пальцем тем же сжатием, что и свайп вниз.
-    val back = remember { Animatable(0f) }
-    var backEdge by remember { mutableIntStateOf(androidx.activity.BackEventCompat.EDGE_LEFT) }
-    PredictiveBackHandler(enabled = true) { progress ->
-        try {
-            progress.collect {
-                backEdge = it.swipeEdge
-                back.snapTo(it.progress)
-            }
-            close()
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            scope.launch { back.animateTo(0f, spring(dampingRatio = 0.8f)) }
-            throw e
-        }
-    }
-    val pull = maxOf((dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f), back.value)
+    val pull = (dy.value / with(density) { 400.dp.toPx() }).coerceIn(0f, 1f)
     with(shared) {
         Box(
             Modifier
@@ -1245,9 +1270,6 @@ private fun Stage(
                     val k = 1f - pull * 0.1f
                     scaleX = k
                     scaleY = k
-                    // От какого края тянут «назад» — туда сцена и подаётся.
-                    val dir = if (backEdge == androidx.activity.BackEventCompat.EDGE_RIGHT) -1f else 1f
-                    translationX = dir * back.value * 24.dp.toPx()
                     shape = RoundedCornerShape((pull * 40).dp)
                     clip = pull > 0f
                 }

@@ -90,6 +90,9 @@ data class Route(
     val tab: Int = -1,
     /** Адрес для «Поделиться» (без параметров), если у страницы он есть. */
     val share: String? = null,
+    /** Обложка нажатой карточки и вкладка, на которой она была: для полёта обратно. */
+    val tap: Tap? = null,
+    val origin: Int = -1,
 )
 
 private const val MUSIC_HOST = "https://music.yandex.ru"
@@ -148,6 +151,15 @@ data class Tap(val from: androidx.compose.ui.geometry.Rect, val url: String, val
 /** Полёт обложки на страницу `routeId`. */
 data class Fly(val routeId: ULong, val tap: Tap)
 
+/**
+ * Обратный полёт: обложка с шапки закрываемой страницы возвращается на свою карточку.
+ * `t` — 0..1; жест «назад» ведёт его за пальцем (`manual`), иначе он доезжает сам.
+ */
+class FlyBack(val routeId: ULong, val tap: Tap, val from: androidx.compose.ui.geometry.Rect) {
+    var t by androidx.compose.runtime.mutableFloatStateOf(0f)
+    var manual = false
+}
+
 /** Трек, для которого открыто меню: откуда он и под каким индексом. */
 data class MenuTarget(val track: TrackItem, val source: Source, val index: Int)
 
@@ -172,10 +184,17 @@ class Nav(private val app: YaApp) {
     var flyTarget by mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
     var flyUrl: String? = null
 
+    /** Текущая вкладка приложения (задаёт Main): обратный полёт только на ту же вкладку. */
+    var tabNow: () -> Int = { 0 }
+    /** Где сейчас обложка-шапка каждой открытой страницы; пишется без рекомпозиции. */
+    val heroRects = HashMap<ULong, androidx.compose.ui.geometry.Rect>()
+    var flyBack by mutableStateOf<FlyBack?>(null)
+
     private var seq = 0
 
     private fun push(id: ULong, title: String, tab: Int = -1, share: String? = null) {
-        fly = tapped?.let { Fly(id, it) }
+        val tap = tapped
+        fly = tap?.let { Fly(id, it) }
         flyTarget = null
         tapped = null
         stage = false
@@ -183,7 +202,7 @@ class Nav(private val app: YaApp) {
         menu = null
         artists = null
         lyrics = false
-        stack.add(Route(id, title, ++seq, tab, share))
+        stack.add(Route(id, title, ++seq, tab, share, tap, tabNow()))
     }
 
     /** К исполнителю трека; если их несколько — сначала выбрать, к какому. */
@@ -216,13 +235,31 @@ class Nav(private val app: YaApp) {
 
     fun chart() = push(app.core.chart(), "Чарт")
 
-    fun back() {
+    /**
+     * Обложка вернётся на карточку, только если страница одна над вкладкой, с которой её открыли,
+     * и шапка сейчас на виду. Иначе остаётся обычный уход страницы.
+     */
+    fun prepareFlyBack(r: Route): FlyBack? {
+        val tap = r.tap ?: return null
+        if (stack.size != 1 || r.origin != tabNow()) return null
+        val h = heroRects[r.id] ?: return null
+        if (h.top < 0f || h.width <= 0f) return null
+        return FlyBack(r.id, tap, h).also { flyBack = it }
+    }
+
+    fun back(animated: Boolean = true) {
         fly = null
-        stack.removeLastOrNull()?.let { if (it.tab < 0) app.closePage(it.id) }
+        val top = stack.lastOrNull()
+        if (animated && top != null && flyBack == null) prepareFlyBack(top)
+        stack.removeLastOrNull()?.let {
+            heroRects.remove(it.id)
+            if (it.tab < 0) app.closePage(it.id)
+        }
     }
 
     fun clear() {
-        while (stack.isNotEmpty()) back()
+        flyBack = null
+        while (stack.isNotEmpty()) back(animated = false)
     }
 }
 
@@ -251,18 +288,29 @@ fun PageHost(app: YaApp, nav: Nav) {
     LaunchedEffect(top) {
         if (state.currentState != top || state.targetState != top) state.animateTo(top)
     }
-    androidx.activity.compose.PredictiveBackHandler(enabled = nav.stack.isNotEmpty() && !nav.stage) { progress ->
+    WindowBackHandler(enabled = nav.stack.isNotEmpty() && !nav.stage) { progress ->
         val below = nav.stack.getOrNull(nav.stack.size - 2)
+        // Обложка шапки летит на свою карточку за пальцем.
+        val fb = nav.stack.lastOrNull()?.let { nav.prepareFlyBack(it) }?.also { it.manual = true }
         try {
             progress.collect {
                 edge = it.swipeEdge
                 state.seekTo(it.progress, below)
+                fb?.t = it.progress
             }
             // Сначала доезжаем, потом выкидываем страницу: иначе уходящая мигнёт пустой.
-            state.animateTo(below)
+            kotlinx.coroutines.coroutineScope {
+                if (fb != null) launch { androidx.compose.animation.core.animate(fb.t, 1f, animationSpec = tween(300, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { v, _ -> fb.t = v } }
+                state.animateTo(below)
+            }
             nav.back()
+            nav.flyBack = null
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            state.animateTo(state.currentState)
+            kotlinx.coroutines.coroutineScope {
+                if (fb != null) launch { androidx.compose.animation.core.animate(fb.t, 0f, animationSpec = tween(220)) { v, _ -> fb.t = v } }
+                state.animateTo(state.currentState)
+            }
+            if (nav.flyBack === fb) nav.flyBack = null
             throw e
         }
     }
@@ -296,6 +344,7 @@ fun PageHost(app: YaApp, nav: Nav) {
         }
     }
     FlyOverlay(app, nav)
+    FlyBackOverlay(app, nav)
 }
 
 /** Обложка нажатой карточки перелетает на своё место на открывшейся странице. */
@@ -341,6 +390,39 @@ private fun FlyOverlay(app: YaApp, nav: Nav) {
     }
 }
 
+/** Обложка возвращается с шапки закрывающейся страницы на свою карточку. */
+@Composable
+private fun FlyBackOverlay(app: YaApp, nav: Nav) {
+    val fb = nav.flyBack ?: return
+    LaunchedEffect(fb) {
+        if (fb.manual) return@LaunchedEffect
+        androidx.compose.animation.core.animate(0f, 1f, animationSpec = tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { v, _ -> fb.t = v }
+        if (nav.flyBack === fb) nav.flyBack = null
+    }
+    var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
+        val f = fb.from
+        val to = fb.tap.from
+        val k = fb.t
+        val d = androidx.compose.ui.platform.LocalDensity.current
+        Art(
+            app, fb.tap.url,
+            Modifier
+                .offset {
+                    androidx.compose.ui.unit.IntOffset(
+                        (androidx.compose.ui.util.lerp(f.left, to.left, k) - origin.x).roundToInt(),
+                        (androidx.compose.ui.util.lerp(f.top, to.top, k) - origin.y).roundToInt(),
+                    )
+                }
+                .size(
+                    with(d) { androidx.compose.ui.util.lerp(f.width, to.width, k).toDp() },
+                    with(d) { androidx.compose.ui.util.lerp(f.height, to.height, k).toDp() },
+                ),
+            corner = androidx.compose.ui.unit.lerp(36.dp, fb.tap.corner, k),
+        )
+    }
+}
+
 /** Переход вглубь стека (а не назад). */
 private fun fwdOf(t: androidx.compose.animation.core.Transition<Route?>) =
     (t.targetState?.seq ?: 0) > (t.currentState?.seq ?: 0)
@@ -354,7 +436,13 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
     val fresh = pages[route.id]
     if (fresh != null && fresh !== last) last = fresh
     val shown = fresh ?: last
-    androidx.compose.animation.Crossfade(shown, animationSpec = tween(280), label = "pageLoad") { p ->
+    // Новое проявляется поверх старого, а старое не гаснет: иначе две одинаковые обложки
+    // на середине перехода просвечивают друг сквозь друга и шапка мигает.
+    AnimatedContent(
+        shown,
+        transitionSpec = { fadeIn(tween(280)) togetherWith androidx.compose.animation.ExitTransition.None },
+        label = "pageLoad",
+    ) { p ->
     when (p) {
         null -> {
             PendingHero(app, nav, route, nav.fly?.takeIf { it.routeId == route.id }?.tap)
@@ -416,13 +504,14 @@ private fun PendingHero(app: YaApp, nav: Nav, route: Route, tap: Tap?) {
                     app, tap.url,
                     Modifier.size(232.dp)
                         .onGloballyPositioned { c ->
+                            val r = c.boundsInRoot()
+                            nav.heroRects[route.id] = r
                             if (nav.fly?.routeId == route.id) {
-                                val r = c.boundsInRoot()
                                 if (nav.flyTarget != r) nav.flyTarget = r
                                 nav.flyUrl = tap.url
                             }
                         }
-                        .graphicsLayer { alpha = if (nav.fly?.routeId == route.id) 0f else 1f },
+                        .graphicsLayer { alpha = if (nav.fly?.routeId == route.id || nav.flyBack?.routeId == route.id) 0f else 1f },
                     corner = 36.dp,
                 )
                 Spacer(Modifier.height(20.dp))
@@ -506,14 +595,15 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
                         app, p.cover,
                         Modifier.size(232.dp)
                             .onGloballyPositioned { c ->
+                                val r = c.boundsInRoot()
+                                if (pid != null) nav.heroRects[pid] = r
                                 // Сюда прилетает обложка нажатой карточки.
                                 if (nav.fly?.routeId == pid) {
-                                    val r = c.boundsInRoot()
                                     if (nav.flyTarget != r) nav.flyTarget = r
                                     nav.flyUrl = p.cover
                                 }
                             }
-                            .graphicsLayer { alpha = if (nav.fly?.routeId == pid) 0f else 1f },
+                            .graphicsLayer { alpha = if (nav.fly?.routeId == pid || nav.flyBack?.routeId == pid) 0f else 1f },
                         corner = 36.dp,
                     )
                     Spacer(Modifier.height(20.dp))
@@ -1260,20 +1350,20 @@ private val CROSSFADES = listOf(0f, 3f, 6f, 10f)
 private val SMART_LIMITS = listOf(1f, 2f, 5f, 10f, 20f)
 
 @Composable
-fun SettingsTab(app: YaApp) {
+fun SettingsTab(app: YaApp, sub: Boolean, setSub: (Boolean) -> Unit, pull: () -> Float) {
     val st by app.settings.collectAsStateWithLifecycle()
     val s: SettingsData = st ?: return
-    var sub by rememberSaveable { mutableStateOf(false) }
-    androidx.activity.compose.BackHandler(sub) { sub = false }
     AnimatedContent(
         sub,
+        // Жест «назад» из подменю чуть сдвигает его за пальцем.
+        modifier = Modifier.graphicsLayer { translationX = pull() * size.width * 0.12f },
         transitionSpec = {
             val dir = if (targetState) 1 else -1
             (slideInHorizontally { it * dir / 4 } + fadeIn()) togetherWith (slideOutHorizontally { -it * dir / 4 } + fadeOut())
         },
         label = "settingsSub",
     ) { inSub ->
-        if (inSub) OfflineSettings(app, s) { sub = false } else MainSettings(app, s) { sub = true }
+        if (inSub) OfflineSettings(app, s) { setSub(false) } else MainSettings(app, s) { setSub(true) }
     }
 }
 
