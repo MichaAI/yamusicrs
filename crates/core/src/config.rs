@@ -86,7 +86,7 @@ impl Default for Config {
             wave_after_list: true,
             offline_mode: false,
             full_release_date: false,
-            playlist_shortcuts: true,
+            playlist_shortcuts: false,
             smart_download: false,
             smart_quality: Quality::Hq,
             smart_limit_gb: 2.0,
