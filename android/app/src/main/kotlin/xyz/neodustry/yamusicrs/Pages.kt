@@ -25,6 +25,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -61,6 +64,7 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -108,18 +112,61 @@ fun shareText(context: android.content.Context, path: String) {
     context.startActivity(android.content.Intent.createChooser(send, null).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
 }
 
+/** Где обложка карточки сейчас: рамка, область, в которую её пускает вьюпорт списка, и весь экран. */
+class Probe(val rect: androidx.compose.ui.geometry.Rect, val clip: androidx.compose.ui.geometry.Rect, val screen: androidx.compose.ui.geometry.Rect)
+
+private fun probeOf(c: androidx.compose.ui.layout.LayoutCoordinates): Probe {
+    val r = c.boundsInRoot()
+    // boundsInWindow обрезана родителями (вьюпортом списка): где она меньше boundsInRoot,
+    // там карточка срезана — это и есть край области, по которой режем полёт.
+    val w = c.boundsInWindow()
+    val root = c.findRootCoordinates().size
+    val screen = androidx.compose.ui.geometry.Rect(0f, 0f, root.width.toFloat(), root.height.toFloat())
+    val clip = androidx.compose.ui.geometry.Rect(
+        if (w.left > r.left + 1f) w.left else screen.left,
+        if (w.top > r.top + 1f) w.top else screen.top,
+        if (w.right < r.right - 1f) w.right else screen.right,
+        if (w.bottom < r.bottom - 1f) w.bottom else screen.bottom,
+    )
+    return Probe(r, clip, screen)
+}
+
+/** Что стоит на месте улетевшей обложки. */
+private val COVER_EGGS = listOf("🛸", "🚀", "👻", "🦆", "🐙", "🍩", "🪁", "🐌")
+
 /**
  * Запоминает рамку обложки карточки; `tap()` перед переходом отдаёт её навигации, и страница
- * принимает обложку на своё место.
+ * принимает обложку на своё место. Пока обложка улетела (на странице или в полёте), на её месте
+ * заглушка с пасхалкой; обложка возвращается ровно на неё.
  */
 @Composable
 fun rememberCoverTap(url: String?): Pair<Modifier, () -> Unit> {
     val nav = LocalNav.current
     // Рамку считаем только по нажатию: при прокрутке колбэк лишь запоминает координаты.
     val box = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
-    val mod = Modifier.onGloballyPositioned { box[0] = it }
+    val card = remember { Any() }
+    val away = nav.stack.lastOrNull()?.tap?.card === card || nav.flyBack?.tap?.card === card
+    val gone by animateFloatAsState(if (away) 1f else 0f, tween(180), label = "coverAway")
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    val egg = remember(card) { COVER_EGGS[(System.identityHashCode(card) and 0x7fffffff) % COVER_EGGS.size] }
+    val holder = MaterialTheme.colorScheme.surfaceContainerHighest
+    val mod = Modifier
+        .onGloballyPositioned { box[0] = it }
+        .drawBehind {
+            if (gone > 0f) {
+                drawRoundRect(holder, cornerRadius = androidx.compose.ui.geometry.CornerRadius(20.dp.toPx()), alpha = gone)
+                val t = measurer.measure(egg, androidx.compose.ui.text.TextStyle(fontSize = (size.minDimension * 0.32f).toSp()))
+                drawText(
+                    t,
+                    topLeft = androidx.compose.ui.geometry.Offset((size.width - t.size.width) / 2f, (size.height - t.size.height) / 2f),
+                    alpha = gone,
+                )
+            }
+        }
+        .graphicsLayer { alpha = 1f - gone }
+    val measure: () -> Probe? = { box[0]?.takeIf { it.isAttached }?.let(::probeOf) }
     val tap = {
-        box[0]?.takeIf { it.isAttached }?.let { c -> if (url != null) nav.tapped = Tap(c.boundsInRoot(), url, 20.dp) }
+        if (url != null) measure()?.let { nav.tapped = Tap(it.rect, url, 20.dp, it.clip, it.screen, card, measure) }
         Unit
     }
     return mod to tap
@@ -146,7 +193,22 @@ private fun DownloadProgress(have: Int, total: Int) {
 }
 
 /** Откуда летит обложка: рамка в окне, адрес картинки, скругление. */
-data class Tap(val from: androidx.compose.ui.geometry.Rect, val url: String, val corner: Dp)
+data class Tap(
+    val from: androidx.compose.ui.geometry.Rect,
+    val url: String,
+    val corner: Dp,
+    /**
+     * Куда карточку пускает вьюпорт списка (в корневых координатах): края, где она обрезана
+     * шапкой или низом, и весь экран с остальных сторон. Оверлей полёта режется по этой области,
+     * так что обложка уходит под шапку так же, как сама карточка.
+     */
+    val clip: androidx.compose.ui.geometry.Rect = androidx.compose.ui.geometry.Rect(0f, 0f, 1e5f, 1e5f),
+    val screen: androidx.compose.ui.geometry.Rect = clip,
+    /** Какая именно карточка: на её месте стоит заглушка, пока обложка улетела. */
+    val card: Any? = null,
+    /** Живые координаты карточки: цель полёта берётся у неё каждый кадр, а не из снимка при нажатии. */
+    val now: () -> Probe? = { null },
+)
 
 /** Полёт обложки на страницу `routeId`. */
 data class Fly(val routeId: ULong, val tap: Tap)
@@ -366,7 +428,11 @@ private fun FlyOverlay(app: YaApp, nav: Nav) {
         if (nav.fly === fly) nav.fly = null
     }
     var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-    Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
+    Box(
+        Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }.clipToFlight(
+            { androidx.compose.ui.geometry.lerp(fly.tap.clip, fly.tap.screen, t.value) }, { origin },
+        ),
+    ) {
         if (to != null) {
             val f = fly.tap.from
             val k = t.value
@@ -390,6 +456,16 @@ private fun FlyOverlay(app: YaApp, nav: Nav) {
     }
 }
 
+/** Режет рисование по области `area` (корневые координаты); `origin` — где в корне начинается этот слой. */
+private fun Modifier.clipToFlight(
+    area: () -> androidx.compose.ui.geometry.Rect,
+    origin: () -> androidx.compose.ui.geometry.Offset,
+): Modifier = drawWithContent {
+    val a = area()
+    val o = origin()
+    clipRect(a.left - o.x, a.top - o.y, a.right - o.x, a.bottom - o.y) { this@drawWithContent.drawContent() }
+}
+
 /** Обложка возвращается с шапки закрывающейся страницы на свою карточку. */
 @Composable
 private fun FlyBackOverlay(app: YaApp, nav: Nav) {
@@ -400,9 +476,15 @@ private fun FlyBackOverlay(app: YaApp, nav: Nav) {
         if (nav.flyBack === fb) nav.flyBack = null
     }
     var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-    Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
+    // Цель — там, где карточка стоит сейчас (живые координаты), снимок при нажатии — запасной.
+    fun live() = fb.tap.now()
+    Box(
+        Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }.clipToFlight(
+            { androidx.compose.ui.geometry.lerp(live()?.screen ?: fb.tap.screen, live()?.clip ?: fb.tap.clip, fb.t) }, { origin },
+        ),
+    ) {
         val f = fb.from
-        val to = fb.tap.from
+        val to = live()?.rect ?: fb.tap.from
         val k = fb.t
         val d = androidx.compose.ui.platform.LocalDensity.current
         Art(
@@ -441,6 +523,10 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
     AnimatedContent(
         shown,
         transitionSpec = { fadeIn(tween(280)) togetherWith androidx.compose.animation.ExitTransition.None },
+        // Слот по виду страницы, а не по объекту: ядро пушит новую Page при каждом обновлении
+        // (большие плейлисты приходят частями), и с ключом-объектом каждый такой пуш заново
+        // проявлял пересобранный список поверх старого, сбрасывая прокрутку.
+        contentKey = { it?.let { page -> page::class } },
         label = "pageLoad",
     ) { p ->
     when (p) {
