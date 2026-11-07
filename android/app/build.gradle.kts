@@ -47,6 +47,11 @@ android {
         compose = true
     }
 
+    // lintVital на каждой release-сборке съедал ~50 с из ~110; сборка тут для себя, lint при желании: ./gradlew lint.
+    lint {
+        checkReleaseBuilds = false
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
