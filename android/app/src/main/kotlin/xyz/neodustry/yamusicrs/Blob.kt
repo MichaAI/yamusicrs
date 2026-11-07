@@ -382,10 +382,76 @@ private fun ShaderBlob(c: List<Color>, phase: () -> Float, energy: () -> Float, 
                 )
             }
         }
+        val qsx = 2f / w * sx / zoom
+        val qsy = 2f / h * sy / zoom
         if (path.isEmpty) {
-            drawRect(brush, area.topLeft, area.size)
+            drawLiveCells(brush, b, area, qsx, qsy, -sx / zoom, -sy / zoom)
         } else {
-            clipPath(path, androidx.compose.ui.graphics.ClipOp.Difference) { drawRect(brush, area.topLeft, area.size) }
+            clipPath(path, androidx.compose.ui.graphics.ClipOp.Difference) {
+                drawLiveCells(brush, b, area, qsx, qsy, -sx / zoom, -sy / zoom)
+            }
+        }
+    }
+}
+
+/** Сторона ячейки отсечки, px: около размера тайла GPU, чтобы мёртвые тайлы не доходили до шейдера. */
+private const val CELL = 64f
+
+/**
+ * Рисует шейдер только в ячейках, где блоб может быть виден. Для ячейки (в координатах шейдера q)
+ * поле f = Σ rₖ²/d² не больше Σ rₖ²/dₘᵢₙ², где dₘᵢₙ — расстояние от центра шара до ячейки (то же
+ * `max(.., 1e-4)`, что в шейдере). Если эта оценка ≤ 0,28 (шейдер делает пиксель прозрачным при
+ * f ≤ 0,30), ни один пиксель ячейки не изменился бы, поэтому её не рисуем: на тайловом GPU такие
+ * тайлы вообще не получают фрагментной работы, а в живых соседних не считается и деление в шейдере
+ * для пикселей, которые он всё равно обнулил бы. Картинка не меняется (проверено эмуляцией:
+ * ни одного живого пикселя вне нарисованных ячеек). Соседние ячейки строки сливаются в один прямоугольник.
+ * `b` — 7 шаров по (x, y, r), `area` — внешняя граница досягаемости блоба.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawLiveCells(
+    brush: Brush, b: FloatArray, area: androidx.compose.ui.geometry.Rect,
+    qsx: Float, qsy: Float, qox: Float, qoy: Float,
+) {
+    val w = size.width
+    val h = size.height
+    val cols = kotlin.math.ceil(w / CELL).toInt()
+    val rows = kotlin.math.ceil(h / CELL).toInt()
+    for (r in 0 until rows) {
+        val y0 = r * CELL
+        val y1 = min(y0 + CELL, h)
+        if (y1 <= area.top || y0 >= area.bottom) continue
+        val qy0 = y0 * qsy + qoy
+        val qy1 = y1 * qsy + qoy
+        val top = kotlin.math.max(y0, area.top)
+        val bottom = min(y1, area.bottom)
+        var start = -1
+        for (c in 0..cols) {
+            var live = false
+            if (c < cols) {
+                val x0 = c * CELL
+                val x1 = min(x0 + CELL, w)
+                if (x1 > area.left && x0 < area.right) {
+                    val qx0 = x0 * qsx + qox
+                    val qx1 = x1 * qsx + qox
+                    var f = 0f
+                    for (k in 0 until 7) {
+                        val bx = b[k * 3]
+                        val by = b[k * 3 + 1]
+                        val rr = b[k * 3 + 2]
+                        val dx = kotlin.math.max(kotlin.math.max(qx0 - bx, 0f), bx - qx1)
+                        val dy = kotlin.math.max(kotlin.math.max(qy0 - by, 0f), by - qy1)
+                        f += rr * rr / kotlin.math.max(dx * dx + dy * dy, 1e-4f)
+                    }
+                    live = f > 0.28f
+                }
+            }
+            if (live) {
+                if (start < 0) start = c
+            } else if (start >= 0) {
+                val l = kotlin.math.max(start * CELL, area.left)
+                val rgt = min(min(c * CELL, w), area.right)
+                if (rgt > l && bottom > top) drawRect(brush, Offset(l, top), androidx.compose.ui.geometry.Size(rgt - l, bottom - top))
+                start = -1
+            }
         }
     }
 }

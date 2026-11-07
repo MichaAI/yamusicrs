@@ -2033,10 +2033,11 @@ fun RemotePill(app: YaApp, nav: Nav, r: uniffi.yamusic_android.RemoteNow) {
     val frac = if (r.durationMs > 0u) (pos.toFloat() / r.durationMs.toFloat()).coerceIn(0f, 1f) else 0f
     val fill = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
     Surface(
+        onClick = { nav.devices = true },
         shape = RoundedCornerShape(32.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         shadowElevation = 12.dp,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp).clickable { nav.devices = true },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Box {
             Box(Modifier.matchParentSize().drawBehindFill(frac, fill))

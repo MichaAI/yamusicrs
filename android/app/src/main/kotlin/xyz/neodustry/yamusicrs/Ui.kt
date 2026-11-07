@@ -1121,7 +1121,10 @@ private fun MiniPlayer(
     val up = with(density) { 28.dp.toPx() }
     val (canNext, canPrev) = skipBounds(app, s)
     with(shared) {
+        // onClick у самого Surface: выделение клипуется по его форме (clickable в модификаторах
+        // рисовал бы ripple по прямоугольнику границ, а .clip перед ним срезал бы тень).
         Surface(
+            onClick = open,
             shape = RoundedCornerShape(32.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             tonalElevation = 6.dp,
@@ -1170,8 +1173,7 @@ private fun MiniPlayer(
                         y += d.y
                         scope.launch { dx.snapTo(x) }
                     }
-                }
-                .clickable(onClick = open),
+                },
         ) {
             Box {
                 ProgressFill(clock, t.durationMs.toLong(), Modifier.matchParentSize())
