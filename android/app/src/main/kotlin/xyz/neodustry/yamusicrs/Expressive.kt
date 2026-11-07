@@ -475,9 +475,19 @@ fun WavySeek(clock: PlayClock, durationMs: Long, playing: Boolean, onSeek: (Long
 
 /** Картинка по https; пока грузится — тонированная подложка. */
 @Composable
-fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain: Boolean = false, align: Alignment = Alignment.Center) {
+fun Art(
+    app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain: Boolean = false, align: Alignment = Alignment.Center,
+    /**
+     * Картинка, которая уже на экране на этом месте (карточка, с которой прилетела обложка): пока
+     * своя не загружена, остаётся она, а не серая подложка, а загрузившаяся заменяет её между кадрами
+     * (картинки почти всегда те же): иначе при первом открытии страницы обложка мигала —
+     * карточка → заглушка → проявление версии из сети.
+     */
+    fallbackUrl: String? = null,
+) {
     val bmp by produceState<Bitmap?>(app.cached(url), url) { value = url?.let { app.cover(it) } }
     val img = remember(bmp) { bmp?.asImageBitmap() }
+    val under = remember(url) { if (app.cached(url) == null) app.cached(fallbackUrl)?.asImageBitmap() else null }
     // plain — картинка как есть (иконки агентов волны с прозрачностью): без подложки и скругления.
     // Фото (непрозрачный угол) скругляем и в plain-режиме; иконки с прозрачностью — как есть.
     val photo = remember(bmp) { bmp?.let { (it.getPixel(0, 0) ushr 24) == 0xFF } ?: false }
@@ -487,9 +497,12 @@ fun Art(app: YaApp, url: String?, modifier: Modifier, corner: Dp = 12.dp, plain:
         else -> modifier
     }
     // Из кеша — сразу и без слоя; пришла из сети — проявляется и чуть «оседает».
-    val fade = remember(url) { if (app.cached(url) != null) null else Animatable(0f) }
+    // Есть что показать вместо неё (картинка карточки) — подмена между кадрами, без проявления и «оседания».
+    val fade = remember(url) { if (app.cached(url) != null || under != null) null else Animatable(0f) }
     if (fade != null) LaunchedEffect(img) { if (img != null) fade.animateTo(1f, tween(320)) }
     Box(box) {
+        // Пока своей нет — на её месте картинка карточки; своя пришла — заменяет в тот же кадр.
+        if (img == null) under?.let { Image(it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
         img?.let {
             Image(
                 it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop,

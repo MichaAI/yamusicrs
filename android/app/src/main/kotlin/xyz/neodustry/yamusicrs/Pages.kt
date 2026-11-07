@@ -146,7 +146,14 @@ fun rememberCoverTap(url: String?): Pair<Modifier, () -> Unit> {
     val box = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     val card = remember { Any() }
     val away = nav.stack.lastOrNull()?.tap?.card === card || nav.flyBack?.tap?.card === card
-    val gone by animateFloatAsState(if (away) 1f else 0f, tween(180), label = "coverAway")
+    // Обложка прилетела обратно ровно на карточку, и оверлей убирается в этот же кадр: карточка
+    // должна показать её сразу. Иначе `gone` плавно ехал бы 1→0 и на месте обложки на 180 мс
+    // оставалась заглушка с эмодзи — после посадки мигало. Новый animateFloatAsState стартует
+    // сразу со значения цели (0), поэтому на каждую посадку (ключ — сама посадка) он создаётся заново.
+    val goneState = androidx.compose.runtime.key(nav.landed?.takeIf { it.tap.card === card }) {
+        animateFloatAsState(if (away) 1f else 0f, tween(180), label = "coverAway")
+    }
+    val gone by goneState
     val measurer = androidx.compose.ui.text.rememberTextMeasurer()
     val egg = remember(card) { COVER_EGGS[(System.identityHashCode(card) and 0x7fffffff) % COVER_EGGS.size] }
     val holder = MaterialTheme.colorScheme.surfaceContainerHighest
@@ -251,6 +258,16 @@ class Nav(private val app: YaApp) {
     /** Где сейчас обложка-шапка каждой открытой страницы; пишется без рекомпозиции. */
     val heroRects = HashMap<ULong, androidx.compose.ui.geometry.Rect>()
     var flyBack by mutableStateOf<FlyBack?>(null)
+    /** Последний обратный полёт, что приземлился: карточка по нему показывает обложку без проявления. */
+    var landed by mutableStateOf<FlyBack?>(null)
+
+    /** Обратный полёт закончен: обложка села на карточку. */
+    fun land(fb: FlyBack?) {
+        if (fb != null && flyBack === fb) {
+            landed = fb
+            flyBack = null
+        }
+    }
 
     private var seq = 0
 
@@ -366,6 +383,7 @@ fun PageHost(app: YaApp, nav: Nav) {
                 state.animateTo(below)
             }
             nav.back()
+            nav.land(fb)
             nav.flyBack = null
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             kotlinx.coroutines.coroutineScope {
@@ -473,7 +491,7 @@ private fun FlyBackOverlay(app: YaApp, nav: Nav) {
     LaunchedEffect(fb) {
         if (fb.manual) return@LaunchedEffect
         androidx.compose.animation.core.animate(0f, 1f, animationSpec = tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { v, _ -> fb.t = v }
-        if (nav.flyBack === fb) nav.flyBack = null
+        nav.land(fb)
     }
     var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     // Цель — там, где карточка стоит сейчас (живые координаты), снимок при нажатии — запасной.
@@ -708,7 +726,8 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
                     val pid = (src as? Source.Page)?.id
                     Art(
                         app, p.cover,
-                        Modifier.size(232.dp)
+                        fallbackUrl = nav.stack.lastOrNull { it.id == pid }?.tap?.url,
+                        modifier = Modifier.size(232.dp)
                             .onGloballyPositioned { c ->
                                 val r = c.boundsInRoot()
                                 if (pid != null) nav.heroRects[pid] = r
