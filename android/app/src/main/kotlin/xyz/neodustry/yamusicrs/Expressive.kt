@@ -302,7 +302,7 @@ fun rememberPlayClock(s: PlayerState): PlayClock {
  * Волна активной части, как в quickshell (`assets/shaders/wave.frag`) и у MD3E: синусоида
  * толщиной `thick` со скруглёнными концами; цвет — градиент c0 → c1, смешанный в OkLab.
  */
-private const val WAVE_AGSL = """
+internal const val WAVE_AGSL = """
 uniform float2 size;
 uniform float amp;
 uniform float wavelength;

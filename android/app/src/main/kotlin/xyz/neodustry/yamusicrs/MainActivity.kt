@@ -10,12 +10,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private var controller: ListenableFuture<MediaController>? = null
+
+    /** Единственное окно жеста «назад» (см. [BackHost]). */
+    val backHost = BackHost(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,6 +35,11 @@ class MainActivity : ComponentActivity() {
         setContent {
             AppScreen(app, openUrl = { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) })
         }
+        // Окно «назад» создаётся заранее, когда запуск уже отрисован: на переходах его не создают.
+        lifecycleScope.launch {
+            delay(1500)
+            backHost.warmUp()
+        }
     }
 
     override fun onStart() {
@@ -36,6 +47,11 @@ class MainActivity : ComponentActivity() {
         // Подключение к сессии поднимает медиасервис: уведомление и фон, когда заиграет.
         controller = MediaController.Builder(this, SessionToken(this, ComponentName(this, PlaybackService::class.java)))
             .buildAsync()
+    }
+
+    override fun onDestroy() {
+        backHost.release()
+        super.onDestroy()
     }
 
     override fun onStop() {

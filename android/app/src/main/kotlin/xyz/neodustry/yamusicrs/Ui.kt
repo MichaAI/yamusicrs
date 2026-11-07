@@ -128,6 +128,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -392,6 +393,32 @@ private object KeepHorizontal : androidx.compose.ui.input.nestedscroll.NestedScr
 /** Затухание к концу перехода: пока жест «назад» в начале, уходящее ещё видно. */
 val LateFade = androidx.compose.animation.core.Easing { f -> (f * 1.6f - 0.6f).coerceIn(0f, 1f) }
 
+/** Прогрев сцены уже был в этом процессе. */
+private var stageWarmed = false
+
+/**
+ * Невидимая копия сцены на время прогрева: полноэкранная по раскладке, но обрезана до 1 dp и почти
+ * прозрачна. Свой SharedTransitionLayout — ключи общих элементов не пересекаются с настоящими.
+ * Шейдеры прогреваются отдельно мелким видимым квадратом (под обрезкой GPU их бы пропустил).
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun StageWarmup(app: YaApp, pal: Pal, s: PlayerState, clock: PlayClock) {
+    val holes = remember { BlobHoles() }
+    val d = LocalDensity.current
+    val win = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize
+    Box(Modifier.size(1.dp).clipToBounds()) {
+        Box(Modifier.requiredSize(with(d) { win.width.toDp() }, with(d) { win.height.toDp() }).graphicsLayer { alpha = 0.02f }) {
+            SharedTransitionLayout {
+                AnimatedVisibility(true) {
+                    Stage(app, pal, s, clock, this@SharedTransitionLayout, this, holes) {}
+                }
+            }
+        }
+    }
+    ShaderWarmup()
+}
+
 /** Ключи общих элементов: мини-плеер вырастает в сцену, обложка перелетает. */
 private const val KEY_PLAYER = "player"
 private const val KEY_COVER = "cover"
@@ -465,6 +492,18 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
             stageState.animateTo(true)
             throw e
         }
+    }
+    // Прогрев: один раз за запуск, когда есть трек и всё улеглось, сцена невидимо композируется
+    // заранее — классы, раскладка текста и шейдеры готовы к первому настоящему открытию.
+    var warmStage by remember { mutableStateOf(false) }
+    LaunchedEffect(hasTrack) {
+        if (!hasTrack || stageWarmed) return@LaunchedEffect
+        kotlinx.coroutines.delay(2500)
+        if (nav.stage) return@LaunchedEffect
+        stageWarmed = true
+        warmStage = true
+        kotlinx.coroutines.delay(1500)
+        warmStage = false
     }
     val now = NowMark(s.track?.id, !s.paused)
     // Непрозрачное поверх блобов: у экрана волны и у сцены — свои.
@@ -542,6 +581,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
             Stage(app, pal, s, clock, this@SharedTransitionLayout, this, stageHoles) { nav.stage = false }
         }
     }
+    if (warmStage && !nav.stage) StageWarmup(app, pal, s, clock)
     QueueSheet(app, nav, s.queuePos?.toInt())
     DevicesSheet(app, nav, s)
     TrackMenu(app, nav)

@@ -7,6 +7,8 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -25,6 +27,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.node.currentValueOf
 import androidx.compose.ui.layout.findRootCoordinates
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import kotlin.math.min
 import kotlin.math.sin
@@ -63,6 +66,9 @@ half4 main(float2 p) {
     half v0 = field(q, b0); half v1 = field(q, b1); half v2 = field(q, b2); half v3 = field(q, b3);
     half v4 = field(q, b4); half v5 = field(q, b5); half v6 = field(q, b6);
     half f = v0 + v1 + v2 + v3 + v4 + v5 + v6;
+    // smoothstep(0.30, 1.35, f) = 0 при f ≤ 0.30: прозрачно — веса, цвет и деление не считаем.
+    // Ветка когерентная (целые области экрана), на тайловых GPU такие пиксели почти бесплатны.
+    if (f <= 0.30) return half4(0.0);
     // Веса цвета v³, нормированные на f³ (отношение то же): u = v/f ∈ [0, 1], Σu³ ≥ 1/49 —
     // в half ни переполнения у центров, ни провала в ноль на краю.
     half n = 1.0 / max(f, 1e-3);
@@ -86,8 +92,8 @@ half4 main(float2 p) {
  * Шары блоба на фазе `t` при размахе `e`: 7 × (x, y, r). Основные пять мягко расталкиваются,
  * чтобы не сходились почти вплотную. Считается раз за кадр — не в шейдере на каждый пиксель.
  */
-private fun blobBalls(t: Float, e: Float): FloatArray {
-    val b = FloatArray(21)
+// `b` — 31 float: 21 под шары, дальше исходные x (5) и y (5) основных шаров до расталкивания.
+private fun blobBalls(t: Float, e: Float, b: FloatArray = FloatArray(31)): FloatArray {
     for (k in 0 until 7) {
         val fk = k.toFloat()
         if (k < 5) {
@@ -103,8 +109,10 @@ private fun blobBalls(t: Float, e: Float): FloatArray {
             b[k * 3 + 2] = 0.09f
         }
     }
-    val x0 = FloatArray(5) { b[it * 3] }
-    val y0 = FloatArray(5) { b[it * 3 + 1] }
+    for (i in 0 until 5) {
+        b[21 + i] = b[i * 3]
+        b[26 + i] = b[i * 3 + 1]
+    }
     repeat(2) {
         for (i in 0 until 5) {
             var px = 0f
@@ -136,12 +144,12 @@ private fun blobBalls(t: Float, e: Float): FloatArray {
     }
     // Расталкивание сдвигает шар не дальше PUSH_MAX — на этом держится граница BLOB_REACH.
     for (i in 0 until 5) {
-        val dx = b[i * 3] - x0[i]
-        val dy = b[i * 3 + 1] - y0[i]
+        val dx = b[i * 3] - b[21 + i]
+        val dy = b[i * 3 + 1] - b[26 + i]
         val l = kotlin.math.sqrt(dx * dx + dy * dy)
         if (l > PUSH_MAX) {
-            b[i * 3] = x0[i] + dx / l * PUSH_MAX
-            b[i * 3 + 1] = y0[i] + dy / l * PUSH_MAX
+            b[i * 3] = b[21 + i] + dx / l * PUSH_MAX
+            b[i * 3 + 1] = b[26 + i] + dy / l * PUSH_MAX
         }
     }
     return b
@@ -286,20 +294,31 @@ fun Blob(colors: List<Color>, playing: Boolean, modifier: Modifier = Modifier, z
 private fun BlobOnly(colors: List<Color>, playing: Boolean, modifier: Modifier, zoom: Float, holes: BlobHoles?) {
     val c = colors.take(4).map { animateColorAsState(it, tween(900), label = "blob").value }
     var phase by remember { mutableFloatStateOf(0f) }
-    var speed by remember { mutableFloatStateOf(0.3f) }
     var energy by remember { mutableFloatStateOf(0f) }
     val play by rememberUpdatedState(playing)
     // Как в TUI: «дышит» быстрее, когда играет; скорость и размах догоняют цель плавно.
+    // Блоб плавный, поэтому состояние для отрисовки публикуется не чаще BLOB_STEP_NS (~60 раз/с
+    // даже на 120 Гц): слой с шейдером перерисовывается вдвое реже, остальной UI — на полной частоте.
     LaunchedEffect(Unit) {
         var last = 0L
+        var published = 0L
+        var speed = 0.3f
+        var e = 0f
+        var acc = 0f
         while (true) {
             withFrameNanos { now ->
                 val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.1f)
                 last = now
                 val k = min(dt * 2f, 1f)
                 speed += ((if (play) 1f else 0.3f) - speed) * k
-                energy += ((if (play) 1f else 0f) - energy) * k
-                phase += dt * speed
+                e += ((if (play) 1f else 0f) - e) * k
+                acc += dt * speed
+                if (now - published >= BLOB_STEP_NS) {
+                    published = now
+                    phase += acc
+                    acc = 0f
+                    energy = e
+                }
             }
         }
     }
@@ -322,18 +341,55 @@ private object BlobShaders {
     }
 }
 
+/** Линейное разрешение слоя блоба относительно экрана: 0,5 — в 4 раза меньше пикселей для шейдера. */
+private const val BLOB_RES = 0.5f
+private const val BLOB_STEP_NS = 15_000_000L
+private val BALL_NAMES = Array(7) { "b$it" }
+private val COLOR_NAMES = Array(4) { "k$it" }
+
+/**
+ * Блоб — гладкое поле, так что шейдер считается в слое [BLOB_RES]× экрана (отдельный offscreen-слой
+ * этого размера) и растягивается на весь экран. Для тайловых GPU это выгоднее всего: фрагментная
+ * работа падает в 1/BLOB_RES² раз, слой маленький и живёт в тайловой памяти, а в основной проход
+ * идёт одна текстурная выборка вместо сотни ALU на пиксель. Слой не перерисовывается, пока
+ * фаза не менялась. Вырезы под непрозрачные элементы (`holes`) больше не нужны: они требовали
+ * сложного clip-пути (stencil на тайлерах) ради экономии, которую теперь даёт разрешение.
+ */
 @RequiresApi(33)
 @Composable
-private fun ShaderBlob(c: List<Color>, phase: () -> Float, energy: () -> Float, zoom: Float, modifier: Modifier, holes: BlobHoles?) {
+private fun ShaderBlob(
+    c: List<Color>, phase: () -> Float, energy: () -> Float, zoom: Float, modifier: Modifier,
+    @Suppress("UNUSED_PARAMETER") holes: BlobHoles?,
+) {
     // Компиляция шейдера заметна по времени — берём готовый из пула (их нужно два:
     // вкладка «Волна» и сцена видны одновременно во время перехода).
     val shader = remember { BlobShaders.take() }
     DisposableEffect(shader) { onDispose { BlobShaders.give(shader) } }
     val brush = remember(shader) { ShaderBrush(shader) }
-    var me by remember { androidx.compose.runtime.mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
-    val path = remember { androidx.compose.ui.graphics.Path() }
-    Canvas(modifier.onGloballyPositioned { me = it }) {
+    val balls = remember { FloatArray(31) }
+    Canvas(
+        modifier.layout { measurable, constraints ->
+            if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
+                val p = measurable.measure(constraints)
+                return@layout layout(p.width, p.height) { p.place(0, 0) }
+            }
+            val w = constraints.maxWidth
+            val h = constraints.maxHeight
+            val cw = kotlin.math.ceil(w * BLOB_RES).toInt().coerceAtLeast(1)
+            val ch = kotlin.math.ceil(h * BLOB_RES).toInt().coerceAtLeast(1)
+            val p = measurable.measure(androidx.compose.ui.unit.Constraints.fixed(cw, ch))
+            layout(w, h) {
+                p.placeWithLayer(0, 0) {
+                    scaleX = w.toFloat() / cw
+                    scaleY = h.toFloat() / ch
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                    compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+                }
+            }
+        },
+    ) {
         // q = (2·p/size − 1), по длинной стороне × пропорции, затем / zoom — одно p·qs + qo.
+        // size — размер слоя (уже уменьшенного): шейдер работает в его пикселях.
         val w = size.width
         val h = size.height
         val aspect = w / h
@@ -342,38 +398,49 @@ private fun ShaderBlob(c: List<Color>, phase: () -> Float, energy: () -> Float, 
         shader.setFloatUniform("qs", 2f / w * sx / zoom, 2f / h * sy / zoom)
         shader.setFloatUniform("qo", -sx / zoom, -sy / zoom)
         shader.setFloatUniform("inv", 1f / w, 1f / h)
-        val b = blobBalls(phase(), energy())
-        for (k in 0 until 7) shader.setFloatUniform("b$k", b[k * 3], b[k * 3 + 1], b[k * 3 + 2] * b[k * 3 + 2])
+        val b = blobBalls(phase(), energy(), balls)
+        for (k in 0 until 7) shader.setFloatUniform(BALL_NAMES[k], b[k * 3], b[k * 3 + 1], b[k * 3 + 2] * b[k * 3 + 2])
         for (i in 0 until 4) {
             val col = c[i % c.size]
-            shader.setFloatUniform("k$i", col.red, col.green, col.blue)
+            shader.setFloatUniform(COLOR_NAMES[i], col.red, col.green, col.blue)
         }
-        // Шейдер — только там, где блоб может быть виден: в пределах его досягаемости
-        // и не под непрозрачными элементами.
+        // Шейдер — только там, где блоб может быть виден: в пределах его досягаемости.
         val area = blobBounds(size.width, size.height, zoom)
-        path.reset()
-        val m = me
-        val hs = holes?.map?.values
-        if (m != null && m.isAttached && !hs.isNullOrEmpty()) {
-            val root = m.findRootCoordinates()
-            for (h in hs) {
-                // Из координат корня — в свои (с учётом масштаба/сдвига слоёв над блобом).
-                val tl = m.localPositionOf(root, Offset(h.left, h.top))
-                val br = m.localPositionOf(root, Offset(h.right, h.bottom))
-                val k = (br.x - tl.x) / h.width
-                path.addRoundRect(
-                    androidx.compose.ui.geometry.RoundRect(
-                        tl.x, tl.y, br.x, br.y,
-                        androidx.compose.ui.geometry.CornerRadius(h.topLeftCornerRadius.x * k, h.topLeftCornerRadius.y * k),
-                    ),
-                )
-            }
+        drawRect(brush, area.topLeft, area.size)
+    }
+}
+
+/**
+ * Прогрев шейдеров: GPU-программы компилируются при первой отрисовке, а это десятки миллисекунд
+ * одним кадром. Рисуем оба AGSL-шейдера (блоб и волну перемотки) в 2 dp-квадрате один раз за запуск,
+ * пока никто не ждёт, чтобы первое открытие сцены не платило за компиляцию.
+ */
+@Composable
+fun ShaderWarmup() {
+    if (Build.VERSION.SDK_INT < 33) return
+    WarmShaders()
+}
+
+@RequiresApi(33)
+@Composable
+private fun WarmShaders() {
+    val blob = remember {
+        RuntimeShader(BLOB_AGSL).also { s ->
+            s.setFloatUniform("qs", 1f, 1f); s.setFloatUniform("qo", 0f, 0f); s.setFloatUniform("inv", 1f, 1f)
+            for (n in BALL_NAMES) s.setFloatUniform(n, 0f, 0f, 0.01f)
+            for (n in COLOR_NAMES) s.setFloatUniform(n, 1f, 1f, 1f)
         }
-        if (path.isEmpty) {
-            drawRect(brush, area.topLeft, area.size)
-        } else {
-            clipPath(path, androidx.compose.ui.graphics.ClipOp.Difference) { drawRect(brush, area.topLeft, area.size) }
+    }
+    val wave = remember {
+        RuntimeShader(WAVE_AGSL).also { s ->
+            s.setFloatUniform("size", 2f, 2f); s.setFloatUniform("amp", 0f); s.setFloatUniform("wavelength", 36f)
+            s.setFloatUniform("phase", 0f); s.setFloatUniform("thick", 2f)
+            s.setFloatUniform("c0", 1f, 1f, 1f, 1f); s.setFloatUniform("c1", 1f, 1f, 1f, 1f)
         }
+    }
+    Canvas(Modifier.size(2.dp)) {
+        drawRect(ShaderBrush(blob), size = size)
+        drawRect(ShaderBrush(wave), size = size)
     }
 }
 
