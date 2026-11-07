@@ -968,7 +968,7 @@ fun SearchPill(value: String, onChange: (String) -> Unit, hint: String, onSubmit
                 keyboardOptions = KeyboardOptions(imeAction = if (onSubmit != null) ImeAction.Search else ImeAction.Done),
                 // Искать — клавиатура уходит, видно результаты.
                 keyboardActions = KeyboardActions(onSearch = { focus.clearFocus(); onSubmit?.invoke() }),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().trackTextFocus(),
             )
         }
         // Очистить — одним тапом, без долгого стирания.

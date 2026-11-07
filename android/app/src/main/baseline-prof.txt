@@ -1,0 +1,9 @@
+# Baseline-профиль, написанный вручную: весь код приложения и UniFFI-привязки компилируются
+# заранее (AOT), а не интерпретируются/JIT-ятся на первых экранах и переходах.
+# Библиотеки Compose/Media3 приносят свои профили сами (AGP сливает их при сборке).
+# Формат: H — hot, S — startup, P — post-startup; `**` — любой хвост пакета/метода.
+# Проверка после установки: adb shell cmd package compile -f -m speed-profile xyz.neodustry.yamusicrs
+HSPLxyz/neodustry/yamusicrs/**->**(**)**
+Lxyz/neodustry/yamusicrs/**;
+HSPLuniffi/yamusic_android/**->**(**)**
+Luniffi/yamusic_android/**;

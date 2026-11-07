@@ -25,7 +25,6 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.composed
 import kotlin.math.min
 import kotlin.math.sin
 
@@ -200,29 +199,69 @@ class BlobHoles {
  * Вырез на 1,5 px меньше: сглаженный край полупрозрачен, под ним блоб нужен.
  */
 fun Modifier.blobHole(holes: BlobHoles?, corner: androidx.compose.ui.unit.Dp, opaque: Boolean): Modifier =
-    if (holes == null) this else this.then(
-        androidx.compose.ui.Modifier.composed {
-            val key = remember { Any() }
-            val density = androidx.compose.ui.platform.LocalDensity.current
-            var coords by remember { androidx.compose.runtime.mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
-            DisposableEffect(key) { onDispose { holes.map.remove(key) } }
-            fun put(c: androidx.compose.ui.layout.LayoutCoordinates) {
-                if (!opaque || !c.isAttached) {
-                    holes.map.remove(key)
-                    return
-                }
-                val inset = 1.5f
-                val r = c.boundsInRoot()
-                if (r.width <= 2 * inset || r.height <= 2 * inset) return holes.map.remove(key).let {}
-                val rad = with(density) { corner.toPx() } + inset
-                holes.map[key] = androidx.compose.ui.geometry.RoundRect(
-                    r.deflate(inset), androidx.compose.ui.geometry.CornerRadius(rad, rad),
-                )
-            }
-            androidx.compose.runtime.SideEffect { coords?.let(::put) ?: run { if (!opaque) holes.map.remove(key) } }
-            androidx.compose.ui.Modifier.onGloballyPositioned { coords = it; put(it) }
-        },
-    )
+    if (holes == null) this else this then BlobHoleElement(holes, corner, opaque)
+
+// Modifier.Node вместо composed: без своей composition-ветки (remember/DisposableEffect/SideEffect)
+// на каждый вырез; поведение то же — вырез живёт, пока узел прикреплён.
+private class BlobHoleElement(
+    val holes: BlobHoles,
+    val corner: androidx.compose.ui.unit.Dp,
+    val opaque: Boolean,
+) : androidx.compose.ui.node.ModifierNodeElement<BlobHoleNode>() {
+    override fun create() = BlobHoleNode(holes, corner, opaque)
+    override fun update(node: BlobHoleNode) = node.set(holes, corner, opaque)
+    override fun equals(other: Any?) =
+        other is BlobHoleElement && other.holes === holes && other.corner == corner && other.opaque == opaque
+    override fun hashCode() = 31 * (31 * System.identityHashCode(holes) + corner.hashCode()) + opaque.hashCode()
+}
+
+private class BlobHoleNode(
+    private var holes: BlobHoles,
+    private var corner: androidx.compose.ui.unit.Dp,
+    private var opaque: Boolean,
+) : Modifier.Node(),
+    androidx.compose.ui.node.GlobalPositionAwareModifierNode,
+    androidx.compose.ui.node.CompositionLocalConsumerModifierNode {
+    private val key = Any()
+    private var coords: androidx.compose.ui.layout.LayoutCoordinates? = null
+
+    fun set(holes: BlobHoles, corner: androidx.compose.ui.unit.Dp, opaque: Boolean) {
+        if (holes !== this.holes) this.holes.map.remove(key)
+        this.holes = holes
+        this.corner = corner
+        this.opaque = opaque
+        val c = coords
+        if (c != null) put(c) else if (!opaque) holes.map.remove(key)
+    }
+
+    override fun onGloballyPositioned(coordinates: androidx.compose.ui.layout.LayoutCoordinates) {
+        coords = coordinates
+        put(coordinates)
+    }
+
+    override fun onDetach() {
+        holes.map.remove(key)
+        coords = null
+    }
+
+    private fun put(c: androidx.compose.ui.layout.LayoutCoordinates) {
+        if (!opaque || !c.isAttached) {
+            holes.map.remove(key)
+            return
+        }
+        val inset = 1.5f
+        val r = c.boundsInRoot()
+        if (r.width <= 2 * inset || r.height <= 2 * inset) {
+            holes.map.remove(key)
+            return
+        }
+        val density = androidx.compose.ui.node.currentValueOf(androidx.compose.ui.platform.LocalDensity)
+        val rad = with(density) { corner.toPx() } + inset
+        holes.map[key] = androidx.compose.ui.geometry.RoundRect(
+            r.deflate(inset), androidx.compose.ui.geometry.CornerRadius(rad, rad),
+        )
+    }
+}
 
 /**
  * Живой фон из цветов обложки (`Pal.blob`); `playing` — быстрее и с большим размахом.

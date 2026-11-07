@@ -58,7 +58,6 @@ import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.ui.composed
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -67,6 +66,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.node.invalidateDraw
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlin.math.roundToInt
@@ -467,15 +467,44 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
     }
 }
 
-/** Мягко пульсирующая заготовка на месте ещё не пришедшего содержимого. */
-fun Modifier.skeleton(corner: Dp = 12.dp): Modifier = composed {
-    val a by androidx.compose.animation.core.rememberInfiniteTransition(label = "skeleton").animateFloat(
-        0.45f, 1f,
-        androidx.compose.animation.core.infiniteRepeatable(tween(900), androidx.compose.animation.core.RepeatMode.Reverse),
-        label = "skeletonAlpha",
-    )
-    val color = MaterialTheme.colorScheme.surfaceContainerHighest
-    drawBehind { drawRoundRect(color, cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner.toPx()), alpha = a) }
+/**
+ * Мягко пульсирующая заготовка на месте ещё не пришедшего содержимого. Это `Modifier.Node`, а не
+ * `composed`: на каждую заготовку нет ни своей composition-ветки с remember, ни LaunchedEffect —
+ * а при открытии страницы их десятки сразу, и именно на переходе.
+ */
+@Composable
+fun Modifier.skeleton(corner: Dp = 12.dp): Modifier =
+    this then SkeletonElement(MaterialTheme.colorScheme.surfaceContainerHighest, corner)
+
+private data class SkeletonElement(val color: androidx.compose.ui.graphics.Color, val corner: Dp) :
+    androidx.compose.ui.node.ModifierNodeElement<SkeletonNode>() {
+    override fun create() = SkeletonNode(color, corner)
+    override fun update(node: SkeletonNode) = node.set(color, corner)
+}
+
+private class SkeletonNode(private var color: androidx.compose.ui.graphics.Color, private var corner: Dp) :
+    Modifier.Node(), androidx.compose.ui.node.DrawModifierNode {
+    private val alpha = Animatable(0.45f)
+
+    override fun onAttach() {
+        coroutineScope.launch {
+            alpha.animateTo(
+                1f,
+                androidx.compose.animation.core.infiniteRepeatable(tween(900), androidx.compose.animation.core.RepeatMode.Reverse),
+            )
+        }
+    }
+
+    fun set(color: androidx.compose.ui.graphics.Color, corner: Dp) {
+        this.color = color
+        this.corner = corner
+        invalidateDraw()
+    }
+
+    override fun androidx.compose.ui.graphics.drawscope.ContentDrawScope.draw() {
+        drawRoundRect(color, cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner.toPx()), alpha = alpha.value)
+        drawContent()
+    }
 }
 
 @Composable
@@ -683,8 +712,10 @@ fun BoxScope.FloatingPlay(onClick: () -> Unit) {
     val lift = if (LocalNow.current.id != null) 100.dp else 20.dp
     val pop = remember { Animatable(0f) }
     LaunchedEffect(Unit) { pop.animateTo(1f, spring(dampingRatio = 0.5f, stiffness = 300f)) }
-    val liftPx by animateDpAsState(lift, spring(dampingRatio = 0.7f, stiffness = 300f), label = "lift")
-    PlayButton(false, 64.dp, onClick = onClick, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = liftPx)
+    // Высота подъёма читается в фазе layout (offset-лямбда), а не в композиции: кнопка не рекомпозируется каждый кадр.
+    val liftAnim = animateDpAsState(lift, spring(dampingRatio = 0.7f, stiffness = 300f), label = "lift")
+    PlayButton(false, 64.dp, onClick = onClick, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp)
+        .offset { androidx.compose.ui.unit.IntOffset(0, -liftAnim.value.roundToPx()) }
         .graphicsLayer { scaleX = pop.value; scaleY = pop.value })
 }
 
@@ -1051,11 +1082,8 @@ fun SearchTab(app: YaApp, nav: Nav) {
         pageId = app.core.search(text).toLong()
     }
     // Строка поиска — внизу, под большим пальцем: над мини-плеером, а с клавиатурой — прямо над ней.
-    val density = LocalDensity.current
-    val ime = WindowInsets.ime.getBottom(density)
     var gap by remember { mutableIntStateOf(0) }
     val above = if (LocalNow.current.id != null) 92.dp else 12.dp
-    val lift = with(density) { maxOf(above.roundToPx(), ime - gap + 8.dp.roundToPx()).toDp() }
     Box(
         Modifier.fillMaxSize().onGloballyPositioned { c ->
             // Сколько от низа вкладки до низа экрана (навигация и системная полоса) — клавиатура считается от низа экрана.
@@ -1077,7 +1105,10 @@ fun SearchTab(app: YaApp, nav: Nav) {
                 else -> {}
             }
         }
-        Box(Modifier.align(Alignment.BottomCenter).padding(bottom = lift)) {
+        // Подъём над клавиатурой считается в фазе layout: пока она выезжает, вкладка не рекомпозируется каждый кадр.
+        Box(Modifier.align(Alignment.BottomCenter).offset {
+            androidx.compose.ui.unit.IntOffset(0, -maxOf(above.roundToPx(), WindowInsets.ime.getBottom(this) - gap + 8.dp.roundToPx()))
+        }) {
             SearchPill(query, {
                 query = it
                 if (it.isEmpty()) pageId?.let { id -> app.closePage(id.toULong()); pageId = null }
