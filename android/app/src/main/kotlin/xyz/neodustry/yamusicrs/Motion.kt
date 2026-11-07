@@ -80,6 +80,16 @@ private class BounceNode(val src: InteractionSource) : Modifier.Node(), DrawModi
  * Появление при первой композиции: всплывает снизу и проявляется, соседи — каскадом по `index`.
  * Только для редких одиночных элементов, не для строк списков.
  */
+/** Прозрачность + нарастающий блюр: чем меньше [a], тем сильнее размыто (до [maxBlur]). Блюр — с API 31. */
+fun androidx.compose.ui.graphics.GraphicsLayerScope.fadeBlur(a: Float, maxBlur: androidx.compose.ui.unit.Dp) {
+    val k = a.coerceIn(0f, 1f)
+    alpha = k
+    val r = (1f - k) * maxBlur.toPx()
+    renderEffect = if (r > 0.5f && android.os.Build.VERSION.SDK_INT >= 31) {
+        androidx.compose.ui.graphics.BlurEffect(r, r, androidx.compose.ui.graphics.TileMode.Decal)
+    } else null
+}
+
 @Composable
 fun Modifier.appear(index: Int = 0): Modifier {
     if (index >= 12) return this
@@ -90,7 +100,7 @@ fun Modifier.appear(index: Int = 0): Modifier {
     }
     return graphicsLayer {
         val v = a.value
-        alpha = v.coerceIn(0f, 1f)
+        fadeBlur(v, 12.dp)
         translationY = (1f - v) * 36.dp.toPx()
     }
 }

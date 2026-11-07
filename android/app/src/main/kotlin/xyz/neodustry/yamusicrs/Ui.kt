@@ -767,7 +767,7 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
             Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp).graphicsLayer {
                 translationX = dx.value
                 rotationZ = dx.value / size.width * 5f
-                alpha = 1f - (kotlin.math.abs(dx.value) / size.width).coerceIn(0f, 1f) * 0.6f
+                fadeBlur(1f - (kotlin.math.abs(dx.value) / size.width).coerceIn(0f, 1f) * 0.6f, 16.dp)
             },
             contentAlignment = Alignment.Center,
         ) {
@@ -1182,7 +1182,7 @@ private fun MiniPlayer(
                         .padding(8.dp)
                         .graphicsLayer {
                             translationX = dx.value
-                            alpha = 1f - (kotlin.math.abs(dx.value) / size.width).coerceIn(0f, 0.7f)
+                            fadeBlur(1f - (kotlin.math.abs(dx.value) / size.width).coerceIn(0f, 0.7f), 12.dp)
                         },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -1543,7 +1543,7 @@ private fun CoverCarousel(
                 val k = 1f - 0.1f * off
                 scaleX = k
                 scaleY = k
-                alpha = 1f - 0.35f * off
+                fadeBlur(1f - 0.35f * off, 10.dp)
             },
         ) {
             // Одна и та же обложка на странице, меняется только модификатор: когда играющий
@@ -1804,7 +1804,7 @@ private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
                             .clickable { app.core.seek(line.timeMs) }
                             .padding(vertical = 5.dp, horizontal = 4.dp)
                             .graphicsLayer {
-                                this.alpha = alpha
+                                fadeBlur(alpha, 6.dp)
                                 scaleX = scale
                                 scaleY = scale
                                 transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)

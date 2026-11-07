@@ -508,7 +508,7 @@ fun Art(
                 it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop,
                 modifier = if (fade == null) Modifier.fillMaxSize() else Modifier.fillMaxSize().graphicsLayer {
                     val f = fade.value
-                    alpha = f
+                    fadeBlur(f, 16.dp)
                     scaleX = 1.08f - 0.08f * f; scaleY = scaleX
                 },
             )

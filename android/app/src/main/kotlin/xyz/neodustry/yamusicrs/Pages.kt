@@ -916,7 +916,7 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source, share:
                         translationY = off * 0.5f
                         val k = 1f + (off / size.height) * 0.12f
                         scaleX = k; scaleY = k
-                        alpha = 1f - (off / size.height) * 0.6f
+                        fadeBlur(1f - (off / size.height) * 0.6f, 20.dp)
                     }, corner = 0.dp)
                     // Фото растворяется в фон, имя читается поверх.
                     Box(
