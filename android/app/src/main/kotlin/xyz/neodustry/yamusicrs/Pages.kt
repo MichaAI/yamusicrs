@@ -1084,6 +1084,7 @@ fun SearchTab(app: YaApp, nav: Nav) {
     // Строка поиска — внизу, под большим пальцем: над мини-плеером, а с клавиатурой — прямо над ней.
     var gap by remember { mutableIntStateOf(0) }
     val above = if (LocalNow.current.id != null) 92.dp else 12.dp
+    val imeInsets = WindowInsets.ime // сам объект берётся в композиции, значение — в layout-лямбде ниже
     Box(
         Modifier.fillMaxSize().onGloballyPositioned { c ->
             // Сколько от низа вкладки до низа экрана (навигация и системная полоса) — клавиатура считается от низа экрана.
@@ -1107,7 +1108,7 @@ fun SearchTab(app: YaApp, nav: Nav) {
         }
         // Подъём над клавиатурой считается в фазе layout: пока она выезжает, вкладка не рекомпозируется каждый кадр.
         Box(Modifier.align(Alignment.BottomCenter).offset {
-            androidx.compose.ui.unit.IntOffset(0, -maxOf(above.roundToPx(), WindowInsets.ime.getBottom(this) - gap + 8.dp.roundToPx()))
+            androidx.compose.ui.unit.IntOffset(0, -maxOf(above.roundToPx(), imeInsets.getBottom(this) - gap + 8.dp.roundToPx()))
         }) {
             SearchPill(query, {
                 query = it

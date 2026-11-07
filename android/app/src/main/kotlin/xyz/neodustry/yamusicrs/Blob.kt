@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.node.currentValueOf
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import kotlin.math.min
@@ -255,7 +256,7 @@ private class BlobHoleNode(
             holes.map.remove(key)
             return
         }
-        val density = androidx.compose.ui.node.currentValueOf(androidx.compose.ui.platform.LocalDensity)
+        val density = currentValueOf(androidx.compose.ui.platform.LocalDensity)
         val rad = with(density) { corner.toPx() } + inset
         holes.map[key] = androidx.compose.ui.geometry.RoundRect(
             r.deflate(inset), androidx.compose.ui.geometry.CornerRadius(rad, rad),
