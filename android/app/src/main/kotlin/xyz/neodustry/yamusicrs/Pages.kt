@@ -1483,6 +1483,14 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
 // ── настройки ───────────────────────────────────────────────────────────────
 
 private val QUALITIES = listOf("lossless" to "Lossless", "auto" to "Авто", "hq" to "Высокое", "nq" to "Экономия")
+
+/** Что значит выбранное качество; [auto] — пояснение для «Авто» в конкретном месте. */
+private fun qualityHint(q: String, auto: String): String = when (q) {
+    "lossless" -> "Lossless — FLAC без потерь, самое большое по размеру"
+    "hq" -> "Высокое — AAC 256 кбит/с"
+    "nq" -> "Экономия — AAC 64 кбит/с, для мобильного интернета"
+    else -> auto
+}
 private val CROSSFADES = listOf(0f, 3f, 6f, 10f)
 private val SMART_LIMITS = listOf(1f, 2f, 5f, 10f, 20f)
 
@@ -1509,12 +1517,12 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
         Header("Настройки", "") {}
         Section("Звук") {
-            Group("Качество", "Lossless — FLAC без потерь, Авто — выбирает Яндекс по скорости сети, Высокое — AAC 256, Экономия — для мобильного интернета") {
+            Group("Качество", qualityHint(s.quality, "Авто — формат выбирает Яндекс по скорости сети")) {
                 Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.quality }.coerceAtLeast(0), {
                     app.core.setQuality(QUALITIES[it].first)
                 }, Modifier.fillMaxWidth())
             }
-            Group("Плавный переход", "Наплыв из одного трека в другой; «Выкл» — встык") {
+            Group("Плавный переход", if (s.crossfadeSecs < 0.5f) "Выключен — треки идут встык" else "Конец трека наплывает на начало следующего ${s.crossfadeSecs.roundToInt()} с") {
                 Segments(
                     CROSSFADES.map { if (it == 0f) "Выкл" else "${it.toInt()} с" },
                     CROSSFADES.indexOfFirst { kotlin.math.abs(it - s.crossfadeSecs) < 0.5f }.coerceAtLeast(0),
@@ -1523,7 +1531,10 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                 )
             }
             Group(null, null) {
-                Toggle("Выравнивание громкости", "Выключено — звук bit-perfect, как в исходнике", s.normalize) { app.core.setNormalize(it) }
+                Toggle("Выравнивание громкости",
+                    if (s.normalize) "Включено — треки подтягиваются к одной громкости" else "Выключено — звук bit-perfect, как в исходнике",
+                    s.normalize,
+                ) { app.core.setNormalize(it) }
                 if (s.normalize) {
                     var lufs by remember(s.targetLufs) { mutableFloatStateOf(s.targetLufs) }
                     Spacer(Modifier.height(12.dp))
@@ -1541,7 +1552,10 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                 }
             }
             Group(null, null) {
-                Toggle("Эквалайзер", "Выключен — звук идёт без обработки (bit-perfect)", s.eqEnabled) { app.core.setEqEnabled(it) }
+                Toggle("Эквалайзер",
+                    if (s.eqEnabled) "Включён — ${s.eqGains.size} полос, звук обрабатывается" else "Выключен — звук идёт без обработки (bit-perfect)",
+                    s.eqEnabled,
+                ) { app.core.setEqEnabled(it) }
                 androidx.compose.animation.AnimatedVisibility(s.eqEnabled) {
                     Column {
                         Spacer(Modifier.height(12.dp))
@@ -1558,17 +1572,29 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
         }
         Section("Воспроизведение") {
             Group(null, null) {
-                Toggle("Быстрый старт", "Из сети трек начинает играть в AAC, lossless подменяет его без паузы; следующие треки прогреваются заранее", s.fastStart) {
+                Toggle("Быстрый старт",
+                    if (s.fastStart) "Из сети трек начинает играть в AAC, lossless подменяет его без паузы; следующие треки прогреваются заранее"
+                    else "Выключен — трек играет сразу в выбранном качестве, старт из сети может быть дольше",
+                    s.fastStart,
+                ) {
                     app.core.setFastStart(it)
                 }
             }
             Group(null, null) {
-                Toggle("Волна после списка", "Плейлист, альбом или «Мне нравится» доиграли — дальше волна по ним, а не тишина", s.waveAfterList) {
+                Toggle("Волна после списка",
+                    if (s.waveAfterList) "Плейлист, альбом или «Мне нравится» доиграли — дальше волна по ним"
+                    else "Выключена — после последнего трека списка воспроизведение останавливается",
+                    s.waveAfterList,
+                ) {
                     app.core.setWaveAfterList(it)
                 }
             }
             Group(null, null) {
-                Toggle("История прослушиваний", "Отправлять в Яндекс: так точнее рекомендации волны", s.reportPlays) { app.core.setReportPlays(it) }
+                Toggle("История прослушиваний",
+                    if (s.reportPlays) "Отправляется в Яндекс — рекомендации волны точнее"
+                    else "Не отправляется — волна не учитывает, что вы слушаете здесь",
+                    s.reportPlays,
+                ) { app.core.setReportPlays(it) }
             }
         }
         Section("Устройства и сеть") {
@@ -1584,7 +1610,7 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
             }
             Group(null, null) {
                 Toggle("Слушать на других устройствах", s.ynisonStatus.replaceFirstChar { it.uppercase() }.let {
-                    if (s.ynison) "Ynison: $it" else "Телефон или компьютер с Яндекс Музыкой включает музыку здесь, а отсюда — там"
+                    if (s.ynison) "Ynison: $it" else "Выключено — другие устройства не видят это и не управляют им"
                 }, s.ynison) { app.core.setYnison(it) }
             }
             Group(null, null) {
@@ -1604,14 +1630,21 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
             }
         }
         Section("Вид") {
-            Group("Фон плеера", "Блоб — мягкие пятна цвета обложки, Спектр — столбики по звучанию, Оба — столбики поверх блоба") {
+            Group("Фон плеера", when (s.visualizer) {
+                "spectrum" -> "Спектр — столбики по звучанию"
+                "both" -> "Оба — столбики по звучанию поверх блоба"
+                else -> "Блоб — мягкие пятна цвета обложки"
+            }) {
                 val kinds = listOf("blob", "spectrum", "both")
                 Segments(listOf("Блоб", "Спектр", "Оба"), kinds.indexOf(s.visualizer).coerceAtLeast(0), {
                     app.core.setVisualizer(kinds[it])
                 }, Modifier.fillMaxWidth())
             }
             Group(null, null) {
-                Toggle("Полная дата выхода", "В шапке альбома — день, месяц и год, а не только год", s.fullReleaseDate) {
+                Toggle("Полная дата выхода",
+                    if (s.fullReleaseDate) "В шапке альбома — день, месяц и год" else "В шапке альбома — только год",
+                    s.fullReleaseDate,
+                ) {
                     app.core.setFullReleaseDate(it)
                 }
             }
@@ -1663,21 +1696,23 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
             Section("Режим") { Group(null, null) {
                 Toggle(
                     "Офлайн-режим",
-                    "Без сети по своей воле: Коллекция, плейлисты и офлайн-волна из скачанного",
+                    if (s.offlineMode) "Включён — играет только скачанное: Коллекция, плейлисты и офлайн-волна"
+                    else "Выключен — сеть используется как обычно; включите, чтобы слушать только скачанное",
                     s.offlineMode,
                 ) { app.core.setOfflineMode(it) }
             } }
             Section("Докачка для офлайн-волны") { Group(null, null) {
                 Toggle(
                     "Докачивать для офлайн-волны",
-                    "Яндекс подбирает треки, которые может выбрать офлайн-волна, и они тихо скачиваются. " +
-                        "Подобранное, но не сыгранное, он может потом попросить удалить; своё не удаляется",
+                    if (s.smartDownload) "Яндекс подбирает треки для офлайн-волны, они тихо скачиваются. " +
+                        "Подобранное, но не сыгранное, он может потом попросить удалить; своё не удаляется"
+                    else "Выключена — для офлайн-волны будет только то, что вы уже скачали",
                     s.smartDownload,
                 ) { app.core.setSmartDownload(it) }
             }
             androidx.compose.animation.AnimatedVisibility(s.smartDownload) {
                 Column(verticalArrangement = Arrangement.spacedBy(22.dp)) {
-                    Group("Качество докачки", "Отдельно от качества стрима. «Авто» — как решит Яндекс по скорости сети") {
+                    Group("Качество докачки", qualityHint(s.smartQuality, "Авто — как решит Яндекс по скорости сети") + ". Отдельно от качества стрима") {
                         Segments(QUALITIES.map { it.second }, QUALITIES.indexOfFirst { it.first == s.smartQuality }.coerceAtLeast(0), {
                             app.core.setSmartQuality(QUALITIES[it].first)
                         }, Modifier.fillMaxWidth())
@@ -1719,7 +1754,10 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
                         }
                     }
                     Group(null, null) {
-                        Toggle("Только по Wi-Fi", "По мобильной сети не качать — как в официальном приложении", s.smartWifiOnly) {
+                        Toggle("Только по Wi-Fi",
+                            if (s.smartWifiOnly) "По мобильной сети не качаем — как в официальном приложении" else "Качаем и по мобильной сети — это тратит трафик",
+                            s.smartWifiOnly,
+                        ) {
                             app.core.setSmartWifiOnly(it)
                         }
                     }
