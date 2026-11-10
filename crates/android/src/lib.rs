@@ -28,7 +28,10 @@ uniffi::setup_scaffolding!();
 #[derive(uniffi::Record, Clone, PartialEq, Debug)]
 pub struct TrackItem {
     pub id: String,
+    /// Название без версии.
     pub title: String,
+    /// Версия («Remix», «Live», «feat. …») — то, что Яндекс пишет в скобках; пусто, если нет.
+    pub version: String,
     pub artists: String,
     pub album: String,
     /// Обложка 400×400 (https), если есть.
@@ -49,7 +52,8 @@ impl From<&Track> for TrackItem {
     fn from(t: &Track) -> Self {
         Self {
             id: t.id.clone(),
-            title: t.full_title(),
+            title: t.title.clone(),
+            version: t.version.clone().unwrap_or_default(),
             artists: t.artist_names(),
             album: t.album().map(|a| a.full_title()).unwrap_or_default(),
             cover: t.cover_uri().map(|u| api::cover_url(u, 400)),
@@ -93,6 +97,8 @@ pub struct WavePreset {
     /// Цвет агента 0xRRGGBB.
     pub color: Option<u32>,
     pub seeds: Vec<String>,
+    /// Это обычная Моя волна (в «колесе» она зовётся «Назад к привычному»).
+    pub home: bool,
 }
 
 #[derive(uniffi::Record, Clone, PartialEq, Debug)]
@@ -170,6 +176,9 @@ pub struct PlayerState {
     /// Волна запускается.
     pub wave_loading: bool,
     pub likes_loading: bool,
+    /// Повтор трека и перемешивание следующих списков.
+    pub repeat_one: bool,
+    pub shuffle: bool,
     /// Ynison: другие устройства и что играет на активном из них.
     pub devices: Vec<DeviceItem>,
     pub remote: Option<RemoteNow>,
@@ -214,6 +223,13 @@ pub struct SettingsData {
     pub eq_gains: Vec<f32>,
     /// `blob`, `spectrum` или `both` (блоб + спектр).
     pub visualizer: String,
+    /// Наплыв при ручной смене трека, с (0 — резко).
+    pub switch_fade_secs: f32,
+    /// Сохранять всё сыгранное (иначе — только коллекцию, остальное в кеш).
+    pub keep_played: bool,
+    /// Кеш сыгранного не из коллекции: сколько занято и лимит, ГиБ.
+    pub cache_used_gb: f32,
+    pub cache_limit_gb: f32,
     /// Вся библиотека: треков и ГиБ (с точностью 0,1).
     pub library_tracks: u32,
     pub library_gb: f32,
@@ -262,6 +278,8 @@ pub trait CoreListener: Send + Sync {
     fn on_artist_photo(&self, id: String, photo: Option<String>);
     /// id всех скачанных треков — при каждом изменении библиотеки.
     fn on_downloaded(&self, ids: Vec<String>);
+    /// Трек экспортирован во временный файл `path`: перенести в общую «Музыку» под именем `name`.
+    fn on_exported(&self, path: String, name: String);
 }
 
 enum Cmd {
@@ -314,6 +332,21 @@ enum Cmd {
     RemoteSkip(i64),
     RemoteSeek(u64),
     ForgetSearch(String),
+    SwitchFade(f32),
+    KeepPlayed(bool),
+    CacheLimit(f32),
+    ClearCache,
+    Refresh,
+    RepeatOne(bool),
+    Shuffle(bool),
+    /// Трек источника — в свой плейлист `kind` («название» — для сообщения).
+    AddToPlaylist(Source, u32, String, String),
+    /// Новый плейлист с этим треком.
+    NewPlaylist(Source, u32, String),
+    ArtistLike(String, String, bool),
+    AlbumLike(String, String, bool),
+    /// Экспорт трека источника в формате (`flac`, `mp3`, `aac`, `small`, `wav`).
+    Export(Source, u32, String),
     Shutdown,
 }
 
@@ -646,6 +679,75 @@ impl Core {
         self.send(Cmd::ForgetSearch(query));
     }
 
+    /// Наплыв при ручной смене трека, с (0 — резко).
+    pub fn set_switch_fade(&self, secs: f32) {
+        self.send(Cmd::SwitchFade(secs));
+    }
+
+    /// Сохранять всё сыгранное (`false` — только коллекцию, остальное — в кеш с лимитом).
+    pub fn set_keep_played(&self, on: bool) {
+        self.send(Cmd::KeepPlayed(on));
+    }
+
+    pub fn set_cache_limit(&self, gb: f32) {
+        self.send(Cmd::CacheLimit(gb));
+    }
+
+    /// Стереть кеш сыгранного не из коллекции.
+    pub fn clear_cache(&self) {
+        self.send(Cmd::ClearCache);
+    }
+
+    /// Перечитать с сервера лайки, плейлисты, подборки и пресеты волны (потянули вниз).
+    pub fn refresh(&self) {
+        self.send(Cmd::Refresh);
+    }
+
+    pub fn set_repeat_one(&self, on: bool) {
+        self.send(Cmd::RepeatOne(on));
+    }
+
+    /// Перемешивать списки при запуске (действует на следующий включённый список).
+    pub fn set_shuffle(&self, on: bool) {
+        self.send(Cmd::Shuffle(on));
+    }
+
+    /// Добавить трек источника в свой плейлист `kind` (в конец).
+    pub fn add_to_playlist(&self, source: Source, index: u32, kind: String, title: String) {
+        self.send(Cmd::AddToPlaylist(source, index, kind, title));
+    }
+
+    /// Создать плейлист `title` и положить в него трек источника.
+    pub fn new_playlist_with(&self, source: Source, index: u32, title: String) {
+        self.send(Cmd::NewPlaylist(source, index, title));
+    }
+
+    /// Исполнитель в коллекцию или из неё.
+    pub fn set_artist_like(&self, id: String, name: String, on: bool) {
+        self.send(Cmd::ArtistLike(id, name, on));
+    }
+
+    /// Альбом в коллекцию или из неё.
+    pub fn set_album_like(&self, id: String, name: String, on: bool) {
+        self.send(Cmd::AlbumLike(id, name, on));
+    }
+
+    /// «Вы недавно слушали» — страница треков.
+    pub fn history(&self) -> u64 {
+        self.open(Req::History)
+    }
+
+    /// Любимые исполнители (страница `Page::Artists`).
+    pub fn liked_artists(&self) -> u64 {
+        self.open(Req::LikedArtists)
+    }
+
+    /// Экспорт трека файлом: `flac`, `mp3`, `aac`, `small` (HE-AAC 64) или `wav`.
+    /// Готовый файл придёт в `on_exported`.
+    pub fn export_from(&self, source: Source, index: u32, format: String) {
+        self.send(Cmd::Export(source, index, format));
+    }
+
     /// Строка от Kotlin в общий лог (logcat + файл).
     pub fn log(&self, text: String) {
         tracing::info!("{text}");
@@ -705,6 +807,11 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
     // На телефоне Ynison — только по явному включению в настройках (рядом и так официальное
     // приложение, а лишние попытки при отказе сервера продлевают его go-away).
     cfg.ynison = ynison_flag(&paths).exists();
+    // На телефоне место дорого: насовсем — только коллекция, остальное сыгранное — кеш.
+    if cfg.keep_played.is_none() {
+        cfg.keep_played = Some(false);
+    }
+    let export_dir = paths.cache_dir.join("export");
     let (etx, mut erx) = unbounded_channel();
     let mut engine = match Engine::new(etx, cfg, paths, false, output()) {
         Ok(e) => e,
@@ -725,9 +832,11 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
     let mut artist_cache: std::collections::HashMap<String, std::sync::Arc<parking_lot::Mutex<Option<ArtistCard>>>> =
         std::collections::HashMap::new();
     let (ptx, mut prx) = unbounded_channel::<Reply>();
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        // Играет — такт 50 мс (позиция, переходы); на паузе и в тишине — раз в 400 мс: процессор
+        // телефона не будится двадцать раз в секунду впустую. Команды и ответы сети приходят сразу.
+        let idle = engine.player.paused() || (engine.now.is_none() && engine.loading_track.is_none());
+        let tick = tokio::time::sleep(Duration::from_millis(if idle { 400 } else { 50 }));
         tokio::select! {
             c = rx.recv() => match c {
                 None | Some(Cmd::Shutdown) => {
@@ -744,24 +853,47 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
                         });
                     }
                 }
+                Some(Cmd::Export(src, i, fmt)) => {
+                    let t = source_tracks(&engine, &pages, &src).and_then(|(_, v)| v.get(i as usize).cloned());
+                    if let (Some(t), Some(fmt)) = (t, yamusic_core::export::Format::parse(&fmt)) {
+                        engine.export(t, fmt, export_dir.clone());
+                    }
+                }
                 Some(c) => command(&mut engine, &mut pages, &ptx, c),
             },
             Some(m) = erx.recv() => engine.on_msg(m),
             Some((id, r)) = prx.recv() => {
                 tracing::debug!("страница {id}: {}", if r.is_ok() { "готова" } else { "ошибка" });
-                listener.on_page(id, pages.accept(id, r));
+                listener.on_page(id, pages.accept(&engine, id, r));
             }
-            _ = tick.tick() => {}
+            _ = tick => {}
         }
         engine.tick();
         for e in engine.take_effects() {
             match e {
-                Effect::Toast { text, error, action } => listener.on_toast(text, error, action.map(Into::into)),
+                // Обычные сообщения («качество такое-то», «в очередь») на телефоне видны и так — в лог.
+                Effect::Toast { text, error, action, notice } => {
+                    if error || notice || action.is_some() {
+                        listener.on_toast(text, error, action.map(Into::into));
+                    } else {
+                        tracing::debug!("{text}");
+                    }
+                }
+                // Плейлисты изменились на сервере (создан, пополнен) — список обновится сам
+                // (`on_playlists`), когда придёт ответ; здесь делать нечего.
+                Effect::PlaylistOpFailed { .. } => {}
                 Effect::LikesChanged => publisher.likes_dirty = true,
                 Effect::Wheel { .. } => {
                     if let Loadable::Ready(items) = &engine.wave.items {
-                        listener.on_wheel(items.iter().map(preset).collect());
+                        // Обычная Моя волна — первой: с неё начинают чаще всего.
+                        let mut v: Vec<WavePreset> = items.iter().map(preset).collect();
+                        v.sort_by_key(|p| !p.home);
+                        listener.on_wheel(v);
                     }
+                }
+                Effect::Exported { path } => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    listener.on_exported(path.to_string_lossy().into_owned(), name);
                 }
                 Effect::TrackStarted { track, .. } => {
                     load_artist(&engine, &track, &mut artist_cache, listener.clone());
@@ -781,6 +913,7 @@ fn preset(i: &api::WheelItem) -> WavePreset {
         icon: i.icon().map(|u| api::cover_url(u, 200)),
         color: i.color().map(|(r, g, b)| (r as u32) << 16 | (g as u32) << 8 | b as u32),
         seeds: i.seeds(),
+        home: i.seeds() == [MY_WAVE],
     }
 }
 
@@ -1092,6 +1225,52 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
             e.state.search_history.retain(|h| h != &q);
             e.state.save(&e.paths);
         }
+        Cmd::SwitchFade(secs) => e.set_switch_fade(secs),
+        Cmd::KeepPlayed(on) => {
+            if on != e.keep_played() {
+                e.set_keep_played(on);
+            }
+        }
+        Cmd::CacheLimit(gb) => {
+            e.cfg.cache_gb = gb.max(0.0) as f64;
+            e.library.set_stray_limit(e.cfg.cache_gb);
+            e.cfg.save(&e.paths);
+        }
+        Cmd::ClearCache => {
+            e.library.clear_stray();
+        }
+        Cmd::Refresh => e.refresh(),
+        Cmd::RepeatOne(on) => {
+            if on != e.repeat_one {
+                e.repeat_one = on;
+                // Заранее загруженный следующий больше не следующий (или наоборот).
+                e.player.clear_next();
+                e.next_loaded = None;
+                e.schedule_next();
+            }
+        }
+        Cmd::Shuffle(on) => e.shuffle = on,
+        Cmd::AddToPlaylist(s, i, kind, title) => {
+            if let Some(t) = source_tracks(e, pages, &s).and_then(|(_, v)| v.get(i as usize).cloned()) {
+                e.pl_op(engine::PlOp::Append { kind, title, track: t.full_id() });
+            }
+        }
+        Cmd::NewPlaylist(s, i, title) => {
+            if let Some(t) = source_tracks(e, pages, &s).and_then(|(_, v)| v.get(i as usize).cloned()) {
+                e.pl_op(engine::PlOp::Create { title, add: Some(t.full_id()) });
+            }
+        }
+        Cmd::ArtistLike(id, name, on) => {
+            if e.liked_artists.contains(&id) != on {
+                e.toggle_entity(engine::Entity::ArtistLike, id, name);
+            }
+        }
+        Cmd::AlbumLike(id, name, on) => {
+            if e.liked_albums.contains(&id) != on {
+                e.toggle_entity(engine::Entity::AlbumLike, id, name);
+            }
+        }
+        Cmd::Export(..) => {}
         Cmd::Shutdown => {}
     }
 }
@@ -1107,6 +1286,7 @@ struct Publisher {
     playlists_mark: Option<(usize, u64, usize)>,
     downloaded_mark: Option<usize>,
     settings: Option<SettingsData>,
+    settings_at: Option<Instant>,
 }
 
 impl Publisher {
@@ -1140,7 +1320,8 @@ impl Publisher {
             _ => e.snapshot.playlists.as_slice(),
         };
         let mark = (
-            pls.len(),
+            // Свои плейлисты узнаются по uid — он известен только после входа.
+            pls.len() + if e.client.is_some() { 1 << 24 } else { 0 },
             pls.iter().map(|p| p.revision as u64 + p.track_count.unwrap_or(0) as u64).sum(),
             e.personal.len(),
         );
@@ -1154,6 +1335,11 @@ impl Publisher {
             let (own, personal) = pages::playlists(e);
             l.on_playlists(own, personal);
         }
+        // Настройки собираются с проходом по всей библиотеке (размеры) — не чаще пары раз в секунду.
+        if self.settings.is_some() && self.settings_at.is_some_and(|t| t.elapsed() < Duration::from_millis(400)) {
+            return;
+        }
+        self.settings_at = Some(Instant::now());
         let settings = SettingsData {
             quality: quality_str(e.quality()).into(),
             normalize: e.normalize(),
@@ -1176,6 +1362,10 @@ impl Publisher {
             eq_enabled: e.cfg.eq_enabled,
             eq_gains: e.cfg.eq_gains.clone(),
             visualizer: e.cfg.visualizer.clone(),
+            switch_fade_secs: e.cfg.switch_fade_secs,
+            keep_played: e.keep_played(),
+            cache_used_gb: gib(e.library.stray_bytes()),
+            cache_limit_gb: e.cfg.cache_gb as f32,
             library_tracks: e.library.stats().0 as u32,
             library_gb: gib(e.library.stats().1),
             ynison_status: e.ynison_label(),
@@ -1230,6 +1420,8 @@ fn snapshot(e: &Engine) -> PlayerState {
         wave_name: e.wave.active_name.clone().unwrap_or_default(),
         wave_loading: e.wave.loading,
         likes_loading: matches!(e.likes, Loadable::Loading),
+        repeat_one: e.repeat_one,
+        shuffle: e.shuffle,
         devices: e
             .yn_devices()
             .into_iter()

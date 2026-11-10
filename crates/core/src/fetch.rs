@@ -51,6 +51,8 @@ const WARM_HEAD: u64 = 320 * 1024;
 /// Ссылки на файлы подписаны и со временем протухают.
 const WARM_TTL: Duration = Duration::from_secs(15 * 60);
 const WARM_MAX: usize = 8;
+/// Сколько ждать ответа зеркала, прежде чем параллельно спросить следующее.
+const HEDGE: Duration = Duration::from_millis(700);
 
 /// Откуда взялся трек — для индикатора в статусной строке.
 #[derive(Debug, Clone)]
@@ -418,20 +420,8 @@ impl Fetcher {
         if to.is_some_and(|t| t <= from) {
             return Ok(());
         }
-        let mut last_err = eyre!("нет ссылок");
-        for url in urls {
-            let mut req = self.client.http().get(url);
-            if from > 0 || to.is_some() {
-                let end = to.map(|t| (t - 1).to_string()).unwrap_or_default();
-                req = req.header(reqwest::header::RANGE, format!("bytes={from}-{end}"));
-            }
-            let resp = match req.send().await.and_then(|r| r.error_for_status()) {
-                Ok(r) => r,
-                Err(e) => {
-                    last_err = e.into();
-                    continue;
-                }
-            };
+        {
+            let resp = self.connect_any(urls, from, to).await?;
             // Сервер мог проигнорировать Range и отдать файл целиком — тогда пропускаем начало сами.
             let mut skip = if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT { 0 } else { from };
             let mut left = to.map(|t| t - from);
@@ -471,9 +461,53 @@ impl Fetcher {
             if got >= 256 * 1024 && ms > 0 {
                 crate::api::NET.measured((got * 8 / ms).min(i32::MAX as u64) as i32);
             }
-            return Ok(());
+            Ok(())
         }
-        Err(last_err)
+    }
+
+    /// Ответ первого откликнувшегося зеркала. Сервер даёт несколько ссылок на разные хосты;
+    /// раньше они пробовались по очереди, и зависшее первое стоило до 10 с тишины (таймаут
+    /// соединения) при смене трека. Теперь, если зеркало молчит дольше [`HEDGE`], параллельно
+    /// спрашивается следующее; ошибка — сразу следующее.
+    async fn connect_any(&self, urls: &[String], from: u64, to: Option<u64>) -> Result<reqwest::Response> {
+        use futures_util::stream::FuturesUnordered;
+        let ask = |url: &String| {
+            let mut req = self.client.http().get(url);
+            if from > 0 || to.is_some() {
+                let end = to.map(|t| (t - 1).to_string()).unwrap_or_default();
+                req = req.header(reqwest::header::RANGE, format!("bytes={from}-{end}"));
+            }
+            async move { req.send().await.and_then(|r| r.error_for_status()) }
+        };
+        let mut rest = urls.iter();
+        let mut racing = FuturesUnordered::new();
+        let mut last_err = eyre!("нет ссылок");
+        match rest.next() {
+            Some(u) => racing.push(ask(u)),
+            None => return Err(last_err),
+        }
+        loop {
+            tokio::select! {
+                r = racing.next() => match r {
+                    Some(Ok(resp)) => return Ok(resp),
+                    Some(Err(e)) => {
+                        last_err = e.into();
+                        match rest.next() {
+                            Some(u) => racing.push(ask(u)),
+                            None if racing.is_empty() => return Err(last_err),
+                            None => {}
+                        }
+                    }
+                    None => return Err(last_err),
+                },
+                _ = tokio::time::sleep(HEDGE), if rest.len() > 0 => {
+                    if let Some(u) = rest.next() {
+                        tracing::debug!("зеркало молчит {HEDGE:?} — пробую следующее параллельно");
+                        racing.push(ask(u));
+                    }
+                }
+            }
+        }
     }
 
     /// `keep` — сохранить насовсем, даже если трек не из коллекции (умное скачивание).

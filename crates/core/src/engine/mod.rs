@@ -112,7 +112,9 @@ pub enum ToastAction {
 #[derive(Debug, Clone)]
 pub enum Effect {
     /// `action` — что тост предлагает сделать: TUI подписывает клавишу, телефон рисует кнопку.
-    Toast { text: String, error: bool, action: Option<ToastAction> },
+    /// `notice` — итог действия, которого на экране иначе не видно (плейлист пополнен, экспорт
+    /// готов, сети нет): телефон показывает только такие, ошибки и сообщения с кнопкой.
+    Toast { text: String, error: bool, action: Option<ToastAction>, notice: bool },
     /// Подгрузить обложку заранее (трек открывается).
     Cover(String),
     /// Трек зазвучал (или встал на паузу в начале при восстановлении).
@@ -498,15 +500,20 @@ impl Engine {
     }
 
     pub fn toast(&mut self, text: String) {
-        self.emit(Effect::Toast { text, error: false, action: None });
+        self.emit(Effect::Toast { text, error: false, action: None, notice: false });
+    }
+
+    /// Итог действия, которого на экране иначе не видно (см. [`Effect::Toast`]).
+    pub fn notice(&mut self, text: String) {
+        self.emit(Effect::Toast { text, error: false, action: None, notice: true });
     }
 
     pub fn toast_with(&mut self, text: String, action: ToastAction) {
-        self.emit(Effect::Toast { text, error: false, action: Some(action) });
+        self.emit(Effect::Toast { text, error: false, action: Some(action), notice: true });
     }
 
     pub fn toast_err(&mut self, text: String) {
-        self.emit(Effect::Toast { text, error: true, action: None });
+        self.emit(Effect::Toast { text, error: true, action: None, notice: true });
     }
 
     /// Остановить звук совсем (MPRIS Stop).
@@ -568,7 +575,7 @@ impl Engine {
         } else if self.offline {
             match StoredToken::load(&self.paths.token_file) {
                 Some(tok) => {
-                    self.toast("Подключаюсь…".into());
+                    self.notice("Подключаюсь…".into());
                     tokio::spawn(connect(tok, self.tx.clone()));
                 }
                 None => self.begin_login(None),
@@ -598,7 +605,7 @@ impl Engine {
                 let changed = n.info.codec != pos.info.codec;
                 n.info = pos.info;
                 if changed && let Some((_, text, action)) = self.swap_toast.take_if(|(t, ..)| *t == pos.token) {
-                    self.emit(Effect::Toast { text, error: false, action });
+                    self.emit(Effect::Toast { text, error: false, action, notice: false });
                 }
             }
             _ => self.on_track_started(pos),
@@ -797,7 +804,7 @@ impl Engine {
                 reload_list,
             } => {
                 match result {
-                    Ok(t) if !t.is_empty() => self.toast(t),
+                    Ok(t) if !t.is_empty() => self.notice(t),
                     Ok(_) => {}
                     Err(e) => {
                         self.toast_err(format!("плейлист не изменился: {e}"));
@@ -887,14 +894,14 @@ impl Engine {
             Msg::Exported { title, result } => match result {
                 Ok(path) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.toast(format!("Экспортировано: {name}"));
+                    self.notice(format!("Экспортировано: {name}"));
                     self.emit(Effect::Exported { path });
                 }
                 Err(e) => self.toast_err(format!("Экспорт «{title}»: {e}")),
             },
             Msg::Uploaded { kind, name, result } => match result {
                 Ok(()) => {
-                    self.toast(format!("«{name}» загружен — появится в плейлисте после обработки"));
+                    self.notice(format!("«{name}» загружен — появится в плейлисте после обработки"));
                     self.load_playlists();
                     self.emit(Effect::PlaylistOpFailed { kind });
                 }
@@ -975,7 +982,7 @@ impl Engine {
         let was_offline = self.offline;
         if self.offline {
             self.offline = false;
-            self.toast("Сеть вернулась — снова онлайн".into());
+            self.notice("Сеть вернулась — снова онлайн".into());
         }
         let fetcher = Fetcher::new(client.clone(), self.library.clone(), self.cfg.quality);
         fetcher.set_fast_start(self.cfg.fast_start);
@@ -1467,7 +1474,7 @@ impl Engine {
     /// Моя волна без сети: TinyMl выбирает из скачанного.
     pub fn start_offline_wave(&mut self) {
         let Some(store) = self.owave_store.as_ref() else {
-            self.toast("Офлайн-волна ещё не готова: программа скачивается, когда есть сеть".into());
+            self.notice("Офлайн-волна ещё не готова: программа скачивается, когда есть сеть".into());
             return;
         };
         let mut pool: HashMap<i32, Track> = HashMap::new();
@@ -1477,7 +1484,7 @@ impl Engine {
             }
         }
         if pool.len() < 3 {
-            self.toast("Для офлайн-волны нужно хотя бы 3 скачанных трека".into());
+            self.notice("Для офлайн-волны нужно хотя бы 3 скачанных трека".into());
             return;
         }
         let available: Vec<i32> = pool.keys().copied().collect();
@@ -1579,7 +1586,7 @@ impl Engine {
             }
         }
         let (n, _) = self.library.stats();
-        self.toast(format!("Нет сети — офлайн: играет скачанное ({n} треков)"));
+        self.notice(format!("Нет сети — офлайн: играет скачанное ({n} треков)"));
     }
 
     /// Треки плейлистов для снимка: только те, у кого сменилась ревизия, по одному запросу.
@@ -1665,7 +1672,7 @@ impl Engine {
                     return;
                 }
                 if matches!(self.queue.kind, QueueKind::Wave { .. }) {
-                    self.toast("Волна подгружается…".into());
+                    self.notice("Волна подгружается…".into());
                     self.maybe_extend_wave(cur);
                 } else if matches!(self.queue.kind, QueueKind::OfflineWave) {
                     self.extend_offline_wave();
@@ -2133,7 +2140,7 @@ impl Engine {
             (Entity::ArtistDislike, true) => format!("⊘ Не рекомендовать: {name} (D — вернуть)"),
             (Entity::ArtistDislike, false) => format!("Снова рекомендовать: {name}"),
         };
-        self.toast(msg);
+        self.notice(msg);
         self.spawn(move |c, tx| async move {
             let r = match what {
                 Entity::AlbumLike => c.set_album_like(&id, on).await,
@@ -2462,7 +2469,7 @@ impl Engine {
         let Some(f) = self.fetcher.clone() else {
             return self.toast_err("Без сети экспорт недоступен".into());
         };
-        self.toast(format!("Экспортирую в {}: {}", fmt.label(), t.full_title()));
+        self.notice(format!("Экспортирую в {}: {}", fmt.label(), t.full_title()));
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = f.export(&t, fmt, dir).await.map_err(|e| format!("{e:#}"));
@@ -2476,7 +2483,7 @@ impl Engine {
         if self.client.is_none() {
             return self.toast_err("Без сети трек не загрузить".into());
         }
-        self.toast(format!("Загружаю «{name}»…"));
+        self.notice(format!("Загружаю «{name}»…"));
         self.spawn(move |c, tx| async move {
             let result = async {
                 let data = tokio::fs::read(&path).await.map_err(|e| format!("файл не читается: {e}"))?;

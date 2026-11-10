@@ -30,6 +30,9 @@ import uniffi.yamusic_android.PlayerState
 class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper()) {
     private val scope = MainScope()
     private var cur: PlayerState? = null
+    /** Позиция, отданная сессии последней, и когда (от неё сессия считает сама). */
+    private var shownPos = 0L
+    private var shownAt = 0L
 
     private val audio = app.getSystemService(AudioManager::class.java)
     private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
@@ -67,10 +70,20 @@ class CorePlayer(private val app: YaApp) : SimpleBasePlayer(Looper.getMainLooper
     init {
         scope.launch {
             app.state.collect { s ->
-                val was = cur.playing()
+                val was = cur
                 cur = s
-                if (s.playing() != was) onPlayingChanged(s.playing())
-                invalidateState()
+                if (s.playing() != was.playing()) onPlayingChanged(s.playing())
+                // Позиция тикает четыре раза в секунду, но сессия считает её сама (экстраполяция):
+                // пересобираем состояние, только когда изменилось что-то ещё или позицию перемотали.
+                // Иначе система четыре раза в секунду обновляет уведомление и пульты.
+                val moved = s?.positionMs?.toLong() ?: 0L
+                val expected = shownPos + if (was.playing() && was?.loading == false) android.os.SystemClock.elapsedRealtime() - shownAt else 0L
+                val sameButPos = was != null && s != null && was.copy(positionMs = s.positionMs) == s
+                if (!sameButPos || kotlin.math.abs(moved - expected) > 1500) {
+                    shownPos = moved
+                    shownAt = android.os.SystemClock.elapsedRealtime()
+                    invalidateState()
+                }
             }
         }
         // Соседи в плейлисте сессии берутся из очереди.
