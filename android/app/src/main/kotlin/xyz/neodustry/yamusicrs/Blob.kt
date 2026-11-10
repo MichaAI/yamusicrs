@@ -404,6 +404,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawLiveCells(
     val h = size.height
     val cols = kotlin.math.ceil(w / CELL).toInt()
     val rows = kotlin.math.ceil(h / CELL).toInt()
+    // Одним прямоугольником: отдельные полосы по строкам давали видимые швы при масштабе и альфе слоя.
+    var bl = Float.MAX_VALUE; var bt = Float.MAX_VALUE; var br = 0f; var bb = 0f
     for (r in 0 until rows) {
         val y0 = r * CELL
         val y1 = min(y0 + CELL, h)
@@ -438,11 +440,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawLiveCells(
             } else if (start >= 0) {
                 val l = kotlin.math.max(start * CELL, area.left)
                 val rgt = min(min(c * CELL, w), area.right)
-                if (rgt > l && bottom > top) drawRect(brush, Offset(l, top), androidx.compose.ui.geometry.Size(rgt - l, bottom - top))
+                if (rgt > l && bottom > top) {
+                    bl = min(bl, l); bt = min(bt, top); br = kotlin.math.max(br, rgt); bb = kotlin.math.max(bb, bottom)
+                }
                 start = -1
             }
         }
     }
+    if (br > bl && bb > bt) drawRect(brush, Offset(bl, bt), androidx.compose.ui.geometry.Size(br - bl, bb - bt))
 }
 
 /**
