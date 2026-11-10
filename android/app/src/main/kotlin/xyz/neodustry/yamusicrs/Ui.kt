@@ -1127,6 +1127,8 @@ fun TrackRow(
     val bg = if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
     val titleColor = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
     val coverCorner = if (current) 26.dp else 14.dp
+    val dimTitle = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
+    val titleText = remember(t.title, t.version, dimTitle) { titleLine(t, dimTitle) }
     Row(
         // Концентрично миниатюре: 14 + 10 (отступ) = 24.
         modifier.fillMaxWidth().padding(horizontal = 8.dp)
@@ -1156,7 +1158,7 @@ fun TrackRow(
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                remember(t.title, t.version, alpha) { titleLine(t, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)) },
+                titleText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge,
