@@ -832,9 +832,11 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
     let mut artist_cache: std::collections::HashMap<String, std::sync::Arc<parking_lot::Mutex<Option<ArtistCard>>>> =
         std::collections::HashMap::new();
     let (ptx, mut prx) = unbounded_channel::<Reply>();
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        // Играет — такт 50 мс (позиция, переходы); на паузе и в тишине — раз в 400 мс: процессор
+        // телефона не будится двадцать раз в секунду впустую. Команды и ответы сети приходят сразу.
+        let idle = engine.player.paused() || (engine.now.is_none() && engine.loading_track.is_none());
+        let tick = tokio::time::sleep(Duration::from_millis(if idle { 400 } else { 50 }));
         tokio::select! {
             c = rx.recv() => match c {
                 None | Some(Cmd::Shutdown) => {
@@ -864,7 +866,7 @@ async fn run(paths: Paths, music: PathBuf, device_name: String, mut rx: Unbounde
                 tracing::debug!("страница {id}: {}", if r.is_ok() { "готова" } else { "ошибка" });
                 listener.on_page(id, pages.accept(&engine, id, r));
             }
-            _ = tick.tick() => {}
+            _ = tick => {}
         }
         engine.tick();
         for e in engine.take_effects() {
