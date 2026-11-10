@@ -62,6 +62,8 @@ pub struct Shared {
     volume: AtomicU32,
     /// Длина кроссфейда, сек (f32 в битах); 0 — встык.
     crossfade: AtomicU32,
+    /// Наплыв при ручной смене трека, сек (f32 в битах); 0 — резко.
+    switch_fade: AtomicU32,
     paused: AtomicBool,
     segments: Mutex<VecDeque<Segment>>,
     /// Читающая сторона кольца. Под мьютексом, чтобы декодер мог сделать flush,
@@ -104,6 +106,7 @@ impl Shared {
     pub fn filler(self: &Arc<Self>, rate: u32, channels: u16) -> Filler {
         Filler {
             last_vol: self.volume(),
+            was_paused: self.paused(),
             shared: self.clone(),
             channels: channels.max(1) as usize,
             eq: dsp::Equalizer::new(rate, channels as usize),
@@ -113,6 +116,25 @@ impl Shared {
 
     fn crossfade_secs(&self) -> f32 {
         f32::from_bits(self.crossfade.load(Ordering::Relaxed))
+    }
+
+    fn switch_fade_secs(&self) -> f32 {
+        f32::from_bits(self.switch_fade.load(Ordering::Relaxed))
+    }
+
+    /// Как [`Self::flush`], но недоигранное не выбрасывается, а отдаётся: при ручной смене
+    /// трека оно затухает поверх начала нового. Не больше `max` сэмплов, остальное — в мусор.
+    fn take_unplayed(&self, max: usize) -> Vec<f32> {
+        let mut c = self.cons.lock();
+        let n = c.slots();
+        let mut out = Vec::new();
+        if let Ok(chunk) = c.read_chunk(n) {
+            let (a, b) = chunk.as_slices();
+            out.extend(a.iter().chain(b.iter()).take(max).copied());
+            chunk.commit_all();
+        }
+        self.played.fetch_add(n as u64, Ordering::AcqRel);
+        out
     }
 
     /// Выбрасывает всё недоигранное; выброшенное считается «отданным», чтобы шкалы сошлись.
@@ -146,6 +168,8 @@ pub struct Filler {
     shared: Arc<Shared>,
     channels: usize,
     last_vol: f32,
+    /// Прошлый блок уже был на паузе (затух): кольцо не читаем, пока не продолжат.
+    was_paused: bool,
     eq: dsp::Equalizer,
     analyzer: dsp::Analyzer,
 }
@@ -155,6 +179,15 @@ impl Filler {
     pub fn fill(&mut self, out: &mut [f32]) {
         let shared = &self.shared;
         shared.mark_process();
+        // Пауза и продолжение — без щелчка: блок, на котором поставили паузу, затухает, дальше
+        // тишина (кольцо не трогаем); первый блок после паузы нарастает.
+        let paused = shared.paused();
+        if paused && self.was_paused {
+            out.fill(0.0);
+            return;
+        }
+        let ramp = (paused != self.was_paused).then_some(paused);
+        self.was_paused = paused;
         let mut cons = shared.cons.lock();
 
         let avail = cons.slots();
@@ -183,6 +216,18 @@ impl Filler {
         self.analyzer.enabled = shared.spectrum_on.load(Ordering::Relaxed);
         self.analyzer.push(&out[..take], &shared.spectrum);
 
+        if let Some(down) = ramp {
+            let frames = (take / self.channels).max(1);
+            // Не длиннее ~30 мс: на большом блоке пауза не должна «уплывать».
+            let len = frames.min(1536) as f32;
+            for (i, frame) in out[..take].chunks_mut(self.channels).enumerate() {
+                let t = (i as f32 / len).min(1.0);
+                let g = if down { 1.0 - t } else { t };
+                for s in frame {
+                    *s *= g * g;
+                }
+            }
+        }
         if from != 1.0 || to != 1.0 {
             let frames = (take / self.channels).max(1);
             for (i, frame) in out[..take].chunks_mut(self.channels).enumerate() {
@@ -278,6 +323,7 @@ impl Player {
             written: AtomicU64::new(0),
             volume: AtomicU32::new(volume.to_bits()),
             crossfade: AtomicU32::new(0f32.to_bits()),
+            switch_fade: AtomicU32::new(0f32.to_bits()),
             paused: AtomicBool::new(false),
             segments: Mutex::new(VecDeque::new()),
             cons: Mutex::new(cons),
@@ -344,6 +390,11 @@ impl Player {
         self.shared.crossfade.store(secs.max(0.0).to_bits(), Ordering::Relaxed);
     }
 
+    /// Наплыв при ручной смене трека (кнопка, свайп, выбор в списке), сек; 0 — резко.
+    pub fn set_switch_fade(&self, secs: f32) {
+        self.shared.switch_fade.store(secs.clamp(0.0, 3.0).to_bits(), Ordering::Relaxed);
+    }
+
     /// Подменяет источник играющего трека `token` на лету; итог придёт событием `Swapped`.
     pub fn swap(&self, token: Token, source: Source) {
         self.track(&source);
@@ -371,7 +422,17 @@ impl Player {
         // Отсчёт сторожа — с момента, когда снова ждём звук из вывода.
         self.shared.mark_process();
         self.shared.paused.store(paused, Ordering::Relaxed);
-        self.out.set_active(!paused);
+        if !paused {
+            return self.out.set_active(true);
+        }
+        // Вывод засыпает чуть позже: его поток успевает сыграть затухающий блок.
+        let (shared, out) = (self.shared.clone(), self.out.clone());
+        let _ = std::thread::Builder::new().name("pause".into()).spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(90));
+            if shared.paused() {
+                out.set_active(false);
+            }
+        });
     }
 
     pub fn paused(&self) -> bool {

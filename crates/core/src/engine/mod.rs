@@ -338,6 +338,14 @@ pub struct Engine {
     /// Пауза до следующей попытки оживить вывод: растёт, пока он не отвечает.
     stall_backoff: Duration,
     stored_token: Option<StoredToken>,
+    /// Лайки и треки плейлистов пришли с сервера (а не из снимка): по ним можно решать,
+    /// что из скачанного — не коллекция.
+    likes_fresh: bool,
+    playlists_fresh: bool,
+    /// Треки, которые «не рекомендовать» в этом запуске (дизлайк снимает лайк и наоборот).
+    pub disliked: HashSet<String>,
+    /// Что включить, когда появится связь: нажали «играть» раньше, чем прошёл вход.
+    play_when_online: bool,
     effects: Vec<Effect>,
 }
 
@@ -447,14 +455,29 @@ impl Engine {
             last_stall: None,
             stall_backoff: STALL_FIRST,
             stored_token: None,
+            likes_fresh: false,
+            playlists_fresh: false,
+            disliked: HashSet::new(),
+            play_when_online: false,
             effects: Vec::new(),
             cfg,
         };
+        e.player.set_switch_fade(e.cfg.switch_fade_secs);
+        e.library.set_stray_limit(e.cfg.cache_gb);
         e.resume_local();
         if offline || e.cfg.offline_mode {
             e.enter_offline();
         } else {
             e.start_auth();
+            // Вход уже был и есть снимок коллекции: главный экран сразу, с прошлыми лайками и
+            // плейлистами; сервер подтвердит токен и обновит их в фоне.
+            if matches!(e.screen, Screen::Connecting(_)) && !e.snapshot.is_empty() {
+                e.screen = Screen::Main;
+                e.liked = e.snapshot.likes.iter().map(|t| t.id.clone()).collect();
+                e.likes = Loadable::Ready(e.snapshot.likes.clone());
+                e.playlists = Loadable::Ready(e.snapshot.playlists.clone());
+                e.emit(Effect::LikesChanged);
+            }
         }
         Ok(e)
     }
@@ -647,6 +670,10 @@ impl Engine {
                     if !self.snapshot.is_empty() {
                         self.enter_offline();
                     }
+                } else if matches!(self.screen, Screen::Main) && self.client.is_none() && !self.offline {
+                    // Главный экран показан заранее (по снимку), а сети так и нет.
+                    self.play_when_online = false;
+                    self.enter_offline();
                 }
             }
             Msg::DeviceCode(r) => {
@@ -685,10 +712,14 @@ impl Engine {
                     self.snapshot.likes = ts.clone();
                     self.snapshot.save(self.snapshot_path.clone());
                     self.likes = Loadable::Ready(ts);
+                    self.likes_fresh = true;
+                    self.sync_keep();
                     self.backfill_library_meta();
                     self.refresh_offline_program();
                     self.emit(Effect::LikesChanged);
                 }
+                // Обновление не прошло — показанное (из снимка или прошлого ответа) остаётся.
+                Err(e) if self.likes.ready().is_some() => tracing::warn!("лайки не обновились: {e}"),
                 Err(e) => self.likes = Loadable::Failed(e),
             },
             Msg::Ynison(ev) => self.on_ynison(ev),
@@ -713,16 +744,15 @@ impl Engine {
                 }
                 Err(e) => tracing::warn!("personal-playlists: {e}"),
             },
-            Msg::Playlists(r) => {
-                self.playlists = match r {
-                    Ok(p) => {
-                        self.snapshot.playlists = p.clone();
-                        self.sync_snapshot_playlists(&p);
-                        Loadable::Ready(p)
-                    }
-                    Err(e) => Loadable::Failed(e),
+            Msg::Playlists(r) => match r {
+                Ok(p) => {
+                    self.snapshot.playlists = p.clone();
+                    self.sync_snapshot_playlists(&p);
+                    self.playlists = Loadable::Ready(p);
                 }
-            }
+                Err(e) if self.playlists.ready().is_some() => tracing::warn!("плейлисты не обновились: {e}"),
+                Err(e) => self.playlists = Loadable::Failed(e),
+            },
             Msg::OfflineProgram(r) => {
                 self.owave_fetching = false;
                 match r {
@@ -752,6 +782,8 @@ impl Engine {
                     self.snapshot.playlist_tracks.insert(k, (rev, ts));
                 }
                 self.snapshot.save(self.snapshot_path.clone());
+                self.playlists_fresh = true;
+                self.sync_keep();
             }
             Msg::PlaylistOp {
                 result,
@@ -929,6 +961,7 @@ impl Engine {
             fetcher.set_quality(q);
         }
         self.fetcher = Some(fetcher);
+        self.sync_keep();
         let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<PlOp>();
         let (pc, mtx) = (client.clone(), self.tx.clone());
         tokio::spawn(async move {
@@ -998,7 +1031,9 @@ impl Engine {
     pub fn restore_session(&mut self) {
         // Очередь уже из кеша: открыть трек (если ещё ждал сети) и подготовить следующий.
         if !self.queue.items.is_empty() && self.resume_partial.is_none() {
+            let play = std::mem::take(&mut self.play_when_online);
             match self.resume_at.take() {
+                Some((pos, secs)) if play => self.play_index_at(pos, secs, false),
                 Some((pos, secs)) => {
                     self.play_index_at(pos, secs, true);
                     self.toast_with("Продолжаем с того же места".into(), ToastAction::Resume);
@@ -1122,7 +1157,10 @@ impl Engine {
     }
 
     pub fn load_likes(&mut self) {
-        self.likes = Loadable::Loading;
+        // Уже показанное (снимок, прошлый ответ) не прячем за индикатором: обновится на месте.
+        if self.likes.ready().is_none() {
+            self.likes = Loadable::Loading;
+        }
         self.spawn(|c, tx| async move {
             let r = async {
                 let ids = c.liked_track_ids().await?;
@@ -1141,7 +1179,9 @@ impl Engine {
     }
 
     pub fn load_playlists(&mut self) {
-        self.playlists = Loadable::Loading;
+        if self.playlists.ready().is_none() {
+            self.playlists = Loadable::Loading;
+        }
         self.spawn(|c, tx| async move {
             let _ = tx.send(Msg::Playlists(c.playlists().await.map_err(err_str)));
         });
@@ -1197,6 +1237,13 @@ impl Engine {
 
     pub fn play_index_at(&mut self, idx: usize, start: f64, paused: bool) {
         let Some(opener) = self.opener() else {
+            // Вход ещё идёт (главный экран показан по снимку): запомним и включим, как появится связь.
+            if let Some(t) = self.queue.items.get(idx).cloned() {
+                self.queue.pos = Some(idx);
+                self.loading_track = Some(t);
+                self.resume_at = Some((idx, start));
+                self.play_when_online = !paused;
+            }
             return;
         };
         self.play_index_with(idx, start, paused, opener);
@@ -1520,6 +1567,8 @@ impl Engine {
         let stale: Vec<Playlist> = pls.iter().filter(|p| self.snapshot.stale(p)).cloned().collect();
         if stale.is_empty() {
             self.snapshot.save(self.snapshot_path.clone());
+            self.playlists_fresh = true;
+            self.sync_keep();
             return;
         }
         self.spawn(move |c, tx| async move {
@@ -1644,6 +1693,11 @@ impl Engine {
     }
 
     pub fn toggle_pause(&mut self) {
+        // Трек ждёт связи (вход ещё идёт): «играть» значит «включи, как подключишься».
+        if self.now.is_none() && self.resume_at.is_some() && self.opener().is_none() {
+            self.play_when_online = !self.play_when_online;
+            return;
+        }
         if self.now.is_none() && self.loading_track.is_none() {
             if let Some(p) = self.queue.pos.or((!self.queue.items.is_empty()).then_some(0)) {
                 self.play_index(p);
@@ -1970,6 +2024,12 @@ impl Engine {
         let like = !self.is_liked(&t);
         self.apply_like(&t, like);
         if like {
+            // Лайк снимает «не рекомендовать» (сервер делает то же сам).
+            self.disliked.remove(&t.id);
+            if let Some(f) = self.fetcher.clone() {
+                let liked = t.clone();
+                tokio::spawn(async move { f.promote(liked).await });
+            }
             self.wave_feedback("like", &t, None);
             self.toast(format!("\u{f004} {}", t.full_title()));
         } else {
@@ -1990,6 +2050,9 @@ impl Engine {
 
     /// Локальное состояние лайка: множество, коллекция, фильтр, MPRIS.
     pub fn apply_like(&mut self, t: &Track, like: bool) {
+        if let Some(f) = &self.fetcher {
+            f.keep_one(&t.id, like);
+        }
         if like {
             self.liked.insert(t.id.clone());
             if let Loadable::Ready(v) = &mut self.likes
@@ -2070,8 +2133,19 @@ impl Engine {
         };
         let id = t.full_id();
         self.wave_feedback("dislike", &t, None);
+        // «Не рекомендовать» и «нравится» исключают друг друга: лайк снимается и здесь, и на сервере.
+        let was_liked = self.is_liked(&t);
+        if was_liked {
+            self.apply_like(&t, false);
+        }
+        self.disliked.insert(t.id.clone());
         self.spawn(move |c, _| async move {
-            let _ = c.dislike(&id).await;
+            if was_liked && let Err(e) = c.set_like(&id, false).await {
+                tracing::warn!("лайк при дизлайке не снялся: {e}");
+            }
+            if let Err(e) = c.dislike(&id).await {
+                tracing::warn!("дизлайк не сохранился: {e}");
+            }
         });
         self.toast(format!("Не рекомендовать: {}", t.full_title()));
         self.next();
@@ -2289,6 +2363,70 @@ impl Engine {
         {
             self.hot_upgrade(true);
         }
+    }
+
+    /// Сохранять ли в библиотеку всё сыгранное (иначе — только коллекцию, остальное в кеш).
+    pub fn keep_played(&self) -> bool {
+        self.cfg.keep_played.unwrap_or(true)
+    }
+
+    pub fn set_keep_played(&mut self, on: bool) {
+        self.cfg.keep_played = Some(on);
+        self.cfg.save(&self.paths);
+        self.sync_keep();
+    }
+
+    /// Наплыв при ручной смене трека, сек (0 — резко).
+    pub fn set_switch_fade(&mut self, secs: f32) {
+        self.cfg.switch_fade_secs = secs.clamp(0.0, 3.0);
+        self.player.set_switch_fade(self.cfg.switch_fade_secs);
+        self.cfg.save(&self.paths);
+    }
+
+    /// Коллекция (лайки и треки своих плейлистов) — загрузчику и библиотеке: что из сыгранного
+    /// сохранять насовсем, а что держать кешем. Скачанное раньше, но не из коллекции, уходит
+    /// в кеш, только когда и лайки, и плейлисты подтверждены сервером.
+    pub fn sync_keep(&mut self) {
+        let all = self.keep_played();
+        let mut ids: HashSet<String> = self.liked.clone();
+        for (_, ts) in self.snapshot.playlist_tracks.values() {
+            ids.extend(ts.iter().map(|t| t.id.clone()));
+        }
+        if let Some(f) = &self.fetcher {
+            f.set_keep(all, ids.clone());
+        }
+        let flags = self.library.stray_flags();
+        // Свои, лежащие в кеше, — в библиотеку (с тегами, если знаем метаданные).
+        let promote: Vec<String> = flags.iter().filter(|(id, stray)| *stray && (all || ids.contains(id))).map(|(id, _)| id.clone()).collect();
+        if !promote.is_empty() {
+            let known: Vec<Track> = promote.iter().filter_map(|id| self.snapshot.find(id).cloned()).collect();
+            let unknown: Vec<String> = promote.iter().filter(|id| self.snapshot.find(id).is_none()).cloned().collect();
+            self.library.set_stray(&unknown, false);
+            if let Some(f) = self.fetcher.clone() {
+                tokio::spawn(async move {
+                    for t in known {
+                        f.promote(t).await;
+                    }
+                });
+            }
+        }
+        if !all && self.likes_fresh && self.playlists_fresh {
+            let demote: Vec<String> = flags.into_iter().filter(|(id, stray)| !stray && !ids.contains(id)).map(|(id, _)| id).collect();
+            if !demote.is_empty() {
+                let n = self.library.set_stray(&demote, true);
+                tracing::info!("{n} сыгранных треков не из коллекции — теперь кеш");
+            }
+        }
+    }
+
+    /// Перечитать с сервера всё, что показано: лайки, плейлисты, подборки, пресеты волны.
+    pub fn refresh(&mut self) {
+        if self.client.is_none() {
+            return;
+        }
+        self.load_likes();
+        self.load_playlists();
+        self.load_wheel();
     }
 
     /// Прогреть следующие треки очереди после `cur` (ссылка и начало файла).

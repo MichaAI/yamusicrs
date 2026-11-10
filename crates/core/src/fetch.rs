@@ -29,6 +29,14 @@ pub struct Fetcher {
     fast: Arc<AtomicBool>,
     /// Прогретые треки: ссылка и начало файла уже есть — переход на них мгновенный.
     warm: Arc<Mutex<HashMap<String, Warm>>>,
+    /// Что сохранять в библиотеку насовсем: всё сыгранное или только коллекцию.
+    keep: Arc<Mutex<Keep>>,
+}
+
+/// Коллекция: лайки и треки своих плейлистов. Сыгранное вне её при `all == false` — в кеш.
+pub struct Keep {
+    pub all: bool,
+    pub ids: std::collections::HashSet<String>,
 }
 
 /// Начало файла, скачанное заранее; остаток докачивается при открытии.
@@ -86,7 +94,65 @@ impl Fetcher {
             active: Arc::default(),
             fast: Arc::new(AtomicBool::new(true)),
             warm: Arc::default(),
+            keep: Arc::new(Mutex::new(Keep { all: true, ids: Default::default() })),
         }
+    }
+
+    /// Что считать коллекцией (см. [`Keep`]).
+    pub fn set_keep(&self, all: bool, ids: std::collections::HashSet<String>) {
+        *self.keep.lock() = Keep { all, ids };
+    }
+
+    /// Трек вошёл в коллекцию (лайк) или вышел из неё.
+    pub fn keep_one(&self, id: &str, keep: bool) {
+        let id = id.split(':').next().unwrap_or(id).to_string();
+        let mut k = self.keep.lock();
+        if keep {
+            k.ids.insert(id);
+        } else {
+            k.ids.remove(&id);
+        }
+    }
+
+    fn is_stray(&self, id: &str) -> bool {
+        let k = self.keep.lock();
+        !k.all && !k.ids.contains(id.split(':').next().unwrap_or(id))
+    }
+
+    /// Трек из кеша сыгранного стал своим (лайк, плейлист): перекладывает его в библиотеку
+    /// как положено — в папку альбома, с тегами и обложкой.
+    pub async fn promote(&self, track: Track) {
+        let Some((path, e)) = self.library.lookup(&track.id).filter(|(_, e)| e.stray) else { return };
+        let Ok(data) = tokio::fs::read(&path).await else { return };
+        let (cover, lyrics) = self.extras(&track).await;
+        let lib = self.library.clone();
+        let id = track.id.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            lib.store(Download { track, requested_rank: e.checked_rank, codec: e.codec, data, cover, lyrics, stray: false })
+        })
+        .await;
+        match res {
+            Ok(Ok(p)) => tracing::info!("{id}: из кеша в библиотеку → {}", p.display()),
+            Ok(Err(err)) => tracing::warn!("{id}: не переложился из кеша: {err:#}"),
+            Err(err) => tracing::warn!("promote panic: {err}"),
+        }
+    }
+
+    /// Обложка и текст для тегов.
+    async fn extras(&self, track: &Track) -> (Option<Vec<u8>>, Option<String>) {
+        let cover = match track.cover_uri() {
+            Some(u) => fetch_bytes(&self.client, &cover_url(u, 1000)).await.ok(),
+            None => None,
+        };
+        // В теги — синхронный LRC, если есть (его понимают многие плееры), иначе просто текст.
+        let lyrics = if track.has_sync_lyrics() {
+            self.client.lyrics(&track.id, true).await.ok()
+        } else if track.has_text_lyrics() {
+            self.client.lyrics(&track.id, false).await.ok()
+        } else {
+            None
+        };
+        (cover, lyrics)
     }
 
     pub fn set_fast_start(&self, on: bool) {
@@ -226,7 +292,7 @@ impl Fetcher {
         let buf = StreamBuffer::new(info.size)?;
         self.download(&urls, key, &buf, 0, None).await?;
         buf.finish();
-        self.persist(track.clone(), info.codec.clone(), quality_rank(q), buf).await;
+        self.persist(track.clone(), info.codec.clone(), quality_rank(q), buf, true).await;
         Ok(self.library.contains(&track.id))
     }
 
@@ -262,7 +328,7 @@ impl Fetcher {
             match r {
                 Ok(()) => {
                     b.finish();
-                    this.persist(track.clone(), codec, rank, b.clone()).await;
+                    this.persist(track.clone(), codec, rank, b.clone(), false).await;
                 }
                 Err(e) => {
                     tracing::warn!("загрузка {} не удалась: {e}", track.id);
@@ -279,7 +345,34 @@ impl Fetcher {
     }
 
     /// Байты `[from, to)` файла в `buf` (дописывает в конец). `to == None` — до конца.
+    /// Обрыв посреди файла не роняет трек: докачиваем с места обрыва (до 4 неудач подряд).
     async fn download(
+        &self,
+        urls: &[String],
+        key: Option<[u8; 16]>,
+        buf: &StreamBuffer,
+        from: u64,
+        to: Option<u64>,
+    ) -> Result<()> {
+        let base = buf.len().saturating_sub(from);
+        let (mut at, mut fails) = (from, 0u32);
+        loop {
+            let e = match self.download_once(urls, key, buf, at, to).await {
+                Ok(()) => return Ok(()),
+                Err(e) => e,
+            };
+            let now = buf.len().saturating_sub(base);
+            fails = if now > at { 1 } else { fails + 1 };
+            at = now;
+            if fails > 4 || to.is_some_and(|t| at >= t) {
+                return if to.is_some_and(|t| at >= t) { Ok(()) } else { Err(e) };
+            }
+            tracing::debug!("загрузка оборвалась на {at} байт ({e}); докачиваю, попытка {fails}");
+            tokio::time::sleep(Duration::from_millis(400 * (1 << fails.min(3)))).await;
+        }
+    }
+
+    async fn download_once(
         &self,
         urls: &[String],
         key: Option<[u8; 16]>,
@@ -348,19 +441,12 @@ impl Fetcher {
         Err(last_err)
     }
 
-    async fn persist(&self, track: Track, codec: String, requested_rank: u8, buf: Arc<StreamBuffer>) {
-        let cover = match track.cover_uri() {
-            Some(u) => fetch_bytes(&self.client, &cover_url(u, 1000)).await.ok(),
-            None => None,
-        };
-        // В теги — синхронный LRC, если есть (его понимают многие плееры), иначе просто текст.
-        let lyrics = if track.has_sync_lyrics() {
-            self.client.lyrics(&track.id, true).await.ok()
-        } else if track.has_text_lyrics() {
-            self.client.lyrics(&track.id, false).await.ok()
-        } else {
-            None
-        };
+    /// `keep` — сохранить насовсем, даже если трек не из коллекции (умное скачивание).
+    async fn persist(&self, track: Track, codec: String, requested_rank: u8, buf: Arc<StreamBuffer>, keep: bool) {
+        // Уже свой (скачан раньше в качестве похуже) своим и остаётся.
+        let stray = !keep && self.is_stray(&track.id) && (!self.library.contains(&track.id) || self.library.is_stray(&track.id));
+        // Кешу сыгранного теги не нужны — ни обложку, ни текст не качаем.
+        let (cover, lyrics) = if stray { (None, None) } else { self.extras(&track).await };
         let id = track.id.clone();
         // Пока качали, трек уже лёг в библиотеку в качестве получше (подмена на ходу) — не затираем.
         if self.library.codec_of(&id).is_some_and(|c| codec_rank(&c) > codec_rank(&codec)) {
@@ -379,6 +465,7 @@ impl Fetcher {
                 data,
                 cover,
                 lyrics,
+                stray,
             })
         })
         .await;

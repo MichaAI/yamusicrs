@@ -31,6 +31,9 @@ pub struct Entry {
     /// Скачан умным скачиванием и ещё не игрался: такой сервер может попросить удалить.
     #[serde(default)]
     pub smart: bool,
+    /// Сыгранный трек не из коллекции: это кеш (свой лимит, в «Скачанном» не виден).
+    #[serde(default)]
+    pub stray: bool,
 }
 
 impl Entry {
@@ -63,6 +66,8 @@ pub struct Library {
     index_path: PathBuf,
     index: Mutex<Index>,
     max_bytes: u64,
+    /// Лимит кеша сыгранного не из коллекции, байт (0 — без лимита).
+    stray_max: std::sync::atomic::AtomicU64,
 }
 
 /// Готовый к сохранению трек.
@@ -74,6 +79,8 @@ pub struct Download {
     pub data: Vec<u8>,
     pub cover: Option<Vec<u8>>,
     pub lyrics: Option<String>,
+    /// Не из коллекции: кладётся в кеш (`.cache/`), без тегов.
+    pub stray: bool,
 }
 
 impl Library {
@@ -87,6 +94,7 @@ impl Library {
             index_path,
             index: Mutex::new(index),
             max_bytes: (max_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+            stray_max: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -129,9 +137,70 @@ impl Library {
         self.index.lock().tracks.contains_key(id)
     }
 
-    /// id всех скачанных треков.
+    /// id скачанных треков (без кеша сыгранного не из коллекции).
     pub fn ids(&self) -> Vec<String> {
-        self.index.lock().tracks.keys().cloned().collect()
+        self.index.lock().tracks.iter().filter(|(_, e)| !e.stray).map(|(k, _)| k.clone()).collect()
+    }
+
+    /// Лимит кеша сыгранного не из коллекции, ГиБ (0 — без лимита).
+    pub fn set_stray_limit(&self, gb: f64) {
+        let b = (gb.max(0.0) * 1024.0 * 1024.0 * 1024.0) as u64;
+        self.stray_max.store(b, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Трек в кеше сыгранного (а не в скачанном).
+    pub fn is_stray(&self, track_id: &str) -> bool {
+        let id = track_id.split(':').next().unwrap_or(track_id);
+        self.index.lock().tracks.get(id).is_some_and(|e| e.stray)
+    }
+
+    /// Все записи: id и лежит ли трек в кеше сыгранного; подобранные сервером не включаются.
+    pub fn stray_flags(&self) -> Vec<(String, bool)> {
+        self.index.lock().tracks.iter().filter(|(_, e)| !e.smart).map(|(k, e)| (k.clone(), e.stray)).collect()
+    }
+
+    /// Переводит треки в кеш сыгранного (перестали быть в коллекции) или обратно — без
+    /// переноса файлов. Лишнее сверх лимита кеша удаляется. Возвращает, сколько поменялось.
+    pub fn set_stray(&self, ids: &[String], stray: bool) -> usize {
+        let mut n = 0;
+        {
+            let mut idx = self.index.lock();
+            for id in ids {
+                let id = id.split(':').next().unwrap_or(id);
+                if let Some(e) = idx.tracks.get_mut(id).filter(|e| e.stray != stray) {
+                    e.stray = stray;
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.evict();
+            self.save_index();
+        }
+        n
+    }
+
+    /// Сколько занимает кеш сыгранного, байт.
+    pub fn stray_bytes(&self) -> u64 {
+        self.index.lock().tracks.values().filter(|e| e.stray).map(|e| e.size).sum()
+    }
+
+    /// Стирает кеш сыгранного. Возвращает число удалённых.
+    pub fn clear_stray(&self) -> usize {
+        let n = {
+            let mut idx = self.index.lock();
+            let ids: Vec<String> = idx.tracks.iter().filter(|(_, e)| e.stray).map(|(k, _)| k.clone()).collect();
+            for id in &ids {
+                if let Some(e) = idx.tracks.remove(id) {
+                    self.remove_file(&e.path);
+                }
+            }
+            ids.len()
+        };
+        if n > 0 {
+            self.save_index();
+        }
+        n
     }
 
     /// Скачан, хуже ранга `want` и давно не проверяли (без отметки «играли»).
@@ -185,7 +254,8 @@ impl Library {
 
     /// Все скачанные: id, когда играли (или скачали) и подобран ли сервером.
     pub fn entries(&self) -> Vec<(String, i64, bool)> {
-        self.index.lock().tracks.iter().map(|(k, e)| (k.clone(), e.last_played, e.smart)).collect()
+        let idx = self.index.lock();
+        idx.tracks.iter().filter(|(_, e)| !e.stray).map(|(k, e)| (k.clone(), e.last_played, e.smart)).collect()
     }
 
     /// Сколько занимает умное скачивание, байт.
@@ -219,7 +289,7 @@ impl Library {
         let n = {
             let mut idx = self.index.lock();
             let ids: Vec<String> =
-                idx.tracks.iter().filter(|(_, e)| !only_smart || e.smart).map(|(k, _)| k.clone()).collect();
+                idx.tracks.iter().filter(|(_, e)| if only_smart { e.smart } else { !e.stray }).map(|(k, _)| k.clone()).collect();
             for id in &ids {
                 if let Some(e) = idx.tracks.remove(id) {
                     self.remove_file(&e.path);
@@ -246,9 +316,11 @@ impl Library {
         }
     }
 
+    /// Скачанное: число треков и байт (без кеша сыгранного).
     pub fn stats(&self) -> (usize, u64) {
         let idx = self.index.lock();
-        (idx.tracks.len(), idx.tracks.values().map(|e| e.size).sum())
+        let kept = idx.tracks.values().filter(|e| !e.stray);
+        (kept.clone().count(), kept.map(|e| e.size).sum())
     }
 
     fn save_index(&self) {
@@ -272,12 +344,17 @@ impl Library {
             "aac" | "he-aac" => (dl.data, "aac", TagType::Id3v2),
             other => bail!("неизвестный кодек {other}"),
         };
-        let rel = relative_path(&dl.track, ext);
+        // Кеш сыгранного — плоско и без тегов: это не библиотека, а запас на повтор.
+        let rel = if dl.stray {
+            PathBuf::from(".cache").join(format!("{}.{ext}", sanitize(&dl.track.id)))
+        } else {
+            relative_path(&dl.track, ext)
+        };
         let path = self.root.join(&rel);
         std::fs::create_dir_all(path.parent().expect("parent"))?;
         let tmp = path.with_extension(format!("{ext}.part"));
         std::fs::write(&tmp, &bytes)?;
-        if ext != "aac" {
+        if ext != "aac" && !dl.stray {
             let tag = build_tag(&dl.track, tag_type, dl.cover, dl.lyrics);
             tag.save_to_path(&tmp, WriteOptions::default())
                 .map_err(|e| eyre!("теги: {e}"))?;
@@ -289,12 +366,14 @@ impl Library {
             dl.track.id.clone(),
             Entry {
                 path: rel.clone(),
-                codec: dl.codec,
+                // Файл уже в родном контейнере: при переносе из кеша ремукс не нужен.
+                codec: if dl.codec == "flac-mp4" { "flac".into() } else { dl.codec },
                 size,
                 last_played: now,
                 checked_at: now,
                 checked_rank: dl.requested_rank,
                 smart: false,
+                stray: dl.stray,
             },
         );
         // Апгрейд качества: старый файл (например, .m4a вместо нового .flac) больше не нужен.
@@ -308,8 +387,30 @@ impl Library {
         Ok(path)
     }
 
-    /// Удаляет давно не игранное, пока библиотека не влезет в лимит.
+    /// Удаляет давно не игранное, пока библиотека не влезет в лимит; кеш сыгранного — в свой.
     fn evict(&self) {
+        let stray_max = self.stray_max.load(std::sync::atomic::Ordering::Relaxed);
+        if stray_max > 0 {
+            let mut idx = self.index.lock();
+            let mut total: u64 = idx.tracks.values().filter(|e| e.stray).map(|e| e.size).sum();
+            if total > stray_max {
+                let mut by_age: Vec<(String, i64, u64, PathBuf)> = idx
+                    .tracks
+                    .iter()
+                    .filter(|(_, e)| e.stray)
+                    .map(|(k, e)| (k.clone(), e.last_played, e.size, e.path.clone()))
+                    .collect();
+                by_age.sort_by_key(|e| e.1);
+                for (id, _, size, rel) in by_age {
+                    if total <= stray_max {
+                        break;
+                    }
+                    self.remove_file(&rel);
+                    idx.tracks.remove(&id);
+                    total -= size;
+                }
+            }
+        }
         if self.max_bytes == 0 {
             return;
         }

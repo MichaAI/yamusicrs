@@ -398,6 +398,31 @@ pub struct SearchResult {
     pub artists: Option<SearchBlock<Artist>>,
     #[serde(default)]
     pub playlists: Option<SearchBlock<Playlist>>,
+    /// Волны под запрос (из нового поиска; старый их не отдаёт).
+    #[serde(default, skip_deserializing)]
+    pub waves: Vec<SearchWave>,
+}
+
+/// Волна из поиска: «Грустное — Моя волна по настроению».
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchWave {
+    pub title: String,
+    #[serde(default)]
+    pub sub_title: Option<String>,
+    #[serde(default)]
+    pub seeds: Vec<String>,
+    /// `#RRGGBB`.
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub agent: Option<WheelAgent>,
+}
+
+impl SearchWave {
+    pub fn icon(&self) -> Option<&str> {
+        self.agent.as_ref()?.cover.as_ref()?.uri.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

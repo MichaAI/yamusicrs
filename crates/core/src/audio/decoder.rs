@@ -261,7 +261,9 @@ fn splice(
 
 /// Уходящий трек во время кроссфейда: доигрывает поверх начала следующего.
 struct Fade {
-    from: Active,
+    /// `None` — уходящий трек уже декодирован целиком в `buf` (ручная смена трека).
+    from: Option<Active>,
+    ch: usize,
     buf: Vec<f32>,
     pos: usize,
     /// Сколько кадров уже смешано и сколько всего длится переход.
@@ -475,11 +477,38 @@ impl Dec {
                 gain,
                 start_secs,
             } => {
-                self.reset();
-                match open(token, source, gain) {
+                // Сначала открываем новый (старый тем временем доигрывает из кольца), потом
+                // рвём старый: иначе на время разбора контейнера в выводе дыра.
+                let opened = open(token, source, gain);
+                // Ручная смена трека с наплывом: недоигранный хвост старого затухает поверх
+                // начала нового. Только если формат тот же, звук идёт и это не старт с середины.
+                let fade_secs = self.shared.switch_fade_secs();
+                let fade_to = opened.as_ref().ok().map(|a| a.format).filter(|f| {
+                    fade_secs > 0.0 && start_secs <= 0.0 && !self.shared.paused() && self.out.current() == Some(*f)
+                });
+                let tail = match fade_to {
+                    Some(f) => {
+                        let max = (fade_secs as f64 * f.rate as f64) as usize * f.channels.max(1) as usize;
+                        self.reset_with(Some(max))
+                    }
+                    None => self.reset_with(None),
+                };
+                match opened {
                     Ok(a) => {
                         self.out.configure(a.format);
+                        let ch = a.format.channels.max(1) as usize;
                         self.begin(a, 0.0);
+                        if tail.len() >= ch * 64 {
+                            self.fade = Some(Fade {
+                                from: None,
+                                ch,
+                                len: (tail.len() / ch) as u64,
+                                buf: tail,
+                                pos: 0,
+                                done: 0,
+                                ended: true,
+                            });
+                        }
                         if start_secs > 0.0 {
                             self.seek(start_secs);
                         }
@@ -528,6 +557,11 @@ impl Dec {
     }
 
     fn reset(&mut self) {
+        self.reset_with(None);
+    }
+
+    /// Сброс; `keep` — сколько недоигранных сэмплов вернуть вместо того, чтобы выбросить.
+    fn reset_with(&mut self, keep: Option<usize>) -> Vec<f32> {
         self.abort_swap(false);
         if let Some(a) = self.cur.take() {
             a.source.cancel();
@@ -541,7 +575,13 @@ impl Dec {
         self.leftover_pos = 0;
         self.awaiting_next = false;
         self.drained_sent = false;
-        self.shared.flush();
+        match keep {
+            Some(max) => self.shared.take_unplayed(max),
+            None => {
+                self.shared.flush();
+                Vec::new()
+            }
+        }
     }
 
     /// Новый трек начинает звучать с текущей позиции записи в кольце.
@@ -645,7 +685,8 @@ impl Dec {
         let len = (remaining * a.format.rate as f64) as u64;
         let from = self.cur.take().expect("cur");
         self.fade = Some(Fade {
-            from,
+            ch: from.format.channels.max(1) as usize,
+            from: Some(from),
             buf: Vec::new(),
             pos: 0,
             done: 0,
@@ -658,7 +699,10 @@ impl Dec {
     /// Следующий сэмпл уходящего трека; декодирует пакеты по мере надобности.
     fn fade_sample(f: &mut Fade, scratch: &mut Vec<f32>) -> f32 {
         while f.pos >= f.buf.len() && !f.ended {
-            let a = &mut f.from;
+            let Some(a) = f.from.as_mut() else {
+                f.ended = true;
+                break;
+            };
             let packet = match a.reader.next_packet() {
                 Ok(Some(p)) => p,
                 _ => {
@@ -691,7 +735,7 @@ impl Dec {
     /// Подмешивает уходящий трек к только что декодированному началу нового.
     fn mix_fade(&mut self) {
         let Some(f) = self.fade.as_mut() else { return };
-        let ch = f.from.format.channels.max(1) as usize;
+        let ch = f.ch;
         let mut tmp = Vec::new();
         for (i, frame) in self.scratch.chunks_mut(ch).enumerate() {
             let t = ((f.done + i as u64) as f32 / f.len.max(1) as f32).min(1.0);

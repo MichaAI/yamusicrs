@@ -23,6 +23,8 @@ const DESKTOP_SIGN_KEY: &[u8] = b"kzqU4XhfCaY6B6JTHODeq5";
 const DEFAULT_SIGN_KEY: &[u8] = b"p93jhgh689SBReK6ghtw62";
 /// Размер страницы лайкнутых альбомов/исполнителей.
 const LIKES_PAGE: usize = 100;
+/// Потолок на один запрос к API (не к загрузкам файлов).
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const FILE_CODECS: &[&str] = &["flac", "flac-mp4", "aac-mp4", "he-aac-mp4", "aac", "he-aac", "mp3"];
 
 #[derive(Debug, thiserror::Error)]
@@ -120,7 +122,12 @@ impl NetHints {
 pub fn http_client() -> reqwest::Client {
     let b = reqwest::Client::builder()
         .user_agent(concat!("yamusicrs/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(std::time::Duration::from_secs(10));
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Зависшая загрузка (сеть пропала посреди трека) не висит вечно: дальше её докачает повтор.
+        .read_timeout(std::time::Duration::from_secs(20))
+        // Соединение живёт между редкими действиями (пауза в пару минут — и снова без рукопожатия).
+        .pool_idle_timeout(std::time::Duration::from_secs(300))
+        .tcp_keepalive(std::time::Duration::from_secs(45));
     with_roots(b).build().expect("reqwest client")
 }
 
@@ -183,12 +190,44 @@ impl Client {
             .header("Authorization", format!("OAuth {}", self.token))
             .header("X-Yandex-Music-Client", client)
             .header("Accept-Language", "ru")
+            .timeout(API_TIMEOUT)
+    }
+
+    /// Запрос с повторами: сбой соединения — всегда (запрос не ушёл), таймаут и 502/503/504 —
+    /// только для GET (повторять POST с побочным эффектом нельзя). До двух повторов, 0,3 и 0,9 с.
+    async fn send_raw(&self, mut rb: reqwest::RequestBuilder) -> Result<(reqwest::StatusCode, bytes::Bytes)> {
+        let mut delay = std::time::Duration::from_millis(300);
+        for attempt in 0.. {
+            let again = rb.try_clone().filter(|_| attempt < 2);
+            let (req_client, req) = rb.build_split();
+            let req = req?;
+            let get = req.method() == reqwest::Method::GET;
+            let url = req.url().path().to_string();
+            let r = async {
+                let resp = req_client.execute(req).await?;
+                let status = resp.status();
+                Ok::<_, reqwest::Error>((status, resp.bytes().await?))
+            }
+            .await;
+            let retry = match &r {
+                Ok((st, _)) => get && matches!(st.as_u16(), 502..=504),
+                Err(e) => e.is_connect() || (get && (e.is_timeout() || e.is_request() || e.is_body())),
+            };
+            match again {
+                Some(next) if retry => {
+                    tracing::debug!("{url}: попытка {} не удалась, повтор через {delay:?}", attempt + 1);
+                    tokio::time::sleep(delay).await;
+                    delay *= 3;
+                    rb = next;
+                }
+                _ => return Ok(r?),
+            }
+        }
+        unreachable!()
     }
 
     async fn send<T: DeserializeOwned>(&self, rb: reqwest::RequestBuilder) -> Result<T> {
-        let resp = rb.send().await?;
-        let status = resp.status();
-        let body = resp.bytes().await?;
+        let (status, body) = self.send_raw(rb).await?;
         let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(ApiError::Unauthorized);
@@ -848,16 +887,85 @@ impl Client {
     }
 
     pub async fn search(&self, text: &str) -> Result<SearchResult> {
-        self.get(
-            "/search",
-            &[
-                ("text", text.into()),
-                ("type", "all".into()),
-                ("page", "0".into()),
-                ("nocorrect", "false".into()),
-            ],
-        )
-        .await
+        let q = [
+            ("text", text.to_string()),
+            ("type", "all".into()),
+            ("page", "0".into()),
+            ("nocorrect", "false".into()),
+        ];
+        // Волны по запросу («грустное», «рок», «для сна») отдаёт только новый поиск — им же
+        // пользуются официальные клиенты. Его сбой обычную выдачу не роняет.
+        let (found, waves) = tokio::join!(self.get::<SearchResult>("/search", &q), self.search_waves(text));
+        let mut found = found?;
+        found.waves = waves.unwrap_or_else(|e| {
+            tracing::debug!("волны по запросу: {e}");
+            Vec::new()
+        });
+        Ok(found)
+    }
+
+    /// Волны по настроению, жанру, занятию, подходящие под запрос (`search/instant/mixed`).
+    pub async fn search_waves(&self, text: &str) -> Result<Vec<SearchWave>> {
+        let q = [
+            ("text", text.to_string()),
+            ("type", "wave".into()),
+            ("page", "0".into()),
+            ("pageSize", "12".into()),
+            ("withLikesCount", "false".into()),
+            ("withBestResults", "false".into()),
+        ];
+        let v: Value = self
+            .send(self.req_as(reqwest::Method::GET, "/search/instant/mixed", DESKTOP_CLIENT).query(&q))
+            .await?;
+        Ok(v["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["type"] == "wave")
+            .filter_map(|r| serde_json::from_value::<SearchWave>(r["wave"].clone()).ok())
+            .filter(|w| !w.seeds.is_empty())
+            .collect())
+    }
+
+    /// Адрес для загрузки своего трека в свой плейлист (как «Загрузить трек» веб-версии):
+    /// сервер отвечает, куда слать файл.
+    pub async fn upload_target(&self, kind: &str, file_name: &str) -> Result<String> {
+        let q = [
+            ("uid", self.uid.clone()),
+            ("playlist-id", format!("{}:{kind}", self.uid)),
+            ("visibility", "private".into()),
+            ("path", file_name.to_string()),
+        ];
+        // Только POST (GET сервер не принимает); ответ без обёртки `result`.
+        let v: Value = self.send(self.req(reqwest::Method::POST, "/loader/upload-url").query(&q)).await?;
+        v["post-target"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or(ApiError::Api { status: 0, name: "upload".into(), message: "сервер не дал адрес загрузки".into() })
+    }
+
+    /// Загружает свой аудиофайл в плейлист `kind`: трек появится в нём после обработки сервером.
+    pub async fn upload_track(&self, kind: &str, file_name: &str, data: Vec<u8>) -> Result<()> {
+        let target = self.upload_target(kind, file_name).await?;
+        let part = reqwest::multipart::Part::bytes(data).file_name(file_name.to_string());
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let resp = self
+            .http
+            .post(target)
+            .multipart(form)
+            // Файл большой: потолок — на чтение (см. клиент), а не на запрос целиком.
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ApiError::Api {
+                status: status.as_u16(),
+                name: "upload".into(),
+                message: body.chars().take(200).collect(),
+            });
+        }
+        Ok(())
     }
 
     // ── Моя волна ────────────────────────────────────────────────────────────
@@ -870,6 +978,7 @@ impl Client {
             .header("Authorization", format!("OAuth {}", self.token))
             .header("X-Yandex-Music-Client", ANDROID_CLIENT)
             .header("Accept-Language", "ru")
+            .timeout(API_TIMEOUT)
             .json(&json!({}));
         let w: Wheel = self.send(rb).await?;
         Ok(w.items
