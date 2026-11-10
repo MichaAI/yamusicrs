@@ -1156,7 +1156,7 @@ fun TrackRow(
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                titleLine(t, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)),
+                remember(t.title, t.version, alpha) { titleLine(t, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)) },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge,
@@ -1542,9 +1542,7 @@ private fun Stage(
                         )
                         // Строка формата есть всегда: пока трек открывается, она пустая, а не исчезает
                         // (иначе обложка под шапкой подпрыгивает на каждой смене трека).
-                        AnimatedContent(s.format, transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(150)) }, label = "format") { f ->
-                            Text(f.ifEmpty { " " }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        }
+                        Text(s.format.ifEmpty { " " }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                     // Симметрия со «Свернуть»: заголовок по центру. Остальные действия — внизу, под пальцем.
                     Spacer(Modifier.width(48.dp))
@@ -1743,7 +1741,7 @@ private fun ColumnScope.StageInfo(
     toggleLyrics: () -> Unit,
 ) {
     // Длинное название бежит строкой, как marquee в TUI. Версия («Remix», «feat. …») — рядом, тише и мельче.
-    val (main, tail) = titleParts(t)
+    val (main, tail) = remember(t.title, t.version) { titleParts(t) }
     Row(Modifier.basicMarquee(initialDelayMillis = 2000), verticalAlignment = Alignment.Bottom) {
         ScrambleText(
             main,
@@ -1772,15 +1770,9 @@ private fun ColumnScope.StageInfo(
     ) {
         // Аватарка исполнителя — круглая, как на его странице. Приходит позже трека: место под неё
         // раскрывается плавно, имя не отпрыгивает вправо.
-        AnimatedVisibility(
-            photo != null,
-            enter = androidx.compose.animation.expandHorizontally() + fadeIn(),
-            exit = androidx.compose.animation.shrinkHorizontally() + fadeOut(),
-        ) {
-            Row {
-                Art(app, photo, Modifier.size(32.dp), corner = 16.dp)
-                Spacer(Modifier.width(10.dp))
-            }
+        if (photo != null) {
+            Art(app, photo, Modifier.size(32.dp), corner = 16.dp)
+            Spacer(Modifier.width(10.dp))
         }
         Text(t.artists, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
