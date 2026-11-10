@@ -65,6 +65,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Matrix
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -520,10 +521,11 @@ fun Art(
     if (fade != null) LaunchedEffect(img) { if (img != null) fade.animateTo(1f, tween(320)) }
     Box(box) {
         // Пока своей нет — на её месте картинка карточки; своя пришла — заменяет в тот же кадр.
-        if (img == null) under?.let { Image(it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+        if (img == null) under?.let { Image(it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop, filterQuality = FilterQuality.Medium, modifier = Modifier.fillMaxSize()) }
         img?.let {
             Image(
                 it, null, alignment = align, contentScale = if (plain) ContentScale.Fit else ContentScale.Crop,
+                filterQuality = FilterQuality.Medium,
                 modifier = if (fade == null) Modifier.fillMaxSize() else Modifier.fillMaxSize().graphicsLayer {
                     val f = fade.value
                     fadeBlur(f, 16.dp)
