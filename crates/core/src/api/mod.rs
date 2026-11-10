@@ -297,8 +297,13 @@ impl Client {
     }
 
     pub async fn file_info(&self, track_id: &str, quality: Quality) -> Result<DownloadInfo> {
+        self.file_info_codecs(track_id, quality, FILE_CODECS).await
+    }
+
+    /// То же, но только в перечисленных кодеках (экспорт в конкретный формат).
+    pub async fn file_info_codecs(&self, track_id: &str, quality: Quality, codecs_list: &[&str]) -> Result<DownloadInfo> {
         let ts = now_ts();
-        let codecs = FILE_CODECS.join("");
+        let codecs = codecs_list.join("");
         let transport = "encraw";
         let msg = format!("{ts}{track_id}{}{codecs}{transport}", quality.as_str());
         let mut sign = hmac_b64(DESKTOP_SIGN_KEY, &msg);
@@ -309,7 +314,7 @@ impl Client {
                 ("ts", ts.to_string()),
                 ("trackId", track_id.to_string()),
                 ("quality", quality.as_str().to_string()),
-                ("codecs", FILE_CODECS.join(",")),
+                ("codecs", codecs_list.join(",")),
                 ("transports", transport.to_string()),
                 ("sign", sign),
             ]);

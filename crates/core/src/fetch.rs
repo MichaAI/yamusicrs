@@ -296,6 +296,41 @@ impl Fetcher {
         Ok(self.library.contains(&track.id))
     }
 
+    /// Экспорт трека обычным файлом в `dir`: формат сервера как есть (без пережатия) или WAV.
+    pub async fn export(&self, track: &Track, fmt: crate::export::Format, dir: std::path::PathBuf) -> Result<std::path::PathBuf> {
+        let (q, codecs) = fmt.request();
+        // Уже скачан в нужном виде — берём с диска.
+        let local = self.library.lookup(&track.id).filter(|(_, e)| fmt.accepts(&e.codec) && (fmt != crate::export::Format::Wav || codec_rank(&e.codec) == 3));
+        let (codec, data) = match local {
+            Some((path, e)) => (e.codec, tokio::fs::read(path).await?),
+            None => {
+                let mut info = self.client.file_info_codecs(&track.id, q, codecs).await?;
+                if !fmt.accepts(&info.codec) {
+                    return Err(eyre!("у трека нет формата {}: сервер предложил только {}", fmt.label(), info.codec));
+                }
+                // WAV без lossless — распаковка лучшего сжатого.
+                if fmt == crate::export::Format::Wav && codec_rank(&info.codec) < 3 {
+                    info = self.client.file_info(&track.id, Quality::Hq).await?;
+                }
+                let urls = info.urls();
+                if urls.is_empty() {
+                    return Err(eyre!("сервер не дал ссылку на файл"));
+                }
+                let key = cipher_key(&info)?;
+                let buf = StreamBuffer::new(info.size)?;
+                self.download(&urls, key, &buf, 0, None).await?;
+                buf.finish();
+                (info.codec, buf.snapshot()?)
+            }
+        };
+        let (cover, lyrics) = if fmt == crate::export::Format::Wav { (None, None) } else { self.extras(track).await };
+        let track = track.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::export::write(&dir, fmt, Download { track, requested_rank: 0, codec, data, cover, lyrics, stray: false })
+        })
+        .await?
+    }
+
     /// Запускает загрузку в фоне; по завершении трек ложится в библиотеку.
     /// `rank` — какое качество просили (по нему библиотека решает, искать ли лучше).
     fn start_download(&self, track: &Track, info: &DownloadInfo, rank: u8) -> Result<Arc<StreamBuffer>> {

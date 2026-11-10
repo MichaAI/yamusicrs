@@ -436,6 +436,28 @@ impl Library {
     }
 }
 
+/// Трек готовым файлом `dir/stem.ext`: родной контейнер (FLAC из MP4 — ремукс без
+/// перекодирования), теги, обложка. Для экспорта — в библиотеку кладёт [`Library::store`].
+pub fn write_tagged(dir: &Path, stem: &str, dl: Download) -> Result<PathBuf> {
+    let (bytes, ext, tag_type) = match dl.codec.as_str() {
+        "flac-mp4" => (remux_flac(&dl.data)?, "flac", TagType::VorbisComments),
+        "flac" => (dl.data, "flac", TagType::VorbisComments),
+        "aac-mp4" | "he-aac-mp4" => (dl.data, "m4a", TagType::Mp4Ilst),
+        "mp3" => (dl.data, "mp3", TagType::Id3v2),
+        "aac" | "he-aac" => (dl.data, "aac", TagType::Id3v2),
+        other => bail!("неизвестный кодек {other}"),
+    };
+    let path = dir.join(format!("{stem}.{ext}"));
+    let tmp = dir.join(format!("{stem}.{ext}.part"));
+    std::fs::write(&tmp, &bytes)?;
+    if ext != "aac" {
+        let tag = build_tag(&dl.track, tag_type, dl.cover, dl.lyrics);
+        tag.save_to_path(&tmp, WriteOptions::default()).map_err(|e| eyre!("теги: {e}"))?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 /// Имена файлов: без слэшей и прочего, что ломает ФС или шеллы.
 pub fn sanitize(s: &str) -> String {
     let mut out: String = s

@@ -93,6 +93,10 @@ pub enum Msg {
     },
     /// Лайк не сохранился на сервере — вернуть как было.
     LikeFailed { track: Track, like: bool, error: String },
+    /// Экспорт трека закончился: путь к файлу или почему не вышло.
+    Exported { title: String, result: Result<std::path::PathBuf, String> },
+    /// Свой трек загружен в плейлист `kind` (или нет).
+    Uploaded { kind: String, name: String, result: Result<(), String> },
 }
 
 /// Действие, которое предлагает тост.
@@ -131,6 +135,8 @@ pub enum Effect {
     PlaylistOpFailed { kind: String },
     /// Снимок узнал метаданные скачанных треков (обложки из файлов).
     LibraryMeta,
+    /// Трек экспортирован файлом `path` (телефон переносит его в общую «Музыку»).
+    Exported { path: std::path::PathBuf },
 }
 
 /// Что лайкаем/скрываем кроме треков.
@@ -878,6 +884,22 @@ impl Engine {
                 self.apply_like(&track, !like);
                 self.toast_err(format!("Лайк не сохранился: {error}"));
             }
+            Msg::Exported { title, result } => match result {
+                Ok(path) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.toast(format!("Экспортировано: {name}"));
+                    self.emit(Effect::Exported { path });
+                }
+                Err(e) => self.toast_err(format!("Экспорт «{title}»: {e}")),
+            },
+            Msg::Uploaded { kind, name, result } => match result {
+                Ok(()) => {
+                    self.toast(format!("«{name}» загружен — появится в плейлисте после обработки"));
+                    self.load_playlists();
+                    self.emit(Effect::PlaylistOpFailed { kind });
+                }
+                Err(e) => self.toast_err(format!("«{name}» не загрузился: {e}")),
+            },
         }
     }
 
@@ -1907,6 +1929,22 @@ impl Engine {
         });
     }
 
+    /// Как подписать пресет. Обычная Моя волна в «колесе» зовётся «Назад к привычному» — это
+    /// имеет смысл, только пока играет волна другого типа (характер, настроение, жанр…);
+    /// в остальное время это просто «Моя волна».
+    pub fn preset_name<'a>(&self, item: &'a api::WheelItem) -> &'a str {
+        if item.seeds() != [MY_WAVE] {
+            return item.name();
+        }
+        if self.custom_wave_active() { item.name() } else { "Моя волна" }
+    }
+
+    /// Играет волна не «просто Моя», а одного из её типов.
+    pub fn custom_wave_active(&self) -> bool {
+        matches!(self.queue.kind, QueueKind::Wave { .. })
+            && self.wave.active_seeds.as_ref().is_some_and(|s| s.as_slice() != [MY_WAVE])
+    }
+
     /// Пресет сейчас играет (волна запущена с его сидами).
     pub fn is_active_preset(&self, item: &api::WheelItem) -> bool {
         matches!(self.queue.kind, QueueKind::Wave { .. })
@@ -2417,6 +2455,36 @@ impl Engine {
                 tracing::info!("{n} сыгранных треков не из коллекции — теперь кеш");
             }
         }
+    }
+
+    /// Экспорт трека обычным файлом в `dir` (см. [`crate::export::Format`]).
+    pub fn export(&mut self, t: Track, fmt: crate::export::Format, dir: std::path::PathBuf) {
+        let Some(f) = self.fetcher.clone() else {
+            return self.toast_err("Без сети экспорт недоступен".into());
+        };
+        self.toast(format!("Экспортирую в {}: {}", fmt.label(), t.full_title()));
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = f.export(&t, fmt, dir).await.map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Exported { title: t.full_title(), result });
+        });
+    }
+
+    /// Загрузить свой аудиофайл в свой плейлист `kind` (как «Загрузить трек» веб-версии).
+    pub fn upload(&mut self, kind: String, path: std::path::PathBuf) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if self.client.is_none() {
+            return self.toast_err("Без сети трек не загрузить".into());
+        }
+        self.toast(format!("Загружаю «{name}»…"));
+        self.spawn(move |c, tx| async move {
+            let result = async {
+                let data = tokio::fs::read(&path).await.map_err(|e| format!("файл не читается: {e}"))?;
+                c.upload_track(&kind, &name, data).await.map_err(err_str)
+            }
+            .await;
+            let _ = tx.send(Msg::Uploaded { kind, name, result });
+        });
     }
 
     /// Перечитать с сервера всё, что показано: лайки, плейлисты, подборки, пресеты волны.
