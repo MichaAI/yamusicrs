@@ -68,6 +68,7 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.node.invalidateDraw
@@ -1609,9 +1610,10 @@ fun Segments(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modi
                 ),
                 contentPadding = PaddingValues(horizontal = 4.dp),
             ) {
-                // Четыре и больше — мельче: «Плейлисты» и «Скачанное» иначе не влезают в четверть экрана.
-                Text(o, style = if (options.size >= 4) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
-                    maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+                // Четыре и больше — мельче; не влезло и так — шрифт сжимается до 9sp, а не режется по краю кнопки.
+                val base = if (options.size >= 4) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge
+                Text(o, style = base, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
+                    autoSize = TextAutoSize.StepBased(minFontSize = 9.sp, maxFontSize = base.fontSize, stepSize = 0.5.sp))
             }
         }
     }
