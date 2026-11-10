@@ -3,7 +3,6 @@
 package xyz.neodustry.yamusicrs
 
 import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.drawscope.scale as drawScale
 
 import android.graphics.Bitmap
 import android.graphics.RuntimeShader
@@ -151,9 +150,6 @@ fun PlayButton(playing: Boolean, size: Dp, onClick: () -> Unit, modifier: Modifi
     )
     val color = MaterialTheme.colorScheme.primary
     val ring = MaterialTheme.colorScheme.background
-    // Контур формы зависит только от шага морфинга и размера, а вращается кнопка, пока играет,
-    // постоянно: без кеша каждый кадр строились два новых Path (и ещё два — у ореола).
-    val shape = remember { MorphPath(morph) }
     Box(
         modifier
             .size(size)
@@ -171,13 +167,19 @@ fun PlayButton(playing: Boolean, size: Dp, onClick: () -> Unit, modifier: Modifi
                   rotate(spin.value * progress) {
                     val w = this@drawBehind.size.width
                     val h = this@drawBehind.size.height
-                    val path = shape.at(progress, w, h)
                     // halo — тёмный ореол той же формы: кнопка того же цвета, что блоб под ней,
                     // и без него сливается с пятнами.
                     if (halo) {
                         val k = 1.22f
-                        drawScale(k, k) { drawPath(path, ring.copy(alpha = 0.55f)) }
+                        val ringPath = morph.toPath(progress)
+                        ringPath.transform(Matrix().apply {
+                            translate(w * (1 - k) / 2, h * (1 - k) / 2)
+                            scale(w * k, h * k)
+                        })
+                        drawPath(ringPath, ring.copy(alpha = 0.55f))
                     }
+                    val path = morph.toPath(progress)
+                    path.transform(Matrix().apply { scale(w, h) })
                     drawPath(path, color)
                   }
                 },
@@ -188,22 +190,6 @@ fun PlayButton(playing: Boolean, size: Dp, onClick: () -> Unit, modifier: Modifi
             tint = MaterialTheme.colorScheme.onPrimary,
             modifier = Modifier.size(size * 0.42f),
         )
-    }
-}
-
-/** Контур морфа под размер кнопки: пересчитывается, только когда изменился шаг или размер. */
-private class MorphPath(private val morph: Morph) {
-    private var path: androidx.compose.ui.graphics.Path? = null
-    private var key = Triple(-1f, 0f, 0f)
-
-    fun at(progress: Float, w: Float, h: Float): androidx.compose.ui.graphics.Path {
-        val k = Triple(progress, w, h)
-        path?.takeIf { key == k }?.let { return it }
-        return morph.toPath(progress).also {
-            it.transform(Matrix().apply { scale(w, h) })
-            path = it
-            key = k
-        }
     }
 }
 
@@ -263,19 +249,17 @@ fun EqBars(playing: Boolean, color: Color, modifier: Modifier = Modifier) {
             label = "bar$i",
         )
     }
-    // Высоты читаются только при отрисовке. Раньше каждая шла через fillMaxHeight(b.value) — это
-    // чтение анимации в композиции: строка играющего трека перекомпоновывалась и перемерялась
-    // на каждом кадре, пока её видно.
-    Box(
-        modifier.size(18.dp).drawBehind {
-            val w = 4.dp.toPx()
-            val gap = (size.width - 3 * w) / 2
-            bars.forEachIndexed { i, b ->
-                val h = size.height * if (playing) b.value else 0.3f
-                drawRoundRect(color, Offset(i * (w + gap), size.height - h), Size(w, h), CornerRadius(w / 2))
-            }
-        },
-    )
+    Row(modifier.size(18.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {
+        bars.forEach { b ->
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .fillMaxHeight(if (playing) b.value else 0.3f)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(color),
+            )
+        }
+    }
 }
 
 /**
@@ -404,8 +388,6 @@ fun WavySeek(clock: PlayClock, durationMs: Long, playing: Boolean, onSeek: (Long
         }
     }
     val shader = remember { if (Build.VERSION.SDK_INT >= 33) RuntimeShader(WAVE_AGSL) else null }
-    // Кисть — одна на шейдер, а не новая на каждый кадр.
-    val waveBrush = remember(shader) { shader?.let { ShaderBrush(it) } }
     val c0 = MaterialTheme.colorScheme.primary
     val c1 = MaterialTheme.colorScheme.secondary
     val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)
@@ -452,7 +434,7 @@ fun WavySeek(clock: PlayClock, durationMs: Long, playing: Boolean, onSeek: (Long
                     val activeEnd = (cx - gap).coerceAtLeast(0f)
                     if (activeEnd > trackH) {
                         val a = waveAmp * amp.value
-                        if (shader != null && waveBrush != null && Build.VERSION.SDK_INT >= 33) {
+                        if (shader != null && Build.VERSION.SDK_INT >= 33) {
                             val h = 2 * waveAmp + trackH + 2
                             shader.setFloatUniform("size", activeEnd, h)
                             shader.setFloatUniform("amp", a)
@@ -462,7 +444,7 @@ fun WavySeek(clock: PlayClock, durationMs: Long, playing: Boolean, onSeek: (Long
                             shader.setFloatUniform("c0", c0.red, c0.green, c0.blue, 1f)
                             shader.setFloatUniform("c1", c1.red, c1.green, c1.blue, 1f)
                             translate(0f, cy - h / 2) {
-                                drawRect(waveBrush, size = Size(activeEnd, h))
+                                drawRect(ShaderBrush(shader), size = Size(activeEnd, h))
                             }
                         } else {
                             drawRoundRect(
