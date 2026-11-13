@@ -33,6 +33,8 @@ pub use smart::SmartReport;
 pub enum Msg {
     /// Проход умного скачивания закончился.
     SmartDone(Result<SmartReport, String>),
+    /// Скачивание плейлиста целиком кончилось: сколько скачано и сколько не вышло.
+    BulkDone { ok: usize, failed: usize },
     Wheel(Result<Vec<api::WheelItem>, String>),
     Resumed {
         resume: crate::config::Resume,
@@ -267,6 +269,8 @@ pub struct Engine {
     pub owave_fetching: bool,
     /// Умное скачивание: идёт проход, когда последний раз проверяли, когда спросить сервер.
     smart_running: bool,
+    /// Идёт скачивание плейлиста целиком.
+    bulk_running: bool,
     smart_checked: Option<Instant>,
     smart: smart::SmartState,
     pub data_dir: std::path::PathBuf,
@@ -384,6 +388,7 @@ impl Engine {
             owave_tracks: HashMap::new(),
             owave_fetching: false,
             smart_running: false,
+            bulk_running: false,
             smart_checked: None,
             smart: smart::SmartState::load(&data_dir),
             data_dir,
@@ -603,6 +608,7 @@ impl Engine {
         match msg {
             // Пока подключались, включили офлайн-режим — сеть не нужна.
             Msg::SmartDone(r) => self.on_smart_done(r),
+            Msg::BulkDone { ok, failed } => self.on_bulk_done(ok, failed),
             Msg::Authed(Ok(_)) if self.cfg.offline_mode => {}
             Msg::Authed(Ok((c, s, t))) => self.on_authed(c, s, t),
             Msg::Wheel(r) => match r {
@@ -1357,12 +1363,30 @@ impl Engine {
     /// Программа офлайн-волны под текущую библиотеку: перезапрос, если библиотека заметно
     /// изменилась или программа старая. Лайкнутые и остальные — разными списками, как в клиенте.
     pub fn refresh_offline_program(&mut self) {
+        self.refresh_program(false);
+    }
+
+    /// Кнопка в настройках: перекачать программу офлайн-волны, даже если она свежая.
+    pub fn redownload_offline_program(&mut self) {
+        if self.offline {
+            self.toast_err("Без сети перекачать нельзя".into());
+        } else if self.owave_fetching {
+            self.toast("Модель уже качается".into());
+        } else if self.library.ids().iter().filter_map(|i| i.parse::<i32>().ok()).count() < 3 {
+            self.toast("Для офлайн-волны нужно хотя бы 3 скачанных трека".into());
+        } else {
+            self.toast("Перекачиваю модель офлайн-волны…".into());
+            self.refresh_program(true);
+        }
+    }
+
+    fn refresh_program(&mut self, force: bool) {
         if self.offline || self.owave_fetching {
             return;
         }
         let lib: Vec<String> = self.library.ids();
         let ids: HashSet<i32> = lib.iter().filter_map(|i| i.parse().ok()).collect();
-        if ids.len() < 3 || self.owave_store.as_ref().is_some_and(|s| !s.stale(&ids)) {
+        if ids.len() < 3 || (!force && self.owave_store.as_ref().is_some_and(|s| !s.stale(&ids))) {
             return;
         }
         let (liked, rest): (Vec<String>, Vec<String>) = lib.into_iter().partition(|i| self.liked.contains(i));

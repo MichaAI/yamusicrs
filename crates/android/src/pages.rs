@@ -297,6 +297,38 @@ fn downloaded(e: &Engine) -> Loaded {
     }
 }
 
+/// Исполнитель без сети: только его скачанные треки (в блоке «Из коллекции»), остального нет.
+fn offline_artist(e: &Engine, aid: &str) -> Result<Loaded, String> {
+    let mut entries = e.library.entries();
+    entries.sort_by_key(|(_, ts, _)| std::cmp::Reverse(*ts));
+    let ts: Vec<Track> = entries
+        .iter()
+        .filter_map(|(id, ..)| e.snapshot.find(id))
+        .filter(|t| t.artists.iter().any(|a| a.id == aid))
+        .cloned()
+        .collect();
+    let name = ts
+        .iter()
+        .flat_map(|t| &t.artists)
+        .find(|a| a.id == aid)
+        .map(|a| a.name.clone())
+        .ok_or("Скачанных треков этого исполнителя нет")?;
+    let brief = ArtistBrief {
+        artist: None,
+        albums: Vec::new(),
+        also_albums: Vec::new(),
+        popular_tracks: Vec::new(),
+        similar_artists: Vec::new(),
+        stats: None,
+        discography: Vec::new(),
+        familiar: Vec::new(),
+        collection: e.offline_tracks(ts),
+        wave: Vec::new(),
+        concerts: Vec::new(),
+    };
+    Ok(Loaded::Artist(name, Box::new(brief)))
+}
+
 /// Открыть страницу: ответ уйдёт в `tx` (офлайн плейлист — из снимка сразу).
 pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
     if let Req::Downloaded = req {
@@ -319,6 +351,12 @@ pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
             None => Err("Этот плейлист не успел сохраниться для офлайна".into()),
         };
         let _ = tx.send((id, r));
+        return;
+    }
+    if let Req::Artist(aid) = &req
+        && e.client().is_none()
+    {
+        let _ = tx.send((id, offline_artist(e, aid)));
         return;
     }
     let Some(c) = e.client() else {

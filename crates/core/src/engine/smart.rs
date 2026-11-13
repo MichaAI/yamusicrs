@@ -108,6 +108,56 @@ impl Engine {
         }
     }
 
+    /// Скачать треки (плейлист целиком) в библиотеку. Идёт в фоне по одному; прогресс видно по росту
+    /// числа скачанных, итог — тостом. Недоступные и уже скачанные пропускаются.
+    pub fn download_tracks(&mut self, tracks: Vec<crate::api::Track>) {
+        let Some(fetcher) = self.fetcher.clone().filter(|_| !self.offline) else {
+            self.toast_err("Без сети скачивать нельзя".into());
+            return;
+        };
+        if self.bulk_running {
+            self.toast("Скачивание уже идёт".into());
+            return;
+        }
+        let want: Vec<_> = tracks.into_iter().filter(|t| t.available && !self.library.contains(&t.id)).collect();
+        if want.is_empty() {
+            self.toast("Всё уже скачано".into());
+            return;
+        }
+        self.bulk_running = true;
+        self.toast(format!("Скачиваю {} тр.", want.len()));
+        let (q, tx) = (self.quality(), self.tx.clone());
+        tokio::spawn(async move {
+            let (mut ok, mut failed) = (0, 0);
+            for t in &want {
+                match fetcher.save(t, q).await {
+                    Ok(true) => ok += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!("скачивание {}: {e:#}", t.id);
+                    }
+                }
+            }
+            let _ = tx.send(Msg::BulkDone { ok, failed });
+        });
+    }
+
+    pub(super) fn on_bulk_done(&mut self, ok: usize, failed: usize) {
+        self.bulk_running = false;
+        if failed > 0 {
+            self.toast_err(format!("Скачано {ok}, не вышло {failed}"));
+        } else {
+            self.toast(format!("Скачано: {ok} тр."));
+        }
+        if ok > 0 {
+            // Как после умного скачивания: метаданные в офлайн-снимок и программа офлайн-волны.
+            self.backfill_library_meta();
+            self.refresh_offline_program();
+            self.emit(Effect::LibraryMeta);
+        }
+    }
+
     fn smart_start(&mut self) {
         let Some(fetcher) = self.fetcher.clone() else { return };
         let dto = |id: &str, ts: i64| json!({ "id": id, "timestamp": ts });

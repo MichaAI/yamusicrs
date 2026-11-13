@@ -287,6 +287,8 @@ enum Cmd {
     PlayFrom(Source, u32),
     EnqueueFrom(Source, u32, bool),
     LikeFrom(Source, u32),
+    DownloadFrom(Source),
+    RedownloadModel,
     Quality(String),
     Normalize(bool),
     TargetLufs(f32),
@@ -505,6 +507,16 @@ impl Core {
     }
 
     /// Лайк или снять лайк.
+    /// Перекачать модель офлайн-волны (настройки → офлайн).
+    pub fn redownload_offline_model(&self) {
+        self.send(Cmd::RedownloadModel);
+    }
+
+    /// Скачать все треки списка (плейлист, альбом, «Мне нравится») в библиотеку.
+    pub fn download_from(&self, source: Source) {
+        self.send(Cmd::DownloadFrom(source));
+    }
+
     pub fn like_from(&self, source: Source, index: u32) {
         self.send(Cmd::LikeFrom(source, index));
     }
@@ -978,6 +990,12 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
         Cmd::EnqueueFrom(s, i, next) => {
             if let Some(t) = source_tracks(e, pages, &s).and_then(|(_, v)| v.get(i as usize).cloned()) {
                 e.enqueue(t, next);
+            }
+        }
+        Cmd::RedownloadModel => e.redownload_offline_program(),
+        Cmd::DownloadFrom(s) => {
+            if let Some(v) = source_tracks(e, pages, &s).map(|(_, v)| v.to_vec()) {
+                e.download_tracks(v);
             }
         }
         Cmd::LikeFrom(s, i) => {
