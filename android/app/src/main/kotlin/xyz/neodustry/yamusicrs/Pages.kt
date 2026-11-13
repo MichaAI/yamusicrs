@@ -845,7 +845,8 @@ fun BoxScope.ListJumps(app: YaApp, state: androidx.compose.foundation.lazy.LazyL
     val lift = if (LocalNow.current.id != null) 100.dp else 20.dp
     androidx.compose.animation.AnimatedVisibility(
         awake,
-        Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = lift + 64.dp + 12.dp),
+        // Левее кнопки «играть», а не над ней: не закрывает значки «скачано» и время у правого края.
+        Modifier.align(Alignment.BottomEnd).padding(end = 20.dp + 64.dp + 12.dp, bottom = lift),
         enter = fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
         exit = fadeOut() + scaleOut(targetScale = 0.8f),
     ) {
@@ -855,12 +856,17 @@ fun BoxScope.ListJumps(app: YaApp, state: androidx.compose.foundation.lazy.LazyL
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            fun jump(i: Int) = scope.launch { state.scrollToItem(i) }
+            fun jump(i: Int) = scope.launch { state.animateScrollToItem(i) }
             ShapeIconButton(Ic.Down, "В начало", { jump(0) }, Modifier.graphicsLayer { rotationZ = 180f }, size = 48.dp, container = Color.Transparent)
-            if (now != null && !nowShown) {
+            // Играющий трек вышел из видимости — кнопка выезжает, вернулся — уезжает.
+            androidx.compose.animation.AnimatedVisibility(
+                now != null && !nowShown,
+                enter = fadeIn() + androidx.compose.animation.expandVertically() + androidx.compose.animation.scaleIn(initialScale = 0.6f),
+                exit = fadeOut() + androidx.compose.animation.shrinkVertically() + scaleOut(targetScale = 0.6f),
+            ) {
                 // Концентрично: 28 − 4 = 24.
                 Box(
-                    Modifier.size(48.dp).clip(RoundedCornerShape(24.dp)).clickable { jump((first + now - 3).coerceAtLeast(0)) },
+                    Modifier.size(48.dp).clip(RoundedCornerShape(24.dp)).clickable { jump((first + (now ?: 0) - 3).coerceAtLeast(0)) },
                     contentAlignment = Alignment.Center,
                 ) {
                     Art(app, nowThumb, Modifier.size(40.dp), corner = 20.dp)

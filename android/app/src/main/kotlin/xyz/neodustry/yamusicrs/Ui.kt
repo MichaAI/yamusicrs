@@ -786,7 +786,14 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                             drawContent()
                         } else {
                             val c = Offset(size.width / 2, size.height - smallPx / 2)
-                            val r = kotlin.math.hypot(this.size.width.toDouble(), c.y.toDouble()).toFloat() * 1.3f * f
+                            // Вырезка шире квадрата фото: если она в паре (старая или новая), круг считается по
+                            // ширине экрана и доходит до края; между обычными фото — как раньше.
+                            val reach = if (cur.artist?.cutout != null || old?.artist?.cutout != null) {
+                                maxOf(this.size.width, full.toPx())
+                            } else {
+                                this.size.width
+                            }
+                            val r = kotlin.math.hypot(reach.toDouble(), c.y.toDouble()).toFloat() * 1.3f * f
                             val circle = androidx.compose.ui.graphics.Path().apply {
                                 addOval(androidx.compose.ui.geometry.Rect(c, r.coerceAtLeast(smallPx / 2 * f)))
                             }
