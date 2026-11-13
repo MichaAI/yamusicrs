@@ -47,6 +47,11 @@ android {
         compose = true
     }
 
+    // Превью композаблов без эмулятора: Robolectric + Compose test, кадры — в PNG (app/build/shots).
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     // lintVital на каждой release-сборке съедал ~50 с из ~110; сборка тут для себя, lint при желании: ./gradlew lint.
     lint {
         checkReleaseBuilds = false
@@ -127,4 +132,16 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     // UniFFI-привязки ходят в .so через JNA.
     implementation("net.java.dev.jna:jna:5.19.1@aar")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("org.mockito:mockito-core:5.24.0")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+tasks.withType<Test>().configureEach {
+    systemProperty("shots.dir", layout.buildDirectory.dir("shots").get().asFile.absolutePath)
+    // Robolectric качает android-all сам: адрес зеркала можно подменить `-Probolectric.repo=...`.
+    (findProperty("robolectric.repo") as String?)?.let { systemProperty("robolectric.dependency.repo.url", it) }
 }
