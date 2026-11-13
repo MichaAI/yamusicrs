@@ -114,45 +114,34 @@ private fun blobBalls(t: Float, e: Float): FloatArray {
             b[k * 3 + 2] = 0.09f
         }
     }
+    // Расталкивание — гладкая функция положений без памяти (та же, что в TUI, render::balls):
+    // все сдвиги считаются от исходных положений разом, сила пары уходит в ноль при совпадении
+    // центров (вектор сдвига непрерывен — шары не перескакивают, проходя друг сквозь друга),
+    // общий сдвиг насыщается плавно (tanh) и не превышает PUSH_MAX — на этом держится BLOB_REACH.
     val x0 = FloatArray(5) { b[it * 3] }
     val y0 = FloatArray(5) { b[it * 3 + 1] }
-    repeat(2) {
-        for (i in 0 until 5) {
-            var px = 0f
-            var py = 0f
-            for (j in 0 until 5) {
-                if (i == j) continue
-                val dx = b[i * 3] - b[j * 3]
-                val dy = b[i * 3 + 1] - b[j * 3 + 1]
-                val l = kotlin.math.sqrt(dx * dx + dy * dy)
-                val m = 0.75f * (b[i * 3 + 2] + b[j * 3 + 2])
-                if (l < m) {
-                    var ux: Float
-                    var uy: Float
-                    if (l > 1e-3f) {
-                        ux = dx / l; uy = dy / l
-                    } else {
-                        val n = kotlin.math.sqrt((i - j) * (i - j) + 0.25f)
-                        ux = (i - j) / n; uy = 0.5f / n
-                    }
-                    val x = (m - l) / m
-                    val p = (m - l) * 0.5f * x * (2f - x)
-                    px += ux * p
-                    py += uy * p
-                }
-            }
-            b[i * 3] += px
-            b[i * 3 + 1] += py
-        }
-    }
-    // Расталкивание сдвигает шар не дальше PUSH_MAX — на этом держится граница BLOB_REACH.
     for (i in 0 until 5) {
-        val dx = b[i * 3] - x0[i]
-        val dy = b[i * 3 + 1] - y0[i]
-        val l = kotlin.math.sqrt(dx * dx + dy * dy)
-        if (l > PUSH_MAX) {
-            b[i * 3] = x0[i] + dx / l * PUSH_MAX
-            b[i * 3 + 1] = y0[i] + dy / l * PUSH_MAX
+        var px = 0f
+        var py = 0f
+        for (j in 0 until 5) {
+            if (i == j) continue
+            val dx = x0[i] - x0[j]
+            val dy = y0[i] - y0[j]
+            val l = kotlin.math.sqrt(dx * dx + dy * dy)
+            val m = 0.75f * (b[i * 3 + 2] + b[j * 3 + 2])
+            if (l < m) {
+                val s = l / m
+                val q = 1f - s
+                val k = 0.5f * q * q * s * (3f - 2f * s)
+                px += dx * k
+                py += dy * k
+            }
+        }
+        val l = kotlin.math.sqrt(px * px + py * py)
+        if (l > 1e-6f) {
+            val k = PUSH_MAX * kotlin.math.tanh(l / PUSH_MAX) / l
+            b[i * 3] = x0[i] + px * k
+            b[i * 3 + 1] = y0[i] + py * k
         }
     }
     return b
@@ -415,6 +404,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawLiveCells(
     val h = size.height
     val cols = kotlin.math.ceil(w / CELL).toInt()
     val rows = kotlin.math.ceil(h / CELL).toInt()
+    // Одним прямоугольником: отдельные полосы по строкам давали видимые швы при масштабе и альфе слоя.
+    var bl = Float.MAX_VALUE; var bt = Float.MAX_VALUE; var br = 0f; var bb = 0f
     for (r in 0 until rows) {
         val y0 = r * CELL
         val y1 = min(y0 + CELL, h)
@@ -449,11 +440,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawLiveCells(
             } else if (start >= 0) {
                 val l = kotlin.math.max(start * CELL, area.left)
                 val rgt = min(min(c * CELL, w), area.right)
-                if (rgt > l && bottom > top) drawRect(brush, Offset(l, top), androidx.compose.ui.geometry.Size(rgt - l, bottom - top))
+                if (rgt > l && bottom > top) {
+                    bl = min(bl, l); bt = min(bt, top); br = kotlin.math.max(br, rgt); bb = kotlin.math.max(bb, bottom)
+                }
                 start = -1
             }
         }
     }
+    if (br > bl && bb > bt) drawRect(brush, Offset(bl, bt), androidx.compose.ui.geometry.Size(br - bl, bb - bt))
 }
 
 /**

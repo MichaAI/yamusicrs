@@ -63,6 +63,14 @@ pub struct Config {
     pub eq_gains: Vec<f32>,
     /// Что рисовать на фоне: `blob`, `spectrum` или `both` (блоб + спектр).
     pub visualizer: String,
+    /// Наплыв при ручной смене трека (кнопка, выбор в списке), сек; 0 — резко.
+    pub switch_fade_secs: f32,
+    /// Сохранять в библиотеку всё сыгранное. `false` — только коллекцию (лайки и свои
+    /// плейлисты), остальное сыгранное лежит кешем в `.cache` с лимитом `cache_gb`.
+    /// Не задано — как решит платформа (десктоп: всё, телефон: только коллекцию).
+    pub keep_played: Option<bool>,
+    /// Лимит кеша сыгранного не из коллекции, ГиБ (0 — без лимита).
+    pub cache_gb: f64,
 }
 
 impl Default for Config {
@@ -98,6 +106,9 @@ impl Default for Config {
             eq_enabled: false,
             eq_gains: vec![0.0; 10],
             visualizer: "blob".into(),
+            switch_fade_secs: 0.4,
+            keep_played: None,
+            cache_gb: 1.0,
         }
     }
 }

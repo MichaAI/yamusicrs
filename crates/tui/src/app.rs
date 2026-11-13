@@ -116,6 +116,10 @@ pub enum Setting {
     Normalize,
     TargetLufs,
     Crossfade,
+    /// Наплыв при ручной смене трека.
+    SwitchFade,
+    /// Сохранять всё сыгранное или только коллекцию.
+    KeepPlayed,
     ReportPlays,
     Ynison,
     /// Открывает подменю «Офлайн и докачка».
@@ -137,13 +141,15 @@ pub enum Setting {
 
 impl Setting {
     /// Порядок по смыслу: звук → сеть и устройства → вид → прочее.
-    pub const ALL: [Setting; 13] = [
+    pub const ALL: [Setting; 15] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
         Setting::Crossfade,
+        Setting::SwitchFade,
         Setting::Equalizer,
         Setting::Offline,
+        Setting::KeepPlayed,
         Setting::Ynison,
         Setting::Visualizer,
         Setting::Fps,
@@ -174,6 +180,8 @@ impl Setting {
             Setting::Normalize => "Выравнивание громкости",
             Setting::TargetLufs => "Целевая громкость",
             Setting::Crossfade => "Плавный переход",
+            Setting::SwitchFade => "Смена трека",
+            Setting::KeepPlayed => "Сохранять сыгранное",
             Setting::ReportPlays => "Отправлять прослушивания",
             Setting::Ynison => "Ynison (Слушать на…)",
             Setting::Offline => "Офлайн и докачка ›",
@@ -198,6 +206,8 @@ impl Setting {
             Setting::Normalize => "Подгоняет громкость треков по R128 из метаданных Яндекса. Выключено — bit-perfect. Клавиша N.",
             Setting::TargetLufs => "К какой громкости выравнивать, LUFS. Работает, только когда выравнивание включено.",
             Setting::Crossfade => "Наплыв между треками, 0 — встык. Клавиша x.",
+            Setting::SwitchFade => "Когда трек переключают руками (n, p, выбор в списке): прежний затухает поверх начала нового. «Резко» — как раньше, без наплыва.",
+            Setting::KeepPlayed => "«Всё» — каждый сыгранный трек остаётся в библиотеке. «Только коллекцию» — насовсем сохраняются лайки и треки своих плейлистов, остальное сыгранное лежит кешем (.cache в папке библиотеки, лимит cache_gb в config.toml) и в скачанном не числится.",
             Setting::ReportPlays => "Передавать Яндексу историю прослушиваний (влияет на рекомендации и «недавно слушали»).",
             Setting::Ynison => "yamusicrs появляется в «Слушать на…» в приложениях Яндекс Музыки: оттуда можно переключить музыку сюда и управлять ею. Включённое здесь забирает воспроизведение у телефона.",
             Setting::Offline => "Офлайн-режим и докачка треков для офлайн-волны. Enter — открыть, Esc — назад.",
@@ -218,6 +228,16 @@ impl Setting {
 }
 
 const FPS_STEPS: [u32; 5] = [15, 24, 30, 60, 120];
+/// Наплыв при ручной смене трека, с.
+pub const SWITCH_FADE_STEPS: [f32; 4] = [0.0, 0.4, 0.8, 1.5];
+/// Форматы экспорта трека: (код, подпись).
+pub const EXPORT_FORMATS: [(&str, &str); 5] = [
+    ("flac", "FLAC — без потерь, как на сервере"),
+    ("mp3", "MP3 320 — играет где угодно"),
+    ("aac", "AAC 256 (M4A)"),
+    ("small", "HE-AAC 64 — самый маленький"),
+    ("wav", "WAV — распакованный PCM"),
+];
 /// Место под умное скачивание, ГиБ.
 const SMART_LIMIT_STEPS: [f64; 6] = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0];
 
@@ -231,6 +251,8 @@ pub enum SearchItem {
     Playlist(Playlist),
     /// Запрос из истории поиска.
     Query(String),
+    /// Волна под запрос: по настроению, жанру, занятию.
+    Wave(api::SearchWave),
 }
 
 pub enum Popup {
@@ -256,6 +278,8 @@ pub enum Popup {
     },
     /// Подтверждение необратимого: y/Enter — да.
     Confirm { text: String, action: ConfirmAction },
+    /// В каком формате сохранить трек файлом (см. [`EXPORT_FORMATS`]).
+    Export { track: Track, sel: usize },
     /// Ynison «Слушать на»: (id, название, тип, активно); первая строка — этот компьютер (id пустой).
     Devices { list: Vec<(String, String, String, bool)>, sel: usize },
 }
@@ -266,6 +290,8 @@ pub enum InputAction {
     Rename(String),
     /// Описание своего плейлиста (`kind`); пустое — убрать.
     Describe(String),
+    /// Путь к своему аудиофайлу — загрузить в плейлист `kind`.
+    Upload(String),
 }
 
 pub enum ConfirmAction {
@@ -1056,6 +1082,11 @@ impl App {
     }
 
     fn set_tab(&mut self, t: Tab) {
+        // Переход по вкладкам — это «покажи мне вкладку»: сцена и текст во весь экран её бы закрыли.
+        if self.stage_mode {
+            self.toggle_stage();
+        }
+        self.lyrics_mode = false;
         if self.tab == t && self.stack.len() == 1 {
             return;
         }
@@ -1253,7 +1284,8 @@ impl App {
                 if self.engine.is_active_preset(&item) {
                     self.engine.toggle_pause();
                 } else {
-                    self.engine.start_wave(item.seeds(), item.name().to_string());
+                    let name = if item.seeds() == [MY_WAVE] { "Моя волна" } else { item.name() }.to_string();
+                    self.engine.start_wave(item.seeds(), name);
                 }
             }
             View::Likes => {
@@ -1356,6 +1388,10 @@ impl App {
                             .count();
                         self.engine.play_list(tracks, idx, format!("Поиск: {}", self.search_input));
                     }
+                    Some(SearchItem::Wave(w)) => {
+                        self.set_tab(Tab::Wave);
+                        self.engine.start_wave(w.seeds, w.title);
+                    }
                     Some(SearchItem::Album(a)) => self.open_album(a),
                     Some(SearchItem::Artist(a)) => self.open_artist(a),
                     Some(SearchItem::Playlist(p)) => self.open_playlist(p),
@@ -1418,6 +1454,11 @@ impl App {
                 c if c > 0.0 => format!("{c:.0} с"),
                 _ => "выкл".into(),
             },
+            Setting::SwitchFade => match self.engine.cfg.switch_fade_secs {
+                c if c > 0.0 => format!("наплыв {c:.1} с").replace('.', ","),
+                _ => "резко".into(),
+            },
+            Setting::KeepPlayed => if self.engine.keep_played() { "всё" } else { "только коллекцию" }.into(),
             Setting::ReportPlays => if self.engine.cfg.report_plays { "да" } else { "нет" }.into(),
             Setting::Ynison => self.engine.ynison_label(),
             Setting::OfflineMode => if self.engine.cfg.offline_mode { "вкл" } else { "выкл" }.into(),
@@ -1498,6 +1539,17 @@ impl App {
                 if (next - self.engine.crossfade()).abs() > 0.01 {
                     self.engine.set_crossfade(next);
                 }
+            }
+            Setting::SwitchFade => {
+                let cur = SWITCH_FADE_STEPS
+                    .iter()
+                    .position(|c| (*c - self.engine.cfg.switch_fade_secs).abs() < 0.05)
+                    .unwrap_or(0);
+                self.engine.set_switch_fade(SWITCH_FADE_STEPS[step(SWITCH_FADE_STEPS.len(), cur)]);
+            }
+            Setting::KeepPlayed => {
+                let on = !self.engine.keep_played();
+                self.engine.set_keep_played(on);
             }
             Setting::ReportPlays => self.engine.toggle_report_plays(),
             Setting::Ynison => self.engine.toggle_ynison(),
@@ -1724,6 +1776,19 @@ impl App {
         }
         match action {
             InputAction::Describe(_) => {}
+            InputAction::Upload(kind) => {
+                // Путь можно вставить как есть: в кавычках, с ~ и с file:// из файлового менеджера.
+                let p = title.trim_matches(|c| c == '"' || c == '\'').trim_start_matches("file://");
+                let p = match p.strip_prefix("~/") {
+                    Some(rest) => std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(rest),
+                    None => std::path::PathBuf::from(p),
+                };
+                if p.is_file() {
+                    self.engine.upload(kind, p);
+                } else {
+                    self.toasts.push(Toast { text: format!("Нет такого файла: {}", p.display()), at: Instant::now(), error: true });
+                }
+            }
             InputAction::Create(track) => self.engine.pl_op(PlOp::Create {
                 title,
                 add: track.map(|t| t.full_id()),
@@ -2168,7 +2233,7 @@ impl App {
 
     fn on_effect(&mut self, e: Effect) {
         match e {
-            Effect::Toast { text, error, action } => self.toasts.push(Toast {
+            Effect::Toast { text, error, action, .. } => self.toasts.push(Toast {
                 text: match action {
                     None => text,
                     Some(engine::ToastAction::Resume) => format!("{text} — Space"),
@@ -2263,6 +2328,8 @@ impl App {
             }
             Effect::PlaylistOpFailed { kind } => self.reload_playlist_views(&kind),
             Effect::LibraryMeta => self.cover_files = None,
+            // Файл уже лежит где просили; сообщение показал тост ядра.
+            Effect::Exported { .. } => {}
         }
     }
 
@@ -2354,6 +2421,9 @@ impl App {
             Some(Popup::Devices { list, sel }) => {
                 *sel = (*sel as isize + d).clamp(0, list.len() as isize - 1) as usize;
             }
+            Some(Popup::Export { sel, .. }) => {
+                *sel = (*sel as isize + d).clamp(0, EXPORT_FORMATS.len() as isize - 1) as usize;
+            }
             // Последняя строка — «новый плейлист».
             Some(Popup::AddToPlaylist { list, sel, .. }) => {
                 *sel = (*sel as isize + d).clamp(0, list.len() as isize) as usize;
@@ -2399,6 +2469,12 @@ impl App {
                 }
             },
             Some(Popup::Confirm { action, .. }) => self.confirm(action),
+            Some(Popup::Export { track, .. }) => {
+                if let Some(fmt) = EXPORT_FORMATS.get(i).and_then(|(code, _)| yamusic_core::export::Format::parse(code)) {
+                    let dir = self.engine.cfg.library_dir.with_file_name("YandexMusic Export");
+                    self.engine.export(track, fmt, dir);
+                }
+            }
             Some(Popup::Devices { list, .. }) => {
                 if let Some((id, ..)) = list.into_iter().nth(i) {
                     let id = if id.is_empty() {
@@ -2445,9 +2521,10 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.popup_move(-1),
             KeyCode::Down | KeyCode::Char('j') => self.popup_move(1),
             KeyCode::Enter => match &self.popup {
-                Some(Popup::Artists { sel, .. }) | Some(Popup::AddToPlaylist { sel, .. }) | Some(Popup::Devices { sel, .. }) => {
-                    self.popup_activate(*sel)
-                }
+                Some(Popup::Artists { sel, .. })
+                | Some(Popup::AddToPlaylist { sel, .. })
+                | Some(Popup::Devices { sel, .. })
+                | Some(Popup::Export { sel, .. }) => self.popup_activate(*sel),
                 _ => self.popup = None,
             },
             KeyCode::Char('i') if matches!(self.popup, Some(Popup::TrackInfo { .. })) => self.popup_activate(0),
@@ -2573,7 +2650,7 @@ impl App {
                 MouseEventKind::ScrollUp => self.popup_move(-1),
                 MouseEventKind::ScrollDown => self.popup_move(1),
                 MouseEventKind::Moved => {
-                    if let (Some(i), Some(Popup::Artists { sel, .. })) = (
+                    if let (Some(i), Some(Popup::Artists { sel, .. } | Popup::Export { sel, .. })) = (
                         self.popup_hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1),
                         self.popup.as_mut(),
                     ) {
@@ -3027,6 +3104,27 @@ impl App {
                     .into(),
                 );
             }
+            KeyCode::Char('S') => {
+                if let Some(track) = self.target_track() {
+                    self.popup = Some(Popup::Export { track, sel: 0 });
+                }
+            }
+            KeyCode::Char('U') => {
+                let kind = self.selected_own_playlist().map(|p| p.kind).or_else(|| match &self.page().view {
+                    View::Tracks { playlist: Some(kind), .. } => Some(kind.clone()),
+                    _ => None,
+                });
+                match kind {
+                    Some(kind) => {
+                        self.popup = Some(Popup::Input {
+                            title: " Путь к аудиофайлу — загрузить в плейлист ",
+                            text: String::new(),
+                            action: InputAction::Upload(kind),
+                        })
+                    }
+                    None => self.toast("Загрузить свой трек можно в свой плейлист: выберите или откройте его".into()),
+                }
+            }
             KeyCode::Char('Q') => self.engine.cycle_quality(),
             KeyCode::Char('B') => self.engine.restart_bit_perfect(),
             KeyCode::Char('N') => self.engine.toggle_normalize(),
@@ -3201,6 +3299,11 @@ pub fn thumb_key(uri: &str) -> String {
 
 fn search_items(r: SearchResult) -> Vec<SearchItem> {
     let mut v = Vec::new();
+    // Волны — первыми: запрос вроде «грустное» или «рок» чаще всего про них (до четырёх).
+    if !r.waves.is_empty() {
+        v.push(SearchItem::Header("Волны"));
+        v.extend(r.waves.into_iter().take(4).map(SearchItem::Wave));
+    }
     if let Some(b) = r.tracks.filter(|b| !b.results.is_empty()) {
         v.push(SearchItem::Header("Треки"));
         v.extend(b.results.into_iter().map(SearchItem::Track));

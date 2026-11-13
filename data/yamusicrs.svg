@@ -1,21 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#2a1b4a"/>
-      <stop offset="1" stop-color="#120c22"/>
-    </linearGradient>
-    <radialGradient id="blob" cx="0.4" cy="0.35" r="0.75">
-      <stop offset="0" stop-color="#ffb86b"/>
-      <stop offset="0.55" stop-color="#ff5c8a"/>
-      <stop offset="1" stop-color="#7a5cff"/>
-    </radialGradient>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="28" y1="32" x2="78" y2="84"><stop offset="0" stop-color="#FFD23F"/><stop offset="1" stop-color="#FF8A3D"/></linearGradient>
+    <radialGradient id="pink" gradientUnits="userSpaceOnUse" cx="74" cy="66" r="30"><stop offset="0" stop-color="#F0356B"/><stop offset="0.45" stop-color="#F0356B" stop-opacity="0.85"/><stop offset="1" stop-color="#F0356B" stop-opacity="0"/></radialGradient>
+    <radialGradient id="vio" gradientUnits="userSpaceOnUse" cx="50" cy="90" r="26"><stop offset="0" stop-color="#7A5ADC"/><stop offset="0.5" stop-color="#7A5ADC" stop-opacity="0.8"/><stop offset="1" stop-color="#7A5ADC" stop-opacity="0"/></radialGradient>
+    <linearGradient id="g2" gradientUnits="userSpaceOnUse" x1="71" y1="27" x2="82" y2="38"><stop offset="0" stop-color="#FFE066"/><stop offset="1" stop-color="#FFB03D"/></linearGradient>
+    <clipPath id="c"><path d="M79.54,57.50C78.70,61.54 76.11,65.03 74.12,68.39C72.13,71.76 70.34,74.98 67.60,77.69C64.87,80.40 61.39,83.62 57.70,84.66C54.01,85.70 49.24,85.02 45.47,83.93C41.69,82.84 38.42,80.42 35.05,78.13C31.67,75.83 27.66,73.60 25.21,70.16C22.77,66.72 20.20,61.64 20.37,57.50C20.54,53.36 23.55,48.47 26.24,45.33C28.93,42.20 33.19,40.59 36.51,38.70C39.82,36.80 42.62,35.26 46.13,33.97C49.64,32.68 53.53,30.96 57.56,30.95C61.59,30.94 66.70,31.71 70.31,33.92C73.91,36.12 77.65,40.23 79.19,44.16C80.73,48.09 80.39,53.46 79.54,57.50Z"/></clipPath>
   </defs>
-  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
-  <path d="M64 20c17 0 34 9 38 26s-2 36-16 45-33 12-47 2-19-28-14-44 22-29 39-29z" fill="url(#blob)" opacity="0.95"/>
-  <g fill="#120c22">
-    <rect x="70" y="40" width="7" height="40" rx="3"/>
-    <path d="M70 40l22 6v11l-22-6z"/>
-    <ellipse cx="62" cy="82" rx="13" ry="10" transform="rotate(-20 62 82)"/>
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="#17121C"/>
+  <!-- Тот же блоб, что на телефоне (108×108), крупнее: в квадрате нет круглой маски. -->
+  <g transform="translate(64 64) scale(1.42) translate(-53.5 -55.5)">
+    <path d="M79.54,57.50C78.70,61.54 76.11,65.03 74.12,68.39C72.13,71.76 70.34,74.98 67.60,77.69C64.87,80.40 61.39,83.62 57.70,84.66C54.01,85.70 49.24,85.02 45.47,83.93C41.69,82.84 38.42,80.42 35.05,78.13C31.67,75.83 27.66,73.60 25.21,70.16C22.77,66.72 20.20,61.64 20.37,57.50C20.54,53.36 23.55,48.47 26.24,45.33C28.93,42.20 33.19,40.59 36.51,38.70C39.82,36.80 42.62,35.26 46.13,33.97C49.64,32.68 53.53,30.96 57.56,30.95C61.59,30.94 66.70,31.71 70.31,33.92C73.91,36.12 77.65,40.23 79.19,44.16C80.73,48.09 80.39,53.46 79.54,57.50Z" fill="url(#g)"/>
+    <g clip-path="url(#c)"><rect width="108" height="108" fill="url(#pink)"/><rect width="108" height="108" fill="url(#vio)"/></g>
+    <path d="M82.23,32.60C82.14,33.88 80.79,35.28 79.79,36.19C78.78,37.10 77.51,37.94 76.20,38.05C74.89,38.17 72.87,37.78 71.93,36.87C71.00,35.96 70.54,33.96 70.60,32.60C70.67,31.24 71.40,29.62 72.33,28.73C73.27,27.85 74.87,27.32 76.20,27.28C77.53,27.24 79.31,27.59 80.32,28.48C81.32,29.37 82.31,31.32 82.23,32.60Z" fill="url(#g2)"/>
+    <path d="M42.71,50.85Q42.71,45.25 47.58,48.02L59.40,54.73Q64.27,57.50 59.40,60.27L47.58,66.98Q42.71,69.75 42.71,64.15Z" fill="#17121C"/>
   </g>
-  <path d="M30 102h68" stroke="#ffb86b" stroke-width="4" stroke-linecap="round" stroke-dasharray="2 7" opacity="0.8"/>
 </svg>

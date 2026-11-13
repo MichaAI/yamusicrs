@@ -141,6 +141,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.em
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import uniffi.yamusic_android.LyricsData
 import uniffi.yamusic_android.Phase
@@ -286,7 +287,55 @@ fun AppScreen(app: YaApp, openUrl: (String) -> Unit) {
                 is Phase.Login -> Login(app, pal, p, openUrl)
                 is Phase.Main -> Main(app, pal, state!!)
             }
+            ToastHost(app)
         }
+        }
+    }
+}
+
+/**
+ * Сообщение поверх экрана — пилюлей над мини-плеером: ошибка (её иначе не увидеть) или итог
+ * долгого действия. Уходит само через несколько секунд или по тапу; с кнопкой — по кнопке.
+ */
+@Composable
+private fun BoxScope.ToastHost(app: YaApp) {
+    val t by app.toast.collectAsStateWithLifecycle()
+    LaunchedEffect(t?.id) {
+        val cur = t ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(if (cur.error || cur.action != null) 6000 else 3500)
+        if (app.toast.value?.id == cur.id) app.toast.value = null
+    }
+    // Последнее показанное держим, пока пилюля уезжает.
+    var last by remember { mutableStateOf<UiToast?>(null) }
+    t?.let { last = it }
+    AnimatedVisibility(
+        t != null,
+        Modifier.align(Alignment.BottomCenter).systemBarsPadding().padding(start = 16.dp, end = 16.dp, bottom = 168.dp),
+        enter = slideInVertically { it / 2 } + fadeIn(),
+        exit = slideOutVertically { it / 2 } + fadeOut(),
+    ) {
+        val cur = last ?: return@AnimatedVisibility
+        val cs = MaterialTheme.colorScheme
+        Surface(
+            onClick = { app.toast.value = null },
+            shape = RoundedCornerShape(24.dp),
+            color = if (cur.error) cs.errorContainer else cs.surfaceContainerHighest,
+            contentColor = if (cur.error) cs.onErrorContainer else cs.onSurface,
+            shadowElevation = 10.dp,
+        ) {
+            Row(Modifier.padding(start = 18.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(cur.text, Modifier.weight(1f, fill = false).padding(vertical = 6.dp), style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 3, overflow = TextOverflow.Ellipsis)
+                cur.action?.let { a ->
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = { app.core.toastAction(a); app.toast.value = null }) {
+                        Text(when (a) {
+                            uniffi.yamusic_android.ToastAction.RESUME -> "Играть"
+                            uniffi.yamusic_android.ToastAction.BIT_PERFECT -> "Bit-perfect"
+                        })
+                    }
+                } ?: Spacer(Modifier.width(10.dp))
+            }
         }
     }
 }
@@ -431,7 +480,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     val scope = rememberCoroutineScope()
     val nav = remember { Nav(app) }
     // Со вкладки, кроме первой, «назад» ведёт на «Волну», а не закрывает приложение.
-    val libPager = rememberPagerState { 3 }
+    val libPager = rememberPagerState { 4 }
     var settingsSub by rememberSaveable { mutableStateOf(false) }
     val settingsPull = remember { Animatable(0f) }
     nav.tabNow = { pager.currentPage }
@@ -471,7 +520,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     // Ушли со строки поиска (страница, сцена, другая вкладка, меню трека) — клавиатура прячется.
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-    LaunchedEffect(nav.stack.size, nav.stage, pager.currentPage, nav.menu != null, nav.devices, nav.queue, nav.artists != null) {
+    LaunchedEffect(nav.stack.size, nav.stage, pager.currentPage, nav.menu != null, nav.devices, nav.queue, nav.artists != null, nav.export != null) {
         focus.clearFocus(force = true)
         keyboard?.hide()
     }
@@ -586,6 +635,8 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     QueueSheet(app, nav, s.queuePos?.toInt())
     DevicesSheet(app, nav, s)
     TrackMenu(app, nav)
+    ExportSheet(app, nav)
+    PlaylistPicker(app, nav)
     ArtistPicker(app, nav)
     LyricsSheet(app, nav)
     }
@@ -621,7 +672,7 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState, holes: BlobHoles) {
                 when {
                     s.waveLoading -> Sub("Подбираю треки")
                     waveOn && t != null -> {
-                        Sub(t.title, MaterialTheme.colorScheme.onSurface)
+                        Sub(titleShort(t), MaterialTheme.colorScheme.onSurface)
                         Sub(t.artists)
                     }
                     s.offline -> Sub("Без сети: играет из скачанного")
@@ -638,21 +689,33 @@ private fun WaveTab(app: YaApp, pal: Pal, s: PlayerState, holes: BlobHoles) {
                 }
             }
             }
-            if (presets.isNotEmpty()) {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(presets, key = { it.seeds.joinToString() }) { p ->
-                        PresetOrb(app, p, active = waveOn && s.waveSeeds == p.seeds) {
-                            app.core.startWaveWith(p.seeds, p.name)
-                        }
+            // Играет волна одного из её типов (характер, настроение, жанр…): только тогда обычная
+            // Моя волна — это «Назад к привычному»; в остальное время она так и зовётся.
+            val custom = waveOn && s.waveSeeds.isNotEmpty() && s.waveSeeds != HOME_SEEDS
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // Пресеты ещё не пришли или сети нет — Моя волна всё равно под рукой
+                // (без сети она офлайн, по скачанному).
+                if (presets.none { it.home }) {
+                    item(key = "home") {
+                        PresetOrb(app, HOME_PRESET, "Моя волна", active = waveOn && !custom) { app.core.startWave() }
+                    }
+                }
+                items(presets, key = { it.seeds.joinToString() }) { p ->
+                    val name = if (p.home && !custom) "Моя волна" else p.name
+                    PresetOrb(app, p, name, active = waveOn && s.waveSeeds == p.seeds) {
+                        if (p.home) app.core.startWave() else app.core.startWaveWith(p.seeds, p.name)
                     }
                 }
             }
         }
     }
 }
+
+private val HOME_SEEDS = listOf("user:onyourwave")
+private val HOME_PRESET = WavePreset("Моя волна", null, null, null, HOME_SEEDS, true)
 
 /** Что сейчас нарисовано на главном: трек и карточка его исполнителя (меняются вместе, когда всё загружено). */
 private data class WaveShown(val t: TrackItem, val artist: uniffi.yamusic_android.ArtistCard?)
@@ -808,7 +871,7 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                     .clickable { nav.stage = true }.padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text(cur.t.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1,
+                Text(titleShort(cur.t), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1,
                     modifier = Modifier.basicMarquee(initialDelayMillis = 2000))
                 if (artist != null && cur.t.album.isNotEmpty()) {
                     Text(cur.t.album, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -902,16 +965,24 @@ private fun Sub(text: String, color: Color = MaterialTheme.colorScheme.onSurface
 
 /** Пресет — иконка агента как есть (без подложки и скругления) и имя; у играющего — полоска. */
 @Composable
-private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () -> Unit) {
-    val bar by animateFloatAsState(if (active) 1f else 0f, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "bar")
+private fun PresetOrb(app: YaApp, p: WavePreset, name: String, active: Boolean, onClick: () -> Unit) {
+    val barState = animateFloatAsState(if (active) 1f else 0f, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "bar")
     Column(
         Modifier.width(88.dp).clip(RoundedCornerShape(20.dp)).clickable(onClick = onClick).padding(vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Art(app, p.icon, Modifier.size(76.dp), plain = true)
+        if (p.icon != null) {
+            Art(app, p.icon, Modifier.size(76.dp), plain = true)
+        } else {
+            // Иконки агента нет (пресеты не пришли, сети нет) — свой значок волны.
+            Box(
+                Modifier.size(76.dp).padding(6.dp).clip(MaterialShapes.Cookie9Sided.toShape()).background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Ic.Wave, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer) }
+        }
         Spacer(Modifier.height(8.dp))
         Text(
-            p.name,
+            name,
             style = MaterialTheme.typography.labelLarge,
             color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             maxLines = 2,
@@ -919,9 +990,14 @@ private fun PresetOrb(app: YaApp, p: WavePreset, active: Boolean, onClick: () ->
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(4.dp))
+        // Ширина — при отрисовке: пока полоска растёт, карточка не перекомпоновывается каждый кадр.
+        val barColor = MaterialTheme.colorScheme.primary
         Box(
-            Modifier.width(28.dp * bar).height(4.dp).clip(RoundedCornerShape(2.dp))
-                .background(MaterialTheme.colorScheme.primary),
+            Modifier.width(28.dp).height(4.dp).drawBehind {
+                val w = size.width * barState.value
+                if (w > 0.5f) drawRoundRect(barColor, Offset((size.width - w) / 2, 0f), Size(w, size.height),
+                    androidx.compose.ui.geometry.CornerRadius(size.height / 2))
+            },
         )
     }
 }
@@ -934,7 +1010,7 @@ private fun LibraryTab(app: YaApp, nav: Nav, loading: Boolean, pager: PagerState
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Header("Коллекция", "") {}
         Segments(
-            listOf("Мне нравится", "Плейлисты", "Скачанное"), pager.targetPage, { scope.launch { pager.animateScrollToPage(it) } },
+            listOf("Любимое", "Плейлисты", "Артисты", "Скачанное"), pager.targetPage, { scope.launch { pager.animateScrollToPage(it) } },
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         )
         // Свайп сначала листает разделы; с их краёв — уже вкладки приложения.
@@ -947,6 +1023,7 @@ private fun LibraryTab(app: YaApp, nav: Nav, loading: Boolean, pager: PagerState
                 when (page) {
                     0 -> Likes(app, nav, loading)
                     1 -> PlaylistsGrid(app, nav)
+                    2 -> LikedArtists(app, nav)
                     else -> Downloaded(app, nav)
                 }
             }
@@ -961,7 +1038,9 @@ private fun Likes(app: YaApp, nav: Nav, loading: Boolean) {
     var filter by rememberSaveable { mutableStateOf("") }
     val shown = remember(likes, filter) {
         val q = filter.trim().lowercase()
-        likes.withIndex().filter { (_, t) -> q.isEmpty() || t.title.lowercase().contains(q) || t.artists.lowercase().contains(q) }
+        likes.withIndex().filter { (_, t) ->
+            q.isEmpty() || t.title.lowercase().contains(q) || t.version.lowercase().contains(q) || t.artists.lowercase().contains(q)
+        }
     }
     if (likes.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -973,13 +1052,18 @@ private fun Likes(app: YaApp, nav: Nav, loading: Boolean) {
     val list = rememberLazyListState()
     val nowAt = remember(shown, now.id) { shown.indexOfFirst { it.value.id == now.id }.takeIf { it >= 0 } }
     Box(Modifier.fillMaxSize()) {
+    Refreshable(app) {
     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
-        itemsIndexed(shown, key = { _, it -> it.index }, contentType = { _, _ -> "track" }) { _, (i, t) ->
+        // Ключ — сам трек, а не его номер: лайк или его снятие сдвигает соседей плавно,
+        // а не перерисовывает весь список разом.
+        itemsIndexed(shown, key = { _, it -> it.value.id }, contentType = { _, _ -> "track" }) { _, (i, t) ->
             TrackRow(
                 app, t, current = now.id == t.id, playing = now.playing,
+                modifier = Modifier.animateItem(),
                 onLongClick = { nav.menu = MenuTarget(t, uniffi.yamusic_android.Source.Likes, i) },
             ) { app.core.playLikes(i.toUInt()) }
         }
+    }
     }
     FloatingPlay { app.core.playLikes(0u) }
     ListJumps(app, list, shown.size, 0, nowAt, nowAt?.let { shown[it].value.thumb })
@@ -1048,6 +1132,7 @@ fun TrackRow(
     dim: Boolean = false,
     /** Место в рейтинге (популярное исполнителя) — цифрой перед обложкой. */
     rank: Int? = null,
+    modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -1059,9 +1144,11 @@ fun TrackRow(
     val bg = if (current) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
     val titleColor = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
     val coverCorner = if (current) 26.dp else 14.dp
+    val dimTitle = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
+    val titleText = remember(t.title, t.version, dimTitle) { titleLine(t, dimTitle) }
     Row(
         // Концентрично миниатюре: 14 + 10 (отступ) = 24.
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+        modifier.fillMaxWidth().padding(horizontal = 8.dp)
             .bounceClick(RoundedCornerShape(24.dp), onLongClick = onLongClick) { if (t.available) onClick() }
             .background(bg)
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -1088,7 +1175,7 @@ fun TrackRow(
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                t.title,
+                titleText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge,
@@ -1108,6 +1195,44 @@ fun TrackRow(
             Spacer(Modifier.width(6.dp))
         }
         Text(time(t.durationMs.toLong()), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * Название трека и его «хвост» — то, что Яндекс ставит в скобках: версия («Remix», «Live»,
+ * «feat. …») и скобки в конце самого названия. Хвост не главное: в списках он мельче и тише,
+ * в тесных местах (мини-плеер, главный экран) его нет вовсе.
+ */
+fun titleParts(t: TrackItem): Pair<String, String> {
+    var main = t.title.trim()
+    val tails = ArrayList<String>()
+    while (true) {
+        val m = TAIL.find(main) ?: break
+        // Название целиком в скобках — это и есть название.
+        if (m.range.first == 0) break
+        tails.add(0, m.groupValues[1].trim())
+        main = main.substring(0, m.range.first)
+    }
+    if (t.version.isNotBlank()) tails += t.version.trim()
+    return main to tails.filter { it.isNotEmpty() }.joinToString(", ")
+}
+
+private val TAIL = Regex("""\s*[(\[]([^()\[\]]*)[)\]]\s*$""")
+
+/** Название без хвоста — для тесных мест. */
+fun titleShort(t: TrackItem): String = titleParts(t).first
+
+/** Название с приглушённым хвостом цвета [dim] (без скобок: он и так отделён видом). */
+fun titleLine(t: TrackItem, dim: Color): androidx.compose.ui.text.AnnotatedString {
+    val (main, tail) = titleParts(t)
+    return androidx.compose.ui.text.buildAnnotatedString {
+        append(main)
+        if (tail.isNotEmpty()) {
+            append("  ")
+            pushStyle(androidx.compose.ui.text.SpanStyle(color = dim, fontSize = 0.82.em, fontWeight = FontWeight.Medium))
+            append(tail)
+            pop()
+        }
     }
 }
 
@@ -1215,7 +1340,7 @@ private fun MiniPlayer(
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         ScrambleText(
-                            t.title,
+                            titleShort(t),
                             MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             MaterialTheme.colorScheme.onSurface,
                             Modifier.basicMarquee(initialDelayMillis = 2000),
@@ -1473,9 +1598,9 @@ private fun Stage(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        if (s.format.isNotEmpty()) {
-                            Text(s.format, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        }
+                        // Строка формата есть всегда: пока трек открывается, она пустая, а не исчезает
+                        // (иначе обложка под шапкой подпрыгивает на каждой смене трека).
+                        Text(s.format.ifEmpty { " " }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                     // Симметрия со «Свернуть»: заголовок по центру. Остальные действия — внизу, под пальцем.
                     Spacer(Modifier.width(48.dp))
@@ -1690,13 +1815,25 @@ private fun ColumnScope.StageInfo(
     hasLyrics: Boolean,
     toggleLyrics: () -> Unit,
 ) {
-    // Длинное название бежит строкой, как marquee в TUI.
-    ScrambleText(
-        t.title,
-        MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black),
-        MaterialTheme.colorScheme.onSurface,
-        Modifier.basicMarquee(initialDelayMillis = 2000),
-    )
+    // Длинное название бежит строкой, как marquee в TUI. Версия («Remix», «feat. …») — рядом, тише и мельче.
+    val (main, tail) = remember(t.title, t.version) { titleParts(t) }
+    Row(Modifier.basicMarquee(initialDelayMillis = 2000), verticalAlignment = Alignment.Bottom) {
+        ScrambleText(
+            main,
+            MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black),
+            MaterialTheme.colorScheme.onSurface,
+        )
+        if (tail.isNotEmpty()) {
+            Text(
+                tail,
+                Modifier.padding(start = 10.dp, bottom = 3.dp),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
+    }
     val nav = LocalNav.current
     // Исполнитель и альбом — ссылки на свои страницы.
     val card by app.artist.collectAsStateWithLifecycle()
@@ -1706,7 +1843,8 @@ private fun ColumnScope.StageInfo(
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Аватарка исполнителя — круглая, как на его странице.
+        // Аватарка исполнителя — круглая, как на его странице. Приходит позже трека: место под неё
+        // раскрывается плавно, имя не отпрыгивает вправо.
         if (photo != null) {
             Art(app, photo, Modifier.size(32.dp), corner = 16.dp)
             Spacer(Modifier.width(10.dp))
@@ -1714,11 +1852,12 @@ private fun ColumnScope.StageInfo(
         Text(t.artists, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
-    if (t.album.isNotEmpty() && t.album != t.title) {
-        Text(t.album, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(enabled = t.albumId != null) { nav.album(t.albumId, t.album) })
-    }
+    // Строка альбома есть всегда (у сингла — пустая): иначе при смене трека всё над ней — обложка,
+    // название — прыгает на высоту строки.
+    val album = t.album.takeIf { it.isNotEmpty() && it != t.title }
+    Text(album ?: " ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1, overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(enabled = album != null && t.albumId != null) { nav.album(t.albumId, t.album) })
     Spacer(Modifier.height(12.dp))
     WavySeek(clock, t.durationMs.toLong(), !s.paused && !s.loading, { app.core.seek(it.toULong()) })
     Spacer(Modifier.height(8.dp))
@@ -1826,6 +1965,37 @@ private fun Modifier.fadeEdges(edge: Dp) = this
     }
 
 /**
+ * Строка текста: то, что в скобках, — подпевки и фон, их автор так и задумал вторым планом.
+ * Скобки остаются (это авторская запись), но само содержимое тише и легче основного голоса.
+ */
+private fun lyricLine(text: String, dim: Color): androidx.compose.ui.text.AnnotatedString =
+    androidx.compose.ui.text.buildAnnotatedString {
+        var depth = 0
+        var from = 0
+        fun flush(to: Int, back: Boolean) {
+            if (to <= from) return
+            if (back) pushStyle(androidx.compose.ui.text.SpanStyle(color = dim, fontWeight = FontWeight.SemiBold, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic))
+            append(text, from, to)
+            if (back) pop()
+            from = to
+        }
+        text.forEachIndexed { i, c ->
+            when (c) {
+                '(' -> {
+                    if (depth == 0) flush(i, false)
+                    depth++
+                }
+                ')' -> if (depth > 0) {
+                    depth--
+                    if (depth == 0) flush(i + 1, true)
+                }
+            }
+        }
+        // Незакрытая скобка — обычный текст.
+        flush(text.length, false)
+    }
+
+/**
  * Текст песни. Синхронный: строки одного размера (без прыжков вёрстки), текущая — белая и
  * чуть крупнее масштабом, пройденные гаснут, будущие приглушены; держится на трети высоты,
  * тап по строке — перемотка. Обычный — плотным абзацем, пустые строки — паузы между куплетами.
@@ -1840,13 +2010,16 @@ private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
     val ink = MaterialTheme.colorScheme.onSurface
     if (!l.synced) {
         Column(Modifier.fillMaxSize().fadeEdges(48.dp).verticalScroll(rememberScrollState()).padding(vertical = 16.dp)) {
+            val soft = ink.copy(alpha = 0.5f)
             l.lines.forEach {
                 if (it.text.isBlank()) Spacer(Modifier.height(14.dp))
-                else Text(it.text, style = base.copy(fontWeight = FontWeight.Bold, lineHeight = 28.sp), color = ink.copy(alpha = 0.9f))
+                else Text(lyricLine(it.text, soft), style = base.copy(fontWeight = FontWeight.Bold, lineHeight = 28.sp), color = ink.copy(alpha = 0.9f))
             }
         }
         return
     }
+    val dim = ink.copy(alpha = 0.55f)
+    val texts = remember(l, dim) { l.lines.map { lyricLine(it.text, dim) } }
     val cur by remember(l) { derivedStateOf { l.lines.indexOfLast { it.timeMs.toLong() <= clock.pos() + 250 } } }
     val list = rememberLazyListState()
     LaunchedEffect(cur) { if (cur >= 0) list.animateScrollToItem(cur) }
@@ -1869,19 +2042,24 @@ private fun LyricsView(app: YaApp, l: LyricsData, clock: PlayClock) {
                     Spacer(Modifier.height(20.dp))
                 } else {
                     Text(
-                        line.text,
+                        texts[i],
                         style = base,
                         color = ink,
-                        // 0.94 × 1.06 ≈ 1: увеличенная активная строка не вылезает за край и не режется clip.
-                        modifier = Modifier.fillMaxWidth(0.94f).clip(RoundedCornerShape(14.dp))
-                            .clickable { app.core.seek(line.timeMs) }
-                            .padding(vertical = 5.dp, horizontal = 4.dp)
+                        // Масштаб — снаружи обрезки: раньше строка увеличивалась внутри своей же
+                        // скруглённой рамки (clip стоял перед слоем) и активная строка срезалась
+                        // справа и по высоте. Теперь растёт вся строка вместе с рамкой нажатия,
+                        // а 0.94 × 1.06 ≈ 1 — она остаётся в ширине колонки.
+                        modifier = Modifier.fillMaxWidth(0.94f)
                             .graphicsLayer {
                                 this.alpha = alpha
                                 scaleX = scale
                                 scaleY = scale
                                 transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
-                            },
+                            }
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { app.core.seek(line.timeMs) }
+                            // Запас под тень букв (blur 16 px), иначе рамка срезает её у краёв.
+                            .padding(vertical = 6.dp, horizontal = 8.dp),
                     )
                 }
             }

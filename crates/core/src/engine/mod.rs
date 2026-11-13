@@ -95,6 +95,10 @@ pub enum Msg {
     },
     /// Лайк не сохранился на сервере — вернуть как было.
     LikeFailed { track: Track, like: bool, error: String },
+    /// Экспорт трека закончился: путь к файлу или почему не вышло.
+    Exported { title: String, result: Result<std::path::PathBuf, String> },
+    /// Свой трек загружен в плейлист `kind` (или нет).
+    Uploaded { kind: String, name: String, result: Result<(), String> },
 }
 
 /// Действие, которое предлагает тост.
@@ -110,7 +114,9 @@ pub enum ToastAction {
 #[derive(Debug, Clone)]
 pub enum Effect {
     /// `action` — что тост предлагает сделать: TUI подписывает клавишу, телефон рисует кнопку.
-    Toast { text: String, error: bool, action: Option<ToastAction> },
+    /// `notice` — итог действия, которого на экране иначе не видно (плейлист пополнен, экспорт
+    /// готов, сети нет): телефон показывает только такие, ошибки и сообщения с кнопкой.
+    Toast { text: String, error: bool, action: Option<ToastAction>, notice: bool },
     /// Подгрузить обложку заранее (трек открывается).
     Cover(String),
     /// Трек зазвучал (или встал на паузу в начале при восстановлении).
@@ -133,6 +139,8 @@ pub enum Effect {
     PlaylistOpFailed { kind: String },
     /// Снимок узнал метаданные скачанных треков (обложки из файлов).
     LibraryMeta,
+    /// Трек экспортирован файлом `path` (телефон переносит его в общую «Музыку»).
+    Exported { path: std::path::PathBuf },
 }
 
 /// Что лайкаем/скрываем кроме треков.
@@ -342,6 +350,14 @@ pub struct Engine {
     /// Пауза до следующей попытки оживить вывод: растёт, пока он не отвечает.
     stall_backoff: Duration,
     stored_token: Option<StoredToken>,
+    /// Лайки и треки плейлистов пришли с сервера (а не из снимка): по ним можно решать,
+    /// что из скачанного — не коллекция.
+    likes_fresh: bool,
+    playlists_fresh: bool,
+    /// Треки, которые «не рекомендовать» в этом запуске (дизлайк снимает лайк и наоборот).
+    pub disliked: HashSet<String>,
+    /// Что включить, когда появится связь: нажали «играть» раньше, чем прошёл вход.
+    play_when_online: bool,
     effects: Vec<Effect>,
 }
 
@@ -452,14 +468,29 @@ impl Engine {
             last_stall: None,
             stall_backoff: STALL_FIRST,
             stored_token: None,
+            likes_fresh: false,
+            playlists_fresh: false,
+            disliked: HashSet::new(),
+            play_when_online: false,
             effects: Vec::new(),
             cfg,
         };
+        e.player.set_switch_fade(e.cfg.switch_fade_secs);
+        e.library.set_stray_limit(e.cfg.cache_gb);
         e.resume_local();
         if offline || e.cfg.offline_mode {
             e.enter_offline();
         } else {
             e.start_auth();
+            // Вход уже был и есть снимок коллекции: главный экран сразу, с прошлыми лайками и
+            // плейлистами; сервер подтвердит токен и обновит их в фоне.
+            if matches!(e.screen, Screen::Connecting(_)) && !e.snapshot.is_empty() {
+                e.screen = Screen::Main;
+                e.liked = e.snapshot.likes.iter().map(|t| t.id.clone()).collect();
+                e.likes = Loadable::Ready(e.snapshot.likes.clone());
+                e.playlists = Loadable::Ready(e.snapshot.playlists.clone());
+                e.emit(Effect::LikesChanged);
+            }
         }
         Ok(e)
     }
@@ -474,15 +505,20 @@ impl Engine {
     }
 
     pub fn toast(&mut self, text: String) {
-        self.emit(Effect::Toast { text, error: false, action: None });
+        self.emit(Effect::Toast { text, error: false, action: None, notice: false });
+    }
+
+    /// Итог действия, которого на экране иначе не видно (см. [`Effect::Toast`]).
+    pub fn notice(&mut self, text: String) {
+        self.emit(Effect::Toast { text, error: false, action: None, notice: true });
     }
 
     pub fn toast_with(&mut self, text: String, action: ToastAction) {
-        self.emit(Effect::Toast { text, error: false, action: Some(action) });
+        self.emit(Effect::Toast { text, error: false, action: Some(action), notice: true });
     }
 
     pub fn toast_err(&mut self, text: String) {
-        self.emit(Effect::Toast { text, error: true, action: None });
+        self.emit(Effect::Toast { text, error: true, action: None, notice: true });
     }
 
     /// Остановить звук совсем (MPRIS Stop).
@@ -544,7 +580,7 @@ impl Engine {
         } else if self.offline {
             match StoredToken::load(&self.paths.token_file) {
                 Some(tok) => {
-                    self.toast("Подключаюсь…".into());
+                    self.notice("Подключаюсь…".into());
                     tokio::spawn(connect(tok, self.tx.clone()));
                 }
                 None => self.begin_login(None),
@@ -574,7 +610,7 @@ impl Engine {
                 let changed = n.info.codec != pos.info.codec;
                 n.info = pos.info;
                 if changed && let Some((_, text, action)) = self.swap_toast.take_if(|(t, ..)| *t == pos.token) {
-                    self.emit(Effect::Toast { text, error: false, action });
+                    self.emit(Effect::Toast { text, error: false, action, notice: false });
                 }
             }
             _ => self.on_track_started(pos),
@@ -656,6 +692,10 @@ impl Engine {
                     if !self.snapshot.is_empty() {
                         self.enter_offline();
                     }
+                } else if matches!(self.screen, Screen::Main) && self.client.is_none() && !self.offline {
+                    // Главный экран показан заранее (по снимку), а сети так и нет.
+                    self.play_when_online = false;
+                    self.enter_offline();
                 }
             }
             Msg::DeviceCode(r) => {
@@ -694,10 +734,14 @@ impl Engine {
                     self.snapshot.likes = ts.clone();
                     self.snapshot.save(self.snapshot_path.clone());
                     self.likes = Loadable::Ready(ts);
+                    self.likes_fresh = true;
+                    self.sync_keep();
                     self.backfill_library_meta();
                     self.refresh_offline_program();
                     self.emit(Effect::LikesChanged);
                 }
+                // Обновление не прошло — показанное (из снимка или прошлого ответа) остаётся.
+                Err(e) if self.likes.ready().is_some() => tracing::warn!("лайки не обновились: {e}"),
                 Err(e) => self.likes = Loadable::Failed(e),
             },
             Msg::Ynison(ev) => self.on_ynison(ev),
@@ -722,16 +766,15 @@ impl Engine {
                 }
                 Err(e) => tracing::warn!("personal-playlists: {e}"),
             },
-            Msg::Playlists(r) => {
-                self.playlists = match r {
-                    Ok(p) => {
-                        self.snapshot.playlists = p.clone();
-                        self.sync_snapshot_playlists(&p);
-                        Loadable::Ready(p)
-                    }
-                    Err(e) => Loadable::Failed(e),
+            Msg::Playlists(r) => match r {
+                Ok(p) => {
+                    self.snapshot.playlists = p.clone();
+                    self.sync_snapshot_playlists(&p);
+                    self.playlists = Loadable::Ready(p);
                 }
-            }
+                Err(e) if self.playlists.ready().is_some() => tracing::warn!("плейлисты не обновились: {e}"),
+                Err(e) => self.playlists = Loadable::Failed(e),
+            },
             Msg::OfflineProgram(r) => {
                 self.owave_fetching = false;
                 match r {
@@ -761,6 +804,8 @@ impl Engine {
                     self.snapshot.playlist_tracks.insert(k, (rev, ts));
                 }
                 self.snapshot.save(self.snapshot_path.clone());
+                self.playlists_fresh = true;
+                self.sync_keep();
             }
             Msg::PlaylistOp {
                 result,
@@ -768,7 +813,7 @@ impl Engine {
                 reload_list,
             } => {
                 match result {
-                    Ok(t) if !t.is_empty() => self.toast(t),
+                    Ok(t) if !t.is_empty() => self.notice(t),
                     Ok(_) => {}
                     Err(e) => {
                         self.toast_err(format!("плейлист не изменился: {e}"));
@@ -855,6 +900,22 @@ impl Engine {
                 self.apply_like(&track, !like);
                 self.toast_err(format!("Лайк не сохранился: {error}"));
             }
+            Msg::Exported { title, result } => match result {
+                Ok(path) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.notice(format!("Экспортировано: {name}"));
+                    self.emit(Effect::Exported { path });
+                }
+                Err(e) => self.toast_err(format!("Экспорт «{title}»: {e}")),
+            },
+            Msg::Uploaded { kind, name, result } => match result {
+                Ok(()) => {
+                    self.notice(format!("«{name}» загружен — появится в плейлисте после обработки"));
+                    self.load_playlists();
+                    self.emit(Effect::PlaylistOpFailed { kind });
+                }
+                Err(e) => self.toast_err(format!("«{name}» не загрузился: {e}")),
+            },
         }
     }
 
@@ -930,7 +991,7 @@ impl Engine {
         let was_offline = self.offline;
         if self.offline {
             self.offline = false;
-            self.toast("Сеть вернулась — снова онлайн".into());
+            self.notice("Сеть вернулась — снова онлайн".into());
         }
         let fetcher = Fetcher::new(client.clone(), self.library.clone(), self.cfg.quality);
         fetcher.set_fast_start(self.cfg.fast_start);
@@ -938,6 +999,7 @@ impl Engine {
             fetcher.set_quality(q);
         }
         self.fetcher = Some(fetcher);
+        self.sync_keep();
         let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<PlOp>();
         let (pc, mtx) = (client.clone(), self.tx.clone());
         tokio::spawn(async move {
@@ -1007,7 +1069,9 @@ impl Engine {
     pub fn restore_session(&mut self) {
         // Очередь уже из кеша: открыть трек (если ещё ждал сети) и подготовить следующий.
         if !self.queue.items.is_empty() && self.resume_partial.is_none() {
+            let play = std::mem::take(&mut self.play_when_online);
             match self.resume_at.take() {
+                Some((pos, secs)) if play => self.play_index_at(pos, secs, false),
                 Some((pos, secs)) => {
                     self.play_index_at(pos, secs, true);
                     self.toast_with("Продолжаем с того же места".into(), ToastAction::Resume);
@@ -1131,7 +1195,10 @@ impl Engine {
     }
 
     pub fn load_likes(&mut self) {
-        self.likes = Loadable::Loading;
+        // Уже показанное (снимок, прошлый ответ) не прячем за индикатором: обновится на месте.
+        if self.likes.ready().is_none() {
+            self.likes = Loadable::Loading;
+        }
         self.spawn(|c, tx| async move {
             let r = async {
                 let ids = c.liked_track_ids().await?;
@@ -1150,7 +1217,9 @@ impl Engine {
     }
 
     pub fn load_playlists(&mut self) {
-        self.playlists = Loadable::Loading;
+        if self.playlists.ready().is_none() {
+            self.playlists = Loadable::Loading;
+        }
         self.spawn(|c, tx| async move {
             let _ = tx.send(Msg::Playlists(c.playlists().await.map_err(err_str)));
         });
@@ -1212,6 +1281,13 @@ impl Engine {
 
     pub fn play_index_at(&mut self, idx: usize, start: f64, paused: bool) {
         let Some(opener) = self.opener() else {
+            // Вход ещё идёт (главный экран показан по снимку): запомним и включим, как появится связь.
+            if let Some(t) = self.queue.items.get(idx).cloned() {
+                self.queue.pos = Some(idx);
+                self.loading_track = Some(t);
+                self.resume_at = Some((idx, start));
+                self.play_when_online = !paused;
+            }
             return;
         };
         self.play_index_with(idx, start, paused, opener);
@@ -1436,7 +1512,7 @@ impl Engine {
     /// Волна без сети по сидам пресета: та же программа TinyMl, сиды — вид волны (`title` — название очереди).
     pub fn start_offline_wave_with(&mut self, seeds: Vec<String>, title: String) {
         let Some(store) = self.owave_store.as_ref() else {
-            self.toast("Офлайн-волна ещё не готова: программа скачивается, когда есть сеть".into());
+            self.notice("Офлайн-волна ещё не готова: программа скачивается, когда есть сеть".into());
             return;
         };
         let mut pool: HashMap<i32, Track> = HashMap::new();
@@ -1446,7 +1522,7 @@ impl Engine {
             }
         }
         if pool.len() < 3 {
-            self.toast("Для офлайн-волны нужно хотя бы 3 скачанных трека".into());
+            self.notice("Для офлайн-волны нужно хотя бы 3 скачанных трека".into());
             return;
         }
         let available: Vec<i32> = pool.keys().copied().collect();
@@ -1557,7 +1633,7 @@ impl Engine {
             }
         }
         let (n, _) = self.library.stats();
-        self.toast(format!("Нет сети — офлайн: играет скачанное ({n} треков)"));
+        self.notice(format!("Нет сети — офлайн: играет скачанное ({n} треков)"));
     }
 
     /// Треки плейлистов для снимка: только те, у кого сменилась ревизия, по одному запросу.
@@ -1567,6 +1643,8 @@ impl Engine {
         let stale: Vec<Playlist> = pls.iter().filter(|p| self.snapshot.stale(p)).cloned().collect();
         if stale.is_empty() {
             self.snapshot.save(self.snapshot_path.clone());
+            self.playlists_fresh = true;
+            self.sync_keep();
             return;
         }
         self.spawn(move |c, tx| async move {
@@ -1641,7 +1719,7 @@ impl Engine {
                     return;
                 }
                 if matches!(self.queue.kind, QueueKind::Wave { .. }) {
-                    self.toast("Волна подгружается…".into());
+                    self.notice("Волна подгружается…".into());
                     self.maybe_extend_wave(cur);
                 } else if matches!(self.queue.kind, QueueKind::OfflineWave) {
                     self.extend_offline_wave();
@@ -1706,6 +1784,11 @@ impl Engine {
     }
 
     pub fn toggle_pause(&mut self) {
+        // Трек ждёт связи (вход ещё идёт): «играть» значит «включи, как подключишься».
+        if self.now.is_none() && self.resume_at.is_some() && self.opener().is_none() {
+            self.play_when_online = !self.play_when_online;
+            return;
+        }
         if self.now.is_none() && self.loading_track.is_none() {
             if let Some(p) = self.queue.pos.or((!self.queue.items.is_empty()).then_some(0)) {
                 self.play_index(p);
@@ -1915,6 +1998,22 @@ impl Engine {
         });
     }
 
+    /// Как подписать пресет. Обычная Моя волна в «колесе» зовётся «Назад к привычному» — это
+    /// имеет смысл, только пока играет волна другого типа (характер, настроение, жанр…);
+    /// в остальное время это просто «Моя волна».
+    pub fn preset_name<'a>(&self, item: &'a api::WheelItem) -> &'a str {
+        if item.seeds() != [MY_WAVE] {
+            return item.name();
+        }
+        if self.custom_wave_active() { item.name() } else { "Моя волна" }
+    }
+
+    /// Играет волна не «просто Моя», а одного из её типов.
+    pub fn custom_wave_active(&self) -> bool {
+        matches!(self.queue.kind, QueueKind::Wave { .. })
+            && self.wave.active_seeds.as_ref().is_some_and(|s| s.as_slice() != [MY_WAVE])
+    }
+
     /// Пресет сейчас играет (волна запущена с его сидами).
     pub fn is_active_preset(&self, item: &api::WheelItem) -> bool {
         matches!(self.queue.kind, QueueKind::Wave { .. })
@@ -2037,6 +2136,12 @@ impl Engine {
         let like = !self.is_liked(&t);
         self.apply_like(&t, like);
         if like {
+            // Лайк снимает «не рекомендовать» (сервер делает то же сам).
+            self.disliked.remove(&t.id);
+            if let Some(f) = self.fetcher.clone() {
+                let liked = t.clone();
+                tokio::spawn(async move { f.promote(liked).await });
+            }
             self.wave_feedback("like", &t, None);
             self.toast(format!("\u{f004} {}", t.full_title()));
         } else {
@@ -2057,6 +2162,9 @@ impl Engine {
 
     /// Локальное состояние лайка: множество, коллекция, фильтр, MPRIS.
     pub fn apply_like(&mut self, t: &Track, like: bool) {
+        if let Some(f) = &self.fetcher {
+            f.keep_one(&t.id, like);
+        }
         if like {
             self.liked.insert(t.id.clone());
             if let Loadable::Ready(v) = &mut self.likes
@@ -2099,7 +2207,7 @@ impl Engine {
             (Entity::ArtistDislike, true) => format!("⊘ Не рекомендовать: {name} (D — вернуть)"),
             (Entity::ArtistDislike, false) => format!("Снова рекомендовать: {name}"),
         };
-        self.toast(msg);
+        self.notice(msg);
         self.spawn(move |c, tx| async move {
             let r = match what {
                 Entity::AlbumLike => c.set_album_like(&id, on).await,
@@ -2137,8 +2245,19 @@ impl Engine {
         };
         let id = t.full_id();
         self.wave_feedback("dislike", &t, None);
+        // «Не рекомендовать» и «нравится» исключают друг друга: лайк снимается и здесь, и на сервере.
+        let was_liked = self.is_liked(&t);
+        if was_liked {
+            self.apply_like(&t, false);
+        }
+        self.disliked.insert(t.id.clone());
         self.spawn(move |c, _| async move {
-            let _ = c.dislike(&id).await;
+            if was_liked && let Err(e) = c.set_like(&id, false).await {
+                tracing::warn!("лайк при дизлайке не снялся: {e}");
+            }
+            if let Err(e) = c.dislike(&id).await {
+                tracing::warn!("дизлайк не сохранился: {e}");
+            }
         });
         self.toast(format!("Не рекомендовать: {}", t.full_title()));
         self.next();
@@ -2356,6 +2475,100 @@ impl Engine {
         {
             self.hot_upgrade(true);
         }
+    }
+
+    /// Сохранять ли в библиотеку всё сыгранное (иначе — только коллекцию, остальное в кеш).
+    pub fn keep_played(&self) -> bool {
+        self.cfg.keep_played.unwrap_or(true)
+    }
+
+    pub fn set_keep_played(&mut self, on: bool) {
+        self.cfg.keep_played = Some(on);
+        self.cfg.save(&self.paths);
+        self.sync_keep();
+    }
+
+    /// Наплыв при ручной смене трека, сек (0 — резко).
+    pub fn set_switch_fade(&mut self, secs: f32) {
+        self.cfg.switch_fade_secs = secs.clamp(0.0, 3.0);
+        self.player.set_switch_fade(self.cfg.switch_fade_secs);
+        self.cfg.save(&self.paths);
+    }
+
+    /// Коллекция (лайки и треки своих плейлистов) — загрузчику и библиотеке: что из сыгранного
+    /// сохранять насовсем, а что держать кешем. Скачанное раньше, но не из коллекции, уходит
+    /// в кеш, только когда и лайки, и плейлисты подтверждены сервером.
+    pub fn sync_keep(&mut self) {
+        let all = self.keep_played();
+        let mut ids: HashSet<String> = self.liked.clone();
+        for (_, ts) in self.snapshot.playlist_tracks.values() {
+            ids.extend(ts.iter().map(|t| t.id.clone()));
+        }
+        if let Some(f) = &self.fetcher {
+            f.set_keep(all, ids.clone());
+        }
+        let flags = self.library.stray_flags();
+        // Свои, лежащие в кеше, — в библиотеку (с тегами, если знаем метаданные).
+        let promote: Vec<String> = flags.iter().filter(|(id, stray)| *stray && (all || ids.contains(id))).map(|(id, _)| id.clone()).collect();
+        if !promote.is_empty() {
+            let known: Vec<Track> = promote.iter().filter_map(|id| self.snapshot.find(id).cloned()).collect();
+            let unknown: Vec<String> = promote.iter().filter(|id| self.snapshot.find(id).is_none()).cloned().collect();
+            self.library.set_stray(&unknown, false);
+            if let Some(f) = self.fetcher.clone() {
+                tokio::spawn(async move {
+                    for t in known {
+                        f.promote(t).await;
+                    }
+                });
+            }
+        }
+        if !all && self.likes_fresh && self.playlists_fresh {
+            let demote: Vec<String> = flags.into_iter().filter(|(id, stray)| !stray && !ids.contains(id)).map(|(id, _)| id).collect();
+            if !demote.is_empty() {
+                let n = self.library.set_stray(&demote, true);
+                tracing::info!("{n} сыгранных треков не из коллекции — теперь кеш");
+            }
+        }
+    }
+
+    /// Экспорт трека обычным файлом в `dir` (см. [`crate::export::Format`]).
+    pub fn export(&mut self, t: Track, fmt: crate::export::Format, dir: std::path::PathBuf) {
+        let Some(f) = self.fetcher.clone() else {
+            return self.toast_err("Без сети экспорт недоступен".into());
+        };
+        self.notice(format!("Экспортирую в {}: {}", fmt.label(), t.full_title()));
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = f.export(&t, fmt, dir).await.map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Exported { title: t.full_title(), result });
+        });
+    }
+
+    /// Загрузить свой аудиофайл в свой плейлист `kind` (как «Загрузить трек» веб-версии).
+    pub fn upload(&mut self, kind: String, path: std::path::PathBuf) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if self.client.is_none() {
+            return self.toast_err("Без сети трек не загрузить".into());
+        }
+        self.notice(format!("Загружаю «{name}»…"));
+        self.spawn(move |c, tx| async move {
+            let result = async {
+                let data = tokio::fs::read(&path).await.map_err(|e| format!("файл не читается: {e}"))?;
+                c.upload_track(&kind, &name, data).await.map_err(err_str)
+            }
+            .await;
+            let _ = tx.send(Msg::Uploaded { kind, name, result });
+        });
+    }
+
+    /// Перечитать с сервера всё, что показано: лайки, плейлисты, подборки, пресеты волны.
+    pub fn refresh(&mut self) {
+        if self.client.is_none() {
+            return;
+        }
+        self.load_likes();
+        self.load_playlists();
+        self.load_wheel();
     }
 
     /// Прогреть следующие треки очереди после `cur` (ссылка и начало файла).

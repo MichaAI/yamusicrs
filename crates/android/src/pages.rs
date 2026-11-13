@@ -71,6 +71,8 @@ pub struct PlaylistItem {
     pub track_count: u32,
     pub cover: Option<String>,
     pub description: Option<String>,
+    /// Свой плейлист: в него можно добавлять треки.
+    pub mine: bool,
 }
 
 impl From<&Playlist> for PlaylistItem {
@@ -83,6 +85,7 @@ impl From<&Playlist> for PlaylistItem {
             track_count: p.track_count.unwrap_or(p.tracks.len() as u32),
             cover: p.cover_uri().map(|u| api::cover_url(u, 400)),
             description: p.description.clone().filter(|d| !d.is_empty()),
+            mine: false,
         }
     }
 }
@@ -105,10 +108,14 @@ pub enum Page {
         album: Option<AlbumItem>,
         /// Страница плейлиста (а не альбома, чарта, похожих).
         playlist: bool,
+        /// Альбом в коллекции (для страницы альбома).
+        liked: bool,
         tracks: Vec<TrackItem>,
     },
     Search {
         query: String,
+        /// Волны под запрос (настроение, жанр, занятие) — как в поиске официального клиента.
+        waves: Vec<crate::WavePreset>,
         tracks: Vec<TrackItem>,
         albums: Vec<AlbumItem>,
         artists: Vec<ArtistItem>,
@@ -118,8 +125,15 @@ pub enum Page {
         title: String,
         albums: Vec<AlbumItem>,
     },
+    /// Список исполнителей (любимые).
+    Artists {
+        title: String,
+        artists: Vec<ArtistItem>,
+    },
     Artist {
         artist: ArtistItem,
+        /// Исполнитель в коллекции.
+        liked: bool,
         /// Слушателей за месяц.
         listeners: Option<u64>,
         genres: Vec<String>,
@@ -158,6 +172,10 @@ pub enum Req {
     Chart,
     /// Всё скачанное, недавно игранное сверху (без сети тоже).
     Downloaded,
+    /// Любимые исполнители.
+    LikedArtists,
+    /// «Вы недавно слушали».
+    History,
 }
 
 /// Сырой ответ сети; в `Page` превращается уже в потоке движка.
@@ -173,6 +191,7 @@ pub enum Loaded {
     },
     Search(String, SearchResult),
     Albums(String, Vec<Album>),
+    Artists(String, Vec<Artist>),
     Artist(String, Box<ArtistBrief>),
 }
 
@@ -187,7 +206,7 @@ pub struct Pages {
 
 impl Pages {
     /// Ответ сети → страница для Kotlin; треки запоминаются под id.
-    pub fn accept(&mut self, id: u64, r: Result<Loaded, String>) -> Page {
+    pub fn accept(&mut self, e: &Engine, id: u64, r: Result<Loaded, String>) -> Page {
         let loaded = match r {
             Ok(l) => l,
             Err(error) => return Page::Failed { error },
@@ -209,6 +228,7 @@ impl Pages {
                 }
                 Page::Tracks {
                     playlist,
+                    liked: album.as_ref().is_some_and(|a| e.liked_albums.contains(&a.id)),
                     title,
                     subtitle,
                     cover,
@@ -222,6 +242,21 @@ impl Pages {
                 self.tracks.insert(id, (format!("Поиск: {query}"), tracks));
                 Page::Search {
                     query,
+                    waves: r
+                        .waves
+                        .iter()
+                        .map(|w| crate::WavePreset {
+                            name: w.title.clone(),
+                            description: w.sub_title.clone(),
+                            icon: w.icon().map(|u| api::cover_url(u, 200)),
+                            color: w
+                                .color
+                                .as_deref()
+                                .and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok()),
+                            seeds: w.seeds.clone(),
+                            home: false,
+                        })
+                        .collect(),
                     tracks: items,
                     albums: r.albums.map(|b| b.results.iter().map(AlbumItem::from).collect()).unwrap_or_default(),
                     artists: r.artists.map(|b| b.results.iter().map(ArtistItem::from).collect()).unwrap_or_default(),
@@ -234,6 +269,10 @@ impl Pages {
             Loaded::Albums(title, v) => Page::Albums {
                 title,
                 albums: v.iter().map(AlbumItem::from).collect(),
+            },
+            Loaded::Artists(title, v) => Page::Artists {
+                title,
+                artists: v.iter().map(ArtistItem::from).collect(),
             },
             Loaded::Artist(name, b) => {
                 let info = b.artist.as_ref();
@@ -251,6 +290,7 @@ impl Pages {
                 }
                 let albums = if b.discography.is_empty() { &b.albums } else { &b.discography };
                 Page::Artist {
+                    liked: info.is_some_and(|a| e.liked_artists.contains(&a.id)),
                     artist: ArtistItem {
                         id: info.map(|i| i.id.clone()).unwrap_or_default(),
                         name,
@@ -437,6 +477,21 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
             })
         }
         Req::Search(q) => Ok(Loaded::Search(q.clone(), c.search(&q).await.map_err(err_str)?)),
+        Req::History => {
+            let tracks = c.history().await.map_err(err_str)?;
+            if tracks.is_empty() {
+                return Err("История пуста: включите что-нибудь — и оно появится здесь".into());
+            }
+            Ok(Loaded::Tracks {
+                title: "Вы недавно слушали".into(),
+                subtitle: tracks_word(tracks.len()),
+                cover: None,
+                album: None,
+                tracks,
+                seed: None,
+            })
+        }
+        Req::LikedArtists => Ok(Loaded::Artists("Исполнители".into(), c.liked_artists().await.map_err(err_str)?)),
         Req::Releases => Ok(Loaded::Albums("Новые релизы".into(), c.new_releases().await.map_err(err_str)?)),
         Req::Chart => {
             let pl = c.chart().await.map_err(err_str)?;
@@ -464,9 +519,10 @@ fn tracks_word(n: usize) -> String {
 
 /// Свои плейлисты (офлайн — из снимка) и «Настроили для вас».
 pub fn playlists(e: &Engine) -> (Vec<PlaylistItem>, Vec<PlaylistItem>) {
+    let item = |p: &Playlist| PlaylistItem { mine: e.is_own(p), ..PlaylistItem::from(p) };
     let own = match &e.playlists {
-        Loadable::Ready(v) => v.iter().map(PlaylistItem::from).collect(),
-        _ => e.snapshot.playlists.iter().map(PlaylistItem::from).collect(),
+        Loadable::Ready(v) => v.iter().map(item).collect(),
+        _ => e.snapshot.playlists.iter().map(item).collect(),
     };
     let personal = e.personal.iter().map(|p| PlaylistItem::from(&p.playlist)).collect();
     (own, personal)

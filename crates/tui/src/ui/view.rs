@@ -593,6 +593,23 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
             let w = lines.iter().map(Line::width).max().unwrap_or(0).max(36) as u16 + 4;
             (" В плейлист ", w)
         }
+        crate::app::Popup::Export { track, sel } => {
+            lines.push(Line::styled(format!("  {}", track.full_title()), ctx.dim()));
+            lines.push(Line::raw(""));
+            for (i, (_, name)) in crate::app::EXPORT_FORMATS.iter().enumerate() {
+                clickable.push((lines.len(), i));
+                let on = i == *sel;
+                lines.push(Line::from(vec![
+                    Span::styled(if on { "  ▶ " } else { "    " }, ctx.accent()),
+                    Span::styled(name.to_string(), if on { ctx.accent().add_modifier(Modifier::BOLD) } else { ctx.fg() }),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  Файл ляжет в «YandexMusic Export» рядом с библиотекой", ctx.dim()));
+            lines.push(Line::styled("  Enter — сохранить · Esc — закрыть", ctx.dim()));
+            let w = lines.iter().map(Line::width).max().unwrap_or(0).max(36) as u16 + 4;
+            (" Сохранить файлом ", w)
+        }
         crate::app::Popup::Input { title, text, .. } => {
             lines.push(Line::from(vec![
                 Span::raw("  "),
@@ -1810,6 +1827,7 @@ fn draw_search(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 RowKind::Other(format!("▤ {}", p.title), format!("{} тр.", p.track_count.unwrap_or(0)))
             }
             SearchItem::Query(q) => RowKind::Other(format!("⟲ {q}"), String::new()),
+            SearchItem::Wave(w) => RowKind::Other(format!("≋ {}", w.title), w.sub_title.clone().unwrap_or_else(|| "Моя волна".into())),
         })
         .collect();
     let sel = app.page().sel;
@@ -1904,7 +1922,7 @@ fn draw_wheel(f: &mut Frame, area: Rect, app: &mut App, items: &[crate::api::Whe
             ));
         }
         spans.push(Span::styled(
-            fit(item.name(), tw as usize).trim_end().to_string(),
+            fit(app.engine.preset_name(item), tw as usize).trim_end().to_string(),
             name_style,
         ));
         f.render_widget(
@@ -3460,6 +3478,8 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("B", "после перехода на lossless с ресемплингом — перезапустить трек bit-perfect"),
         ("N", "выравнивание громкости вкл/выкл"),
         ("x", "плавный переход: выкл → 3 → 6 → 10 с"),
+        ("S", "сохранить трек файлом: FLAC, MP3, AAC, HE-AAC, WAV"),
+        ("U", "свой плейлист: загрузить в него свой аудиофайл"),
         ("R", "обновить библиотеку"),
         ("q", "выход"),
     ];
