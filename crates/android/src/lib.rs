@@ -164,6 +164,9 @@ pub struct PlayerState {
     pub queue_pos: Option<u32>,
     pub queue_len: u32,
     pub wave: bool,
+    /// Повтор одного трека и перемешивание.
+    pub repeat_one: bool,
+    pub shuffle: bool,
     /// Сиды и название играющей волны (пусто — играет не волна).
     pub wave_seeds: Vec<String>,
     pub wave_name: String,
@@ -289,6 +292,8 @@ enum Cmd {
     LikeFrom(Source, u32),
     DownloadFrom(Source),
     RedownloadModel,
+    ToggleRepeat,
+    ToggleShuffle,
     Quality(String),
     Normalize(bool),
     TargetLufs(f32),
@@ -507,6 +512,16 @@ impl Core {
     }
 
     /// Лайк или снять лайк.
+    /// Повтор текущего трека: вкл/выкл (состояние — `PlayerState::repeat_one`).
+    pub fn toggle_repeat(&self) {
+        self.send(Cmd::ToggleRepeat);
+    }
+
+    /// Перемешивание: вкл/выкл (`PlayerState::shuffle`).
+    pub fn toggle_shuffle(&self) {
+        self.send(Cmd::ToggleShuffle);
+    }
+
     /// Перекачать модель офлайн-волны (настройки → офлайн).
     pub fn redownload_offline_model(&self) {
         self.send(Cmd::RedownloadModel);
@@ -992,6 +1007,8 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
                 e.enqueue(t, next);
             }
         }
+        Cmd::ToggleRepeat => e.toggle_repeat(),
+        Cmd::ToggleShuffle => e.toggle_shuffle(),
         Cmd::RedownloadModel => e.redownload_offline_program(),
         Cmd::DownloadFrom(s) => {
             if let Some(v) = source_tracks(e, pages, &s).map(|(_, v)| v.to_vec()) {
@@ -1252,6 +1269,8 @@ fn snapshot(e: &Engine) -> PlayerState {
         queue_pos: e.queue.pos.map(|p| p as u32),
         queue_len: e.queue.items.len() as u32,
         wave: matches!(e.queue.kind, engine::QueueKind::Wave { .. } | engine::QueueKind::OfflineWave),
+        repeat_one: e.repeat_one,
+        shuffle: e.shuffle,
         wave_seeds: match e.queue.kind {
             engine::QueueKind::Wave { .. } => e.wave.active_seeds.clone().unwrap_or_default(),
             _ => Vec::new(),

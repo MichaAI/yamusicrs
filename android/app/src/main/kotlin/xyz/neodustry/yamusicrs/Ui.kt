@@ -1301,6 +1301,10 @@ private fun Stage(
     val curItems by rememberUpdatedState(items)
     val curPages by rememberUpdatedState(pages)
     val swipe = remember { SwipeState() }
+    // Выбор повтора и шаффла: свайп вверх + пауза (см. ModePick).
+    val pick = remember { ModePick() }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val pickHalf = with(density) { (PICK_ZONE / 2).toPx() }
     // Порог — 15% ширины: свайпы лёгкие.
     val fling = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.15f)
     // Трек сменился не свайпом (кнопка, конец трека) — карусель догоняет. Пока палец
@@ -1342,6 +1346,8 @@ private fun Stage(
                         var axis = 0
                         var total = Offset.Zero
                         var closed = false
+                        var holdJob: kotlinx.coroutines.Job? = null
+                        var lastPos = down.position
                         var start = pager.currentPage
                         while (true) {
                             val ev = awaitPointerEvent()
@@ -1368,7 +1374,30 @@ private fun Stage(
                                 }
                                 2 -> {
                                     ch.consume()
-                                    if (!closed) {
+                                    lastPos = ch.position
+                                    if (pick.open) {
+                                        // Плашка открыта: вбок — выбор, отпустили — применилось.
+                                        val dx = ch.position.x - pick.anchor.x
+                                        val sel = when {
+                                            dx < -pickHalf -> -1
+                                            dx > pickHalf -> 1
+                                            else -> 0
+                                        }
+                                        if (sel != pick.sel) {
+                                            pick.sel = sel
+                                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                                        }
+                                    } else if (total.y < 0f) {
+                                        // Вверх и палец замер на четверть секунды — всплывает выбор режимов.
+                                        holdJob?.cancel()
+                                        holdJob = scope.launch {
+                                            kotlinx.coroutines.delay(260)
+                                            pick.anchor = lastPos
+                                            pick.sel = 0
+                                            pick.open = true
+                                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                        }
+                                    } else if (!closed) {
                                         // Экран почти не едет за пальцем — сразу сворачивается в пилюлю.
                                         scope.launch { dy.snapTo((total.y * 0.35f).coerceAtLeast(0f)) }
                                         if (total.y > dismiss) {
@@ -1378,6 +1407,16 @@ private fun Stage(
                                     }
                                 }
                             }
+                        }
+                        holdJob?.cancel()
+                        if (pick.open) {
+                            when (pick.sel) {
+                                -1 -> app.core.toggleRepeat()
+                                1 -> app.core.toggleShuffle()
+                            }
+                            pick.open = false
+                            pick.sel = 0
+                            return@awaitEachGesture
                         }
                         val v = vt.calculateVelocity()
                         when {
@@ -1467,6 +1506,21 @@ private fun Stage(
                         }
                     }
                 }
+            }
+            // Плашка выбора повтора/шаффла над пальцем; центр — там, где палец остановился.
+            val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp
+            AnimatedVisibility(
+                pick.open,
+                Modifier.offset {
+                    val w = (PICK_ZONE * 3 + 12.dp).toPx()
+                    val x = (pick.anchor.x - w / 2).coerceIn(8.dp.toPx(), (screenW.toPx() - w - 8.dp.toPx()).coerceAtLeast(8.dp.toPx()))
+                    val y = (pick.anchor.y - 76.dp.toPx() - 72.dp.toPx()).coerceAtLeast(48.dp.toPx())
+                    IntOffset(x.roundToInt(), y.roundToInt())
+                },
+                enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.85f),
+                exit = fadeOut(tween(100)),
+            ) {
+                ModePicker(s.repeatOne, s.shuffle, pick.sel)
             }
         }
     }
