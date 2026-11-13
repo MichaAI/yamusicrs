@@ -44,15 +44,19 @@ class RevealShots {
                 // Рамка шириной с экран — видно, дошёл ли круг до края.
                 Box(Modifier.fillMaxWidth().height(side + small / 2).border(1.dp, Color.LightGray))
                 Box(Modifier.size(side, side + small / 2).align(Alignment.TopCenter)) {
-                    // Старая: фото в квадрате со скруглением.
-                    Box(Modifier.size(side).clip(RoundedCornerShape(48.dp)).background(Color(0xFF9FA8DA)))
+                    // Старая: фото в квадрате со скруглением (снаружи круга).
+                    Box(
+                        Modifier.matchParentSize().circleReveal({ f }, { true }, smallPx, if (wide) full else null, inverse = true),
+                        contentAlignment = Alignment.TopCenter,
+                    ) { Box(Modifier.size(side).clip(RoundedCornerShape(48.dp)).background(Color(0xFF9FA8DA))) }
                     Box(
                         Modifier.matchParentSize().circleReveal({ f }, { true }, smallPx, if (wide) full else null),
                         contentAlignment = Alignment.TopCenter,
                     ) {
                         if (wide) {
                             // Новая: вырезка на всю ширину экрана.
-                            Box(Modifier.requiredSize(full, side).background(Color(0xFFEF5350)))
+                            // Полупрозрачная, как вырезка с прозрачным фоном: старое сквозь неё видно быть не должно.
+                            Box(Modifier.requiredSize(full, side).background(Color(0x66EF5350)))
                         } else {
                             Box(Modifier.size(side).clip(RoundedCornerShape(48.dp)).background(Color(0xFFEF5350)))
                         }

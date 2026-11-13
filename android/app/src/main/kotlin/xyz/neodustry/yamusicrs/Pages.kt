@@ -792,17 +792,6 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
                     Spacer(Modifier.height(14.dp))
                     DownloadProgress(have, p.tracks.size)
                 }
-                // Скачать список целиком: недоступные пропускаются, идёт в фоне, итог — тостом.
-                val offline = app.state.collectAsStateWithLifecycle().value?.offline == true
-                val left = p.tracks.count { it.available && !app.isDownloaded(it.id) }
-                if (left > 0 && !offline) {
-                    Spacer(Modifier.height(12.dp))
-                    FilledTonalButton(onClick = { app.core.downloadFrom(src) }) {
-                        Icon(Ic.Download, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (have == 0) "Скачать всё" else "Докачать ($left)")
-                    }
-                }
                 Spacer(Modifier.height(16.dp))
                 Spacer(Modifier.height(12.dp))
             }
@@ -826,6 +815,15 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         val plate = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f)
+        // Скачать список целиком (или докачать недостающее): недоступные пропускаются, идёт в фоне, итог — тостом.
+        val offline = app.state.collectAsStateWithLifecycle().value?.offline == true
+        val left = p.tracks.count { it.available && !app.isDownloaded(it.id) }
+        if (left > 0 && !offline) {
+            ShapeIconButton(
+                Ic.Download, if (left == p.tracks.size) "Скачать всё" else "Докачать ($left)",
+                { app.core.downloadFrom(src) }, size = 48.dp, container = plate,
+            )
+        }
         // Альбом в коллекцию — как F в TUI. Ответ ядра не ждём: сердце сразу, откат придёт ошибкой.
         p.album?.let { a ->
             var liked by remember(a.id) { mutableStateOf(p.liked) }
@@ -1860,14 +1858,20 @@ private fun OfflineSettings(app: YaApp, s: SettingsData, back: () -> Unit) {
                 null,
                 "${tracksWord(s.libraryTracks.toInt())}, ${"%.1f".format(s.libraryGb)} ГБ; из них подобрано для офлайн-волны ${"%.1f".format(s.smartUsedGb)} ГБ",
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { confirm = true }, enabled = s.smartUsedGb > 0f) { Text("Удалить подобранное") }
-                    OutlinedButton(onClick = { confirm = false }, enabled = s.libraryTracks > 0u) { Text("Удалить всё") }
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { confirm = true }, Modifier.fillMaxWidth(), enabled = s.smartUsedGb > 0f) { Text("Удалить подобранное") }
+                    OutlinedButton(onClick = { confirm = false }, Modifier.fillMaxWidth(), enabled = s.libraryTracks > 0u) { Text("Удалить всё") }
                 }
-                // Модель, по которой офлайн-волна выбирает треки: перекачать, если сломалась или устарела.
-                OutlinedButton(onClick = { app.core.redownloadOfflineModel() }, enabled = !s.offlineMode && s.libraryTracks >= 3u) {
-                    Text("Перекачать модель офлайн-волны")
-                }
+            } }
+            Section("Модель офлайн-волны") { Group(
+                null,
+                "По ней офлайн-волна выбирает треки из скачанного. Перекачайте, если волна без сети ведёт себя странно",
+            ) {
+                FilledTonalButton(
+                    onClick = { app.core.redownloadOfflineModel() },
+                    Modifier.fillMaxWidth(),
+                    enabled = !s.offlineMode && s.libraryTracks >= 3u,
+                ) { Text("Перекачать модель") }
             } }
             Section("Что сохранять") {
                 Group(null, null) {

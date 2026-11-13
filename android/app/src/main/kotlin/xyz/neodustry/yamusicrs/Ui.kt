@@ -839,18 +839,27 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
             val small = (side * 0.34f).coerceIn(72.dp, 120.dp)
             val full = maxWidth
             Box(Modifier.size(side, side + small / 2), contentAlignment = Alignment.TopCenter) {
-                old?.let { o -> key(o.t.id) { WaveArt(app, o, side, small, full, holes, false) } }
-                // Круг растёт из обложки трека и накрывает старую картинку новой. Клип — в фазе отрисовки.
+                // Круг растёт из обложки трека: внутри него — новая картинка, снаружи — старая (шторка).
+                // Вырезка артиста полупрозрачна, поэтому старую внутри круга именно вырезаем, а не накрываем.
                 val smallPx = with(LocalDensity.current) { small.toPx() }
+                // Вырезка шире квадрата фото: если она в паре (старая или новая), круг считается по
+                // ширине экрана и доходит до края; между обычными фото — как раньше.
+                val wide = if (cur.artist?.cutout != null || old?.artist?.cutout != null) full else null
+                old?.let { o ->
+                    key(o.t.id) {
+                        Box(
+                            Modifier.matchParentSize().circleReveal({ reveal.value }, { old != null }, smallPx, wide, inverse = true),
+                            contentAlignment = Alignment.TopCenter,
+                        ) { WaveArt(app, o, side, small, full, holes, false) }
+                    }
+                }
                 Box(
                     Modifier.matchParentSize().circleReveal(
                         progress = { reveal.value },
                         // Прерванное раскрытие (трек сменился снова) не оставляет обрезанной картинки.
                         active = { old != null },
                         smallPx = smallPx,
-                        // Вырезка шире квадрата фото: если она в паре (старая или новая), круг считается по
-                        // ширине экрана и доходит до края; между обычными фото — как раньше.
-                        wideReach = if (cur.artist?.cutout != null || old?.artist?.cutout != null) full else null,
+                        wideReach = wide,
                     ),
                     contentAlignment = Alignment.TopCenter,
                 ) {
@@ -897,11 +906,18 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
  * `progress` — 0..1, `active` — идёт ли смена; `wideReach` — ширина, до края которой должен дойти круг
  * (вырезка шире квадрата), иначе по ширине самого блока. Клип — в фазе отрисовки.
  */
-internal fun Modifier.circleReveal(progress: () -> Float, active: () -> Boolean, smallPx: Float, wideReach: Dp?): Modifier =
+internal fun Modifier.circleReveal(
+    progress: () -> Float,
+    active: () -> Boolean,
+    smallPx: Float,
+    wideReach: Dp?,
+    /** `true` — слой старой картинки: рисуется снаружи круга, внутри вырезан. */
+    inverse: Boolean = false,
+): Modifier =
     drawWithContent {
         val f = progress()
         if (f >= 1f || !active()) {
-            drawContent()
+            if (!inverse) drawContent()
         } else {
             val c = Offset(size.width / 2, size.height - smallPx / 2)
             val reach = if (wideReach != null) maxOf(size.width, wideReach.toPx()) else size.width
@@ -909,7 +925,9 @@ internal fun Modifier.circleReveal(progress: () -> Float, active: () -> Boolean,
             val circle = androidx.compose.ui.graphics.Path().apply {
                 addOval(androidx.compose.ui.geometry.Rect(c, r.coerceAtLeast(smallPx / 2 * f)))
             }
-            clipPath(circle) { this@drawWithContent.drawContent() }
+            clipPath(circle, if (inverse) androidx.compose.ui.graphics.ClipOp.Difference else androidx.compose.ui.graphics.ClipOp.Intersect) {
+                this@drawWithContent.drawContent()
+            }
         }
     }
 
@@ -1429,6 +1447,8 @@ private fun Stage(
     val swipe = remember { SwipeState() }
     // Выбор повтора и шаффла: свайп вверх + пауза (см. ModePick).
     val pick = remember { ModePick() }
+    val curRepeat by rememberUpdatedState(s.repeatOne)
+    val curShuffle by rememberUpdatedState(s.shuffle)
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val pickHalf = with(density) { (PICK_ZONE / 2).toPx() }
     // Порог — 15% ширины: свайпы лёгкие.
@@ -1517,7 +1537,7 @@ private fun Stage(
                                         // Вверх и палец замер на четверть секунды — всплывает выбор режимов.
                                         holdJob?.cancel()
                                         holdJob = scope.launch {
-                                            kotlinx.coroutines.delay(260)
+                                            kotlinx.coroutines.delay(110)
                                             pick.anchor = lastPos
                                             pick.sel = 0
                                             pick.open = true
@@ -1537,8 +1557,8 @@ private fun Stage(
                         holdJob?.cancel()
                         if (pick.open) {
                             when (pick.sel) {
-                                -1 -> app.core.toggleRepeat()
-                                1 -> app.core.toggleShuffle()
+                                -1 -> app.core.setRepeatOne(!curRepeat)
+                                1 -> app.core.setShuffle(!curShuffle)
                             }
                             pick.open = false
                             pick.sel = 0
@@ -1635,18 +1655,13 @@ private fun Stage(
             }
             // Стрелка внизу: за сцену можно потянуть вверх — выбор повтора и шаффла.
             PickHint(!pick.open, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
-            // Плашка выбора повтора/шаффла над пальцем; центр — там, где палец остановился.
-            val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp
+            // Плашка выбора повтора/шаффла: закреплена внизу по центру, на месте стрелки-подсказки.
+            // Выбор — по сдвигу пальца вбок от того места, где он остановился.
             AnimatedVisibility(
                 pick.open,
-                Modifier.offset {
-                    val w = (PICK_ZONE * 3 + 12.dp).toPx()
-                    val x = (pick.anchor.x - w / 2).coerceIn(8.dp.toPx(), (screenW.toPx() - w - 8.dp.toPx()).coerceAtLeast(8.dp.toPx()))
-                    val y = (pick.anchor.y - 76.dp.toPx() - 72.dp.toPx()).coerceAtLeast(48.dp.toPx())
-                    IntOffset(x.roundToInt(), y.roundToInt())
-                },
-                enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.85f),
-                exit = fadeOut(tween(100)),
+                Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 20.dp),
+                enter = fadeIn(tween(70)) + androidx.compose.animation.slideInVertically(tween(110)) { it / 2 },
+                exit = fadeOut(tween(80)),
             ) {
                 ModePicker(s.repeatOne, s.shuffle, pick.sel)
             }

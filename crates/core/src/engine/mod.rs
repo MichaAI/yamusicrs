@@ -1768,21 +1768,6 @@ impl Engine {
         }
     }
 
-    /// Повтор текущего трека. Заранее загруженный следующий сбрасывается и готовится заново.
-    pub fn toggle_repeat(&mut self) {
-        self.repeat_one = !self.repeat_one;
-        self.player.clear_next();
-        self.next_loaded = None;
-        self.schedule_next();
-        self.toast(if self.repeat_one { "Повтор трека: вкл" } else { "Повтор трека: выкл" }.into());
-    }
-
-    /// Перемешивание: действует на списки, запущенные после переключения (как в TUI).
-    pub fn toggle_shuffle(&mut self) {
-        self.shuffle = !self.shuffle;
-        self.toast(if self.shuffle { "Перемешивание: вкл" } else { "Перемешивание: выкл" }.into());
-    }
-
     pub fn toggle_pause(&mut self) {
         // Трек ждёт связи (вход ещё идёт): «играть» значит «включи, как подключишься».
         if self.now.is_none() && self.resume_at.is_some() && self.opener().is_none() {
