@@ -779,27 +779,15 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
                 // Круг растёт из обложки трека и накрывает старую картинку новой. Клип — в фазе отрисовки.
                 val smallPx = with(LocalDensity.current) { small.toPx() }
                 Box(
-                    Modifier.matchParentSize().drawWithContent {
-                        val f = reveal.value
+                    Modifier.matchParentSize().circleReveal(
+                        progress = { reveal.value },
                         // Прерванное раскрытие (трек сменился снова) не оставляет обрезанной картинки.
-                        if (f >= 1f || old == null) {
-                            drawContent()
-                        } else {
-                            val c = Offset(size.width / 2, size.height - smallPx / 2)
-                            // Вырезка шире квадрата фото: если она в паре (старая или новая), круг считается по
-                            // ширине экрана и доходит до края; между обычными фото — как раньше.
-                            val reach = if (cur.artist?.cutout != null || old?.artist?.cutout != null) {
-                                maxOf(this.size.width, full.toPx())
-                            } else {
-                                this.size.width
-                            }
-                            val r = kotlin.math.hypot(reach.toDouble(), c.y.toDouble()).toFloat() * 1.3f * f
-                            val circle = androidx.compose.ui.graphics.Path().apply {
-                                addOval(androidx.compose.ui.geometry.Rect(c, r.coerceAtLeast(smallPx / 2 * f)))
-                            }
-                            clipPath(circle) { this@drawWithContent.drawContent() }
-                        }
-                    },
+                        active = { old != null },
+                        smallPx = smallPx,
+                        // Вырезка шире квадрата фото: если она в паре (старая или новая), круг считается по
+                        // ширине экрана и доходит до края; между обычными фото — как раньше.
+                        wideReach = if (cur.artist?.cutout != null || old?.artist?.cutout != null) full else null,
+                    ),
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     key(cur.t.id) { WaveArt(app, cur, side, small, full, holes, still) }
@@ -839,6 +827,27 @@ private fun WaveNow(app: YaApp, s: PlayerState, t: TrackItem, modifier: Modifier
         Spacer(Modifier.height(16.dp))
     }
 }
+
+/**
+ * Круг растёт из обложки трека (центр — низ блока минус полвысоты обложки) и открывает содержимое.
+ * `progress` — 0..1, `active` — идёт ли смена; `wideReach` — ширина, до края которой должен дойти круг
+ * (вырезка шире квадрата), иначе по ширине самого блока. Клип — в фазе отрисовки.
+ */
+internal fun Modifier.circleReveal(progress: () -> Float, active: () -> Boolean, smallPx: Float, wideReach: Dp?): Modifier =
+    drawWithContent {
+        val f = progress()
+        if (f >= 1f || !active()) {
+            drawContent()
+        } else {
+            val c = Offset(size.width / 2, size.height - smallPx / 2)
+            val reach = if (wideReach != null) maxOf(size.width, wideReach.toPx()) else size.width
+            val r = kotlin.math.hypot(reach.toDouble(), c.y.toDouble()).toFloat() * 1.3f * f
+            val circle = androidx.compose.ui.graphics.Path().apply {
+                addOval(androidx.compose.ui.geometry.Rect(c, r.coerceAtLeast(smallPx / 2 * f)))
+            }
+            clipPath(circle) { this@drawWithContent.drawContent() }
+        }
+    }
 
 /** Фото (или вырезка) исполнителя и обложка трека поверх его низа. `full` — ширина экрана для вырезки. */
 @Composable
