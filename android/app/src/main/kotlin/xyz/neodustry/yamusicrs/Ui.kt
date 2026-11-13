@@ -1507,6 +1507,8 @@ private fun Stage(
                     }
                 }
             }
+            // Стрелка внизу: за сцену можно потянуть вверх — выбор повтора и шаффла.
+            PickHint(!pick.open, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
             // Плашка выбора повтора/шаффла над пальцем; центр — там, где палец остановился.
             val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp
             AnimatedVisibility(

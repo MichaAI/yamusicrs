@@ -37,4 +37,16 @@ class PickerShots {
     @Test fun offCenter() = shot("1_off_center", repeat = false, shuffle = false, sel = 0)
     @Test fun repeatSelected() = shot("2_repeat_sel", repeat = false, shuffle = true, sel = -1)
     @Test fun shuffleSelectedOn() = shot("3_shuffle_sel_on", repeat = true, shuffle = true, sel = 1)
+
+    @Test
+    fun hint() {
+        rule.mainClock.autoAdvance = false
+        rule.setContent {
+            MaterialTheme {
+                Box(Modifier.background(MaterialTheme.colorScheme.background).padding(24.dp)) { PickHint(true) }
+            }
+        }
+        rule.mainClock.advanceTimeBy(1100)
+        rule.onRoot().shot("picker_4_hint")
+    }
 }

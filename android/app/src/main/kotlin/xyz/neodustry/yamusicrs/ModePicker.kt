@@ -1,7 +1,12 @@
 package xyz.neodustry.yamusicrs
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -47,6 +52,31 @@ class ModePick {
 
     /** Где палец остановился и открылась плашка (координаты сцены). */
     var anchor by mutableStateOf(Offset.Zero)
+}
+
+/**
+ * Подсказка внизу сцены: стрелка вверх слегка покачивается — за неё можно потянуть. Пока
+ * плашка открыта (или идёт жест), прячется.
+ */
+@Composable
+fun PickHint(visible: Boolean, modifier: Modifier = Modifier) {
+    val a by animateFloatAsState(if (visible) 1f else 0f, tween(200), label = "hintA")
+    val bob by rememberInfiniteTransition(label = "hint").animateFloat(
+        0f, 1f,
+        infiniteRepeatable(tween(1100, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "hintBob",
+    )
+    Icon(
+        Ic.Down, "Потяните вверх: повтор и шаффл",
+        modifier
+            .size(28.dp)
+            .graphicsLayer {
+                rotationZ = 180f
+                translationY = -bob * 6.dp.toPx()
+                alpha = a * (0.35f + 0.25f * bob)
+            },
+        tint = MaterialTheme.colorScheme.onSurface,
+    )
 }
 
 /** Ширина одной зоны плашки; граница между зонами — на полшага от центра. */
