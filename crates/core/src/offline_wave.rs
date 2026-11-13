@@ -96,9 +96,11 @@ impl Session {
         dir: &Path,
         available: &[i32],
         context: &[(i32, Option<i32>)],
+        seeds: &[String],
     ) -> Result<(Self, Vec<i32>), VmError> {
         let mut vm = Vm::new(store.program.clone(), load_state(dir), 0)?;
-        let s = vm.start_wave(&store.server_data, context, &["user:onyourwave".into()], available)?;
+        // Как в официальном клиенте: одна программа на библиотеку, вид волны — только её сиды.
+        let s = vm.start_wave(&store.server_data, context, seeds, available)?;
         let mut first: Vec<i32> = Vec::new();
         for t in s.tracks {
             if t > 0 && available.contains(&t) && !first.contains(&t) {

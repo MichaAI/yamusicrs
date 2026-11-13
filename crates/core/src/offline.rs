@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{Playlist, Track};
+use crate::api::{Playlist, Track, WheelItem};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,6 +18,8 @@ pub struct Snapshot {
     pub playlist_tracks: HashMap<String, (u32, Vec<Track>)>,
     /// Метаданные скачанных треков, которых нет ни в лайках, ни в плейлистах (для офлайн-волны).
     pub library_tracks: HashMap<String, Track>,
+    /// Последнее колесо пресетов волны: офлайн-волна запускается и по ним (сиды идут в ту же программу).
+    pub wheel: Vec<WheelItem>,
 }
 
 pub fn key(pl: &Playlist) -> String {

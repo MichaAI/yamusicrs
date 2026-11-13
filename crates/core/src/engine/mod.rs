@@ -615,6 +615,9 @@ impl Engine {
                 Ok(items) => {
                     // Курсор — на «Назад к привычному» (обычная Моя волна), как на вебе.
                     let home = items.iter().position(|i| i.seeds() == [MY_WAVE]).unwrap_or(0);
+                    // В снимок: без сети пресеты остаются, офлайн-волна запустится по их сидам.
+                    self.snapshot.wheel = items.clone();
+                    self.snapshot.save(self.snapshot_path.clone());
                     self.wave.items = Loadable::Ready(items);
                     self.emit(Effect::Wheel { home });
                 }
@@ -1427,6 +1430,11 @@ impl Engine {
 
     /// Моя волна без сети: TinyMl выбирает из скачанного.
     pub fn start_offline_wave(&mut self) {
+        self.start_offline_wave_with(vec![MY_WAVE.into()], "Моя волна · офлайн".into());
+    }
+
+    /// Волна без сети по сидам пресета: та же программа TinyMl, сиды — вид волны (`title` — название очереди).
+    pub fn start_offline_wave_with(&mut self, seeds: Vec<String>, title: String) {
         let Some(store) = self.owave_store.as_ref() else {
             self.toast("Офлайн-волна ещё не готова: программа скачивается, когда есть сеть".into());
             return;
@@ -1454,7 +1462,7 @@ impl Engine {
                 Some((t.id.parse().ok()?, album))
             })
             .collect();
-        match offline_wave::Session::start(store, &self.data_dir, &available, &context) {
+        match offline_wave::Session::start(store, &self.data_dir, &available, &context, &seeds) {
             Ok((session, first)) => {
                 let tracks: Vec<Track> = first.iter().filter_map(|id| pool.get(id).cloned()).collect();
                 if tracks.is_empty() {
@@ -1462,7 +1470,7 @@ impl Engine {
                     return;
                 }
                 self.owave_tracks = pool;
-                self.replace_queue(tracks, QueueKind::OfflineWave, "Моя волна · офлайн".into());
+                self.replace_queue(tracks, QueueKind::OfflineWave, title);
                 self.owave = Some(session);
                 self.play_index(0);
             }
@@ -1517,11 +1525,18 @@ impl Engine {
         self.liked = likes.iter().map(|t| t.id.clone()).collect();
         self.likes = Loadable::Ready(likes);
         self.playlists = Loadable::Ready(self.snapshot.playlists.clone());
-        self.wave.items = Loadable::Failed(if self.owave_store.is_some() {
-            "нет сети — Enter или w: офлайн-волна по скачанному".into()
+        if self.owave_store.is_some() && !self.snapshot.wheel.is_empty() {
+            let items = self.snapshot.wheel.clone();
+            let home = items.iter().position(|i| i.seeds() == [MY_WAVE]).unwrap_or(0);
+            self.wave.items = Loadable::Ready(items);
+            self.emit(Effect::Wheel { home });
         } else {
-            "нет сети, а программа офлайн-волны ещё не скачана".into()
-        });
+            self.wave.items = Loadable::Failed(if self.owave_store.is_some() {
+                "нет сети — Enter или w: офлайн-волна по скачанному".into()
+            } else {
+                "нет сети, а программа офлайн-волны ещё не скачана".into()
+            });
+        }
         // Очередь из кеша: без сети доступно только скачанное.
         if !self.queue.items.is_empty() && self.now.is_none() {
             let items = std::mem::take(&mut self.queue.items);
@@ -1907,6 +1922,11 @@ impl Engine {
     }
 
     pub fn start_wave(&mut self, seeds: Vec<String>, name: String) {
+        // Без сети пресет играет офлайн-волной по тем же сидам.
+        if self.offline {
+            self.start_offline_wave_with(seeds, format!("{name} · офлайн"));
+            return;
+        }
         if self.wave.loading {
             return;
         }
