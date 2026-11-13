@@ -275,6 +275,7 @@ enum Cmd {
     Seek(u64),
     PlayLikes(u32),
     PlayQueue(u32),
+    SwitchQueue(u32),
     ToggleLike,
     Dislike,
     Wave,
@@ -416,6 +417,11 @@ impl Core {
     /// Перейти к треку очереди `index` (по порядку из `on_queue`).
     pub fn play_queue(&self, index: u32) {
         self.send(Cmd::PlayQueue(index));
+    }
+
+    /// Листание очереди свайпом: на паузе остаётся на паузе (в отличие от `play_queue`).
+    pub fn switch_queue(&self, index: u32) {
+        self.send(Cmd::SwitchQueue(index));
     }
 
     pub fn toggle_like(&self) {
@@ -913,6 +919,11 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
         Cmd::PlayQueue(i) => {
             if (i as usize) < e.queue.items.len() {
                 e.play_index(i as usize);
+            }
+        }
+        Cmd::SwitchQueue(i) => {
+            if (i as usize) < e.queue.items.len() {
+                e.switch_index(i as usize);
             }
         }
         Cmd::ToggleLike => {

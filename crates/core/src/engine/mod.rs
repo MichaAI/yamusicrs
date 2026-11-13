@@ -1195,6 +1195,12 @@ impl Engine {
         self.play_index_at(idx, 0.0, false);
     }
 
+    /// Листание (следующий/предыдущий, свайп карусели): на паузе новый трек открывается тоже
+    /// на паузе — не стартует сам и не проходит разгон звука из тишины.
+    pub fn switch_index(&mut self, idx: usize) {
+        self.play_index_at(idx, 0.0, self.player.paused());
+    }
+
     pub fn play_index_at(&mut self, idx: usize, start: f64, paused: bool) {
         let Some(opener) = self.opener() else {
             return;
@@ -1481,6 +1487,8 @@ impl Engine {
     pub fn enter_offline(&mut self) {
         self.offline = true;
         self.screen = Screen::Main;
+        // Запуск волны, начатый до обрыва связи, ответа уже не дождётся — не держим спиннер.
+        self.wave.loading = false;
         let likes = self.offline_tracks(self.snapshot.likes.clone());
         self.liked = likes.iter().map(|t| t.id.clone()).collect();
         self.likes = Loadable::Ready(likes);
@@ -1588,7 +1596,7 @@ impl Engine {
             self.next_index(cur)
         };
         match idx {
-            Some(i) => self.play_index(i),
+            Some(i) => self.switch_index(i),
             None => {
                 if self.wave_after_list() {
                     return;
@@ -1599,7 +1607,7 @@ impl Engine {
                 } else if matches!(self.queue.kind, QueueKind::OfflineWave) {
                     self.extend_offline_wave();
                     if cur + 1 < self.queue.items.len() {
-                        self.play_index(cur + 1);
+                        self.switch_index(cur + 1);
                     }
                 }
             }
@@ -1639,7 +1647,7 @@ impl Engine {
         if let Some(p) = self.queue.pos
             && let Some(i) = (0..p).rev().find(|&i| self.playable(i))
         {
-            self.play_index(i);
+            self.switch_index(i);
         }
     }
 

@@ -1376,7 +1376,7 @@ private fun Stage(
                                         // Дальше очереди некуда: у волны это «догрузи ещё».
                                         end && p == start -> app.core.next()
                                         p != start && p != curPos && p in curItems.indices -> {
-                                            app.core.playFrom(uniffi.yamusic_android.Source.Queue, p.toUInt())
+                                            app.core.switchQueue(p.toUInt())
                                             // Догонялка не должна вернуть карусель, пока ядро не ответило.
                                             kotlinx.coroutines.withTimeoutOrNull(2000) {
                                                 snapshotFlow { curPos }.first { it == p }
