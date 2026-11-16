@@ -2587,6 +2587,8 @@ impl App {
                 KeyCode::Backspace => {
                     text.pop();
                 }
+                // Ctrl+U — стереть строку целиком (как в шелле).
+                KeyCode::Char('u' | 'г') if raw.modifiers.contains(KeyModifiers::CONTROL) => text.clear(),
                 KeyCode::Char(c) if !raw.modifiers.contains(KeyModifiers::CONTROL) => text.push(c),
                 _ => {}
             }
@@ -2893,6 +2895,16 @@ impl App {
     }
 
     pub fn on_paste(&mut self, s: String) {
+        if let Some(Popup::Input { text, action, .. }) = &mut self.popup {
+            let s = s.trim().replace('\n', " ");
+            // Путь вставляют целиком — он заменяет подставленный, а не дописывается к нему.
+            if matches!(action, InputAction::ExportDir | InputAction::Upload(_)) {
+                *text = s;
+            } else {
+                text.push_str(&s);
+            }
+            return;
+        }
         match &mut self.engine.screen {
             Screen::Login(l) => l.input.push_str(s.trim()),
             Screen::Main if self.search_editing => self.search_input.push_str(&s.replace('\n', " ")),

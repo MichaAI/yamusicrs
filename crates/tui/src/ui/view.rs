@@ -624,8 +624,8 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 Span::styled("▏", ctx.accent()),
             ]));
             lines.push(Line::raw(""));
-            lines.push(Line::styled("  Enter — готово · Esc — отмена", ctx.dim()));
-            let w = (text.width() as u16 + 8).max(44);
+            lines.push(Line::styled("  Enter — готово · Ctrl+U — стереть · Esc — отмена", ctx.dim()));
+            let w = (text.width() as u16 + 8).max(54);
             (*title, w)
         }
         crate::app::Popup::Devices { list, sel } => {
