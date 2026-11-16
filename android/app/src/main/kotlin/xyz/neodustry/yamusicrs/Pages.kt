@@ -1218,8 +1218,7 @@ fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
 @Composable
 fun UpcomingCard(app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val cs = MaterialTheme.colorScheme
-    var on by remember(u.id) { mutableStateOf(u.presaved) }
-    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val on = app.presaves.collectAsStateWithLifecycle().value.containsKey(u.id)
     Row(
         modifier.fillMaxWidth()
             .then(if (onClick != null) Modifier.bounceClick(RoundedCornerShape(28.dp), onClick = onClick) else Modifier.clip(RoundedCornerShape(28.dp)))
@@ -1245,11 +1244,7 @@ fun UpcomingCard(app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Mod
         Spacer(Modifier.width(8.dp))
         ShapeIconButton(
             if (on) Ic.BellOn else Ic.Bell, if (on) "Отменить пресейв" else "Пресейв: в коллекцию в день выхода",
-            {
-                on = !on
-                app.core.setPresave(u.id, u.title, on)
-                ReleaseAlarms.set(ctx, u, on)
-            },
+            { app.setPresave(u, !on) },
             size = 48.dp, pop = on,
             container = if (on) cs.primaryContainer else cs.surfaceContainerHighest,
             tint = if (on) cs.onPrimaryContainer else cs.onSurface,
@@ -1498,6 +1493,7 @@ private fun ArtistsGrid(app: YaApp, nav: Nav, artists: List<ArtistItem>) {
 fun ReleasesTab(app: YaApp, nav: Nav) {
     val pages by app.pages.collectAsStateWithLifecycle()
     val (_, personal) = app.playlists.collectAsStateWithLifecycle().value
+    val waiting = app.presaves.collectAsStateWithLifecycle().value.values.sortedBy { it.releaseMs ?: Long.MAX_VALUE }
     LaunchedEffect(Unit) { if (app.releasesId == null) app.releasesId = app.core.releases() }
     // Пока новинки перечитываются (потянули вниз) — на экране прежние.
     var last by remember { mutableStateOf<Page?>(null) }
@@ -1522,14 +1518,19 @@ fun ReleasesTab(app: YaApp, nav: Nav) {
                 }
             }
         }
-        (page as? Page.Albums)?.upcoming?.takeIf { it.isNotEmpty() }?.let { up ->
+        if (waiting.isNotEmpty()) {
             full { Section("Ждёте", 8.dp) }
-            up.forEach { u ->
-                full {
-                    UpcomingCard(
-                        app, u, showArtist = true, Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                        onClick = u.artistId?.let { id -> { nav.artist(id, u.artists) } },
-                    )
+            full {
+                // Ряд, как «Настроили для вас»: соседняя карточка выглядывает до края экрана.
+                val screen = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp - 32.dp
+                val w = if (waiting.size == 1) screen else screen * 0.86f
+                LazyRow(Modifier.bleed(16.dp), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(waiting, key = { it.id }) { u ->
+                        UpcomingCard(
+                            app, u, showArtist = true, Modifier.width(w).animateItem(),
+                            onClick = u.artistId?.let { id -> { nav.artist(id, u.artists) } },
+                        )
+                    }
                 }
             }
         }
@@ -1867,6 +1868,13 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                     else "Не отправляется — волна не учитывает, что вы слушаете здесь",
                     s.reportPlays,
                 ) { app.core.setReportPlays(it) }
+            }
+        }
+        Section("Пресейвы") {
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            var hour by remember { mutableIntStateOf(ReleaseAlarms.hour(ctx)) }
+            Group("Уведомление о выходе", "В день выхода в $hour:00 — релизы выходят в полночь по Москве, ночью не будим") {
+                HourSlider("В", hour) { hour = it; ReleaseAlarms.setHour(ctx, it) }
             }
         }
         Section("Экспорт треков") {

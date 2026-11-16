@@ -29,6 +29,7 @@ import uniffi.yamusic_android.PlaylistItem
 import uniffi.yamusic_android.SettingsData
 import uniffi.yamusic_android.ToastAction
 import uniffi.yamusic_android.TrackItem
+import uniffi.yamusic_android.UpcomingItem
 import uniffi.yamusic_android.WavePreset
 
 /** Сообщение поверх экрана: ошибка или то, что иначе не видно (экспорт); `action` — кнопка. */
@@ -76,6 +77,18 @@ class YaApp : Application(), CoreListener {
     /** Идёт обновление по жесту «потянуть вниз». */
     var refreshing by androidx.compose.runtime.mutableStateOf(false)
         private set
+
+    /**
+     * Пресейвы, о которых знаем: полный список из «Новинок», карточки исполнителей и свои нажатия.
+     * Отсюда «Ждёте» и колокольчики — пресейв на любой вкладке сразу виден на остальных.
+     */
+    val presaves = MutableStateFlow<Map<String, UpcomingItem>>(emptyMap())
+
+    fun setPresave(u: UpcomingItem, on: Boolean) {
+        presaves.update { if (on) it + (u.id to u.copy(presaved = true)) else it - u.id }
+        core.setPresave(u.id, u.title, on)
+        ReleaseAlarms.set(this, u, on)
+    }
 
     /** Альбомы в коллекции (вкладка «Плейлисты»). */
     var albumsId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
@@ -391,8 +404,14 @@ class YaApp : Application(), CoreListener {
         pages.update { it + (id to page) }
         // Пресейвы — в будильники уведомлений о выходе.
         when (page) {
-            is Page.Albums -> if (id == releasesId) ReleaseAlarms.sync(this, page.upcoming)
-            is Page.Artist -> page.upcoming?.let { ReleaseAlarms.set(this, it, it.presaved) }
+            is Page.Albums -> if (id == releasesId) {
+                presaves.value = page.upcoming.associateBy { it.id }
+                ReleaseAlarms.sync(this, page.upcoming)
+            }
+            is Page.Artist -> page.upcoming?.let { u ->
+                presaves.update { if (u.presaved) it + (u.id to u) else it - u.id }
+                ReleaseAlarms.set(this, u, u.presaved)
+            }
             else -> {}
         }
     }

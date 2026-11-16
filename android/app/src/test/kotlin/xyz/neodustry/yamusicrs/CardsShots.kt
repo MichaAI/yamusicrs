@@ -41,6 +41,8 @@ class CardsShots {
     @Test
     fun cards() {
         val app = Mockito.mock(YaApp::class.java)
+        val on = upcoming("2", "Я буду драться", "Сингл", true)
+        Mockito.`when`(app.presaves).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(mapOf(on.id to on)))
         rule.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) { androidx.compose.material3.Surface {
                 CompositionLocalProvider(LocalNav provides Nav(app)) {

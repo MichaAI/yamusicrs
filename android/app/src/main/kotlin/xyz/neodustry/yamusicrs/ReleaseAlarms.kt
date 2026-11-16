@@ -17,6 +17,7 @@ import java.util.Calendar
  * Уведомление в день выхода пресейвнутого релиза. На каждый — неточный будильник; сами пресейвы
  * лежат в SharedPreferences, чтобы будильники пережили перезагрузку и обновление приложения.
  * Узнаём о пресейвах из списка в «Новинках», с карточек исполнителей и по нажатию колокольчика.
+ * Час напоминания — в настройках («Пресейвы»).
  */
 object ReleaseAlarms {
     const val ACTION = "xyz.neodustry.yamusicrs.RELEASE"
@@ -26,24 +27,35 @@ object ReleaseAlarms {
     private const val STALE_MS = 2L * 24 * 3600 * 1000
 
     private fun prefs(c: Context) = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private fun settings(c: Context) = c.getSharedPreferences("release_alarm", Context.MODE_PRIVATE)
 
-    /** Релизы выходят в полночь — напоминаем в 10:00 того же дня (по местному времени), не ночью. */
-    private fun notifyAt(releaseMs: Long): Long {
+    /** В котором часу дня выхода напомнить (по местному времени). Релизы выходят в полночь — не будим. */
+    fun hour(c: Context): Int = settings(c).getInt("hour", 10)
+
+    fun setHour(c: Context, h: Int) {
+        settings(c).edit().putInt("hour", h.coerceIn(0, 23)).apply()
+        rescheduleAll(c)
+    }
+
+    private fun notifyAt(c: Context, releaseMs: Long): Long {
         val cal = Calendar.getInstance().apply {
             timeInMillis = releaseMs
-            set(Calendar.HOUR_OF_DAY, 10); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            set(Calendar.HOUR_OF_DAY, hour(c)); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
         }
         return maxOf(cal.timeInMillis, releaseMs)
     }
 
-    private fun encode(u: UpcomingItem, at: Long) = JSONObject()
-        .put("title", u.title).put("artists", u.artists).put("kind", u.kind).put("at", at).toString()
+    /** Момент выхода записи; у записей прошлой сборки было только готовое `at`. */
+    private fun releaseOf(j: JSONObject) = j.optLong("release", j.optLong("at"))
+
+    private fun encode(u: UpcomingItem, release: Long) = JSONObject()
+        .put("title", u.title).put("artists", u.artists).put("kind", u.kind).put("release", release).toString()
 
     /** Пресейв поставлен или снят (в этом приложении или где-то ещё — сервер сказал). */
     fun set(c: Context, u: UpcomingItem, on: Boolean) {
-        val at = u.releaseMs?.let(::notifyAt)
+        val release = u.releaseMs
         val e = prefs(c).edit()
-        if (on && at != null) e.putString(u.id, encode(u, at)) else e.remove(u.id)
+        if (on && release != null) e.putString(u.id, encode(u, release)) else e.remove(u.id)
         e.apply()
         schedule(c, u.id)
     }
@@ -69,7 +81,7 @@ object ReleaseAlarms {
 
     private fun schedule(c: Context, id: String) {
         val am = c.getSystemService(AlarmManager::class.java) ?: return
-        val at = prefs(c).getString(id, null)?.let { JSONObject(it).optLong("at") }
+        val at = prefs(c).getString(id, null)?.let { notifyAt(c, releaseOf(JSONObject(it))) }
         if (at == null) am.cancel(pending(c, id)) else am.set(AlarmManager.RTC_WAKEUP, at, pending(c, id))
     }
 
@@ -78,7 +90,7 @@ object ReleaseAlarms {
         val p = prefs(c)
         val j = p.getString(id, null)?.let(::JSONObject) ?: return
         p.edit().remove(id).apply()
-        if (System.currentTimeMillis() - j.optLong("at") > STALE_MS) return
+        if (System.currentTimeMillis() - notifyAt(c, releaseOf(j)) > STALE_MS) return
         val nm = c.getSystemService(NotificationManager::class.java) ?: return
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "Выход пресейвов", NotificationManager.IMPORTANCE_DEFAULT))
         val open = PendingIntent.getActivity(
