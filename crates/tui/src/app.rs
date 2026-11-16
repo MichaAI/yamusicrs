@@ -205,8 +205,8 @@ impl Setting {
             Setting::Visualizer => "Фон плеера",
             Setting::Equalizer => "Эквалайзер",
             Setting::Recheck => "Перепроверить качество скачанного",
-            Setting::ExportDir => "Куда сохранять файлы",
-            Setting::ExportAsk => "Спрашивать, куда сохранить",
+            Setting::ExportDir => "Папка экспорта",
+            Setting::ExportAsk => "Спрашивать, куда экспортировать",
         }
     }
 
@@ -233,7 +233,7 @@ impl Setting {
             Setting::Equalizer => "10 полос; пресеты: плоский, бас, вокал, яркий. Точная настройка — eq_gains в config.toml. Плоский и выключенный не трогают звук.",
             Setting::Dither => "Шум против «колец» на градиентах блоба, в ступенях 8 бит; 0 — выключен.",
             Setting::Recheck => "Сервер не дал lossless — трек помечается и не перепроверяется 30 дней. Enter снимает пометки: каждый трек хуже lossless спросит сервер заново при следующем проигрывании и, если дадут лучше, перекачается.",
-            Setting::ExportDir => "Папка для «Сохранить файлом» (клавиша S). Enter — ввести путь; пустой — по умолчанию «YandexMusic Export» рядом с библиотекой.",
+            Setting::ExportDir => "Куда экспортировать треки (клавиша S — «Сохранить файлом»). Enter — ввести путь; пустой — по умолчанию «YandexMusic Export» рядом с библиотекой.",
             Setting::ExportAsk => "На каждый трек — системное окно «Сохранить как» (xdg-desktop-portal), открывается в папке выше. Нет портала (ssh, консоль) — файл молча ляжет в эту папку.",
         }
     }
@@ -1662,7 +1662,7 @@ impl App {
             Setting::Recheck => {}
             Setting::ExportDir if dir == 0 => {
                 self.popup = Some(Popup::Input {
-                    title: " Куда сохранять файлы ",
+                    title: " Папка экспорта ",
                     text: self.setting_value(Setting::ExportDir),
                     action: InputAction::ExportDir,
                 })

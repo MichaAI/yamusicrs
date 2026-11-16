@@ -1767,14 +1767,14 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                 ) { app.core.setReportPlays(it) }
             }
         }
-        Section("Сохранение файлом") {
+        Section("Экспорт треков") {
             val mode by app.exportMode.collectAsStateWithLifecycle()
             val tree by app.exportTree.collectAsStateWithLifecycle()
             val pickFolder = androidx.activity.compose.rememberLauncherForActivityResult(
                 androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
             ) { uri -> if (uri != null) app.setExportTree(uri) }
             val modes = listOf(EXPORT_MUSIC, EXPORT_FOLDER, EXPORT_ASK)
-            Group("Куда сохранять", when (mode) {
+            Group("Куда экспортировать", when (mode) {
                 EXPORT_FOLDER -> "В папку ${app.treeLabel(tree) ?: "—"}. Нажмите «Папка» ещё раз, чтобы выбрать другую"
                 EXPORT_ASK -> "На каждый трек — системное окно «Сохранить как»"
                 else -> "В Музыка/yamusicrs — там файлы видят плееры и компьютер по USB"
