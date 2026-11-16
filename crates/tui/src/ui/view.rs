@@ -3456,6 +3456,7 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
     let keys: &[(&str, &str)] = &[
         ("1-7 / Tab", "вкладки"),
         ("↑↓ j k, PgUp PgDn, g G", "навигация"),
+        (".", "к играющему треку в списке"),
         ("Enter", "играть / открыть"),
         ("Esc, Backspace", "назад"),
         ("Space", "пауза"),

@@ -1207,6 +1207,38 @@ impl App {
         self.sel_moved_at.elapsed() > Duration::from_millis(450)
     }
 
+    /// `.` — курсор на играющий трек в открытом списке (как кнопка с обложкой на телефоне).
+    fn jump_to_playing(&mut self) {
+        let Some(id) = self.engine.now.as_ref().map(|n| n.track.id.clone()) else {
+            return self.toast("Ничего не играет".into());
+        };
+        let Some(tracks) = self.page_tracks() else {
+            return self.toast("Играющий трек ищется в списке треков: лайки, плейлист, альбом, очередь".into());
+        };
+        // В очереди один трек может стоять дважды — там точная позиция.
+        let at = match self.page().view {
+            View::Queue => self.engine.queue.pos.filter(|&i| tracks.get(i).is_some_and(|t| t.id == id)),
+            _ => None,
+        }
+        .or_else(|| tracks.iter().position(|t| t.id == id));
+        let Some(at) = at else {
+            return self.toast("Играющего трека в этом списке нет".into());
+        };
+        let row = match &self.page().filtered {
+            Some(f) => match f.iter().position(|&i| i == at) {
+                Some(r) => r,
+                None => return self.toast("Играющий трек скрыт фильтром".into()),
+            },
+            None => at,
+        };
+        self.sel_moved_at = Instant::now();
+        // Не к самому краю окна: сверху видно треть списка до него (прокрутка анимируется сама).
+        let h = self.areas.list.height as usize;
+        let p = self.page_mut();
+        p.sel = row;
+        p.offset = row.saturating_sub(h / 3);
+    }
+
     fn move_sel(&mut self, delta: isize) {
         self.sel_moved_at = Instant::now();
         let len = self.page_len();
@@ -3106,6 +3138,7 @@ impl App {
             KeyCode::PageDown => self.move_sel(page_rows),
             KeyCode::Home | KeyCode::Char('g') => self.move_sel(-(1 << 20)),
             KeyCode::End | KeyCode::Char('G') => self.move_sel(1 << 20),
+            KeyCode::Char('.') => self.jump_to_playing(),
             // Музыка на другом устройстве (Ynison) — клавиши плеера управляют им.
             KeyCode::Left | KeyCode::Right if self.engine.yn_remote().is_some() => {
                 let s = self.engine.yn_remote().map(|r| r.2);
