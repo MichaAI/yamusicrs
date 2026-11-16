@@ -61,8 +61,8 @@ class CardsShots {
                         Section("Ждёте", 20.dp)
                         for (who in listOf(app, flat)) {
                             Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                UpcomingCard(who, upcoming("1", "если я буду в средневековье у меня будет огромный меч", "Сингл", false), showArtist = true, Modifier.width(339.dp), titleLines = 3)
-                                UpcomingCard(who, on, showArtist = true, Modifier.width(339.dp), titleLines = 3)
+                                UpcomingCard(who, upcoming("1", "если я буду в средневековье у меня будет огромный меч", "Сингл", false), showArtist = true, Modifier.width(371.dp), titleLines = 3)
+                                UpcomingCard(who, on, showArtist = true, Modifier.width(371.dp), titleLines = 3)
                             }
                         }
                         Section("Настроили для вас", 20.dp)

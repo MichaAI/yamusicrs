@@ -1227,18 +1227,26 @@ fun UpcomingCard(
     // Без отступа обложка — во всю высоту, её левые углы скругляет сама карточка.
     val flush = app.flushCovers()
     Row(
-        // Высота постоянная (обложка 112 + отступы 12): строки сведений по одной, карточки в ряду равны.
-        modifier.fillMaxWidth().height(136.dp)
+        // Высота постоянная (обложка 128 + отступы 12): строки сведений по одной, карточки в ряду равны.
+        modifier.fillMaxWidth().height(152.dp)
             .then(if (onClick != null) Modifier.bounceClick(RoundedCornerShape(28.dp), onClick = onClick) else Modifier.clip(RoundedCornerShape(28.dp)))
             .background(cs.surfaceContainerHigh)
             .padding(if (flush) PaddingValues(end = 12.dp) else PaddingValues(12.dp)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Art(
-            app, u.cover,
-            if (flush) Modifier.fillMaxHeight().aspectRatio(1f) else Modifier.size(112.dp),
-            corner = if (flush) 0.dp else 16.dp,
-        )
+        // Колокольчик — в углу обложки: подписям остаётся вся ширина справа.
+        Box(if (flush) Modifier.fillMaxHeight().aspectRatio(1f) else Modifier.size(128.dp)) {
+            Art(app, u.cover, Modifier.fillMaxSize(), corner = if (flush) 0.dp else 16.dp)
+            ShapeIconButton(
+                if (on) Ic.BellOn else Ic.Bell, if (on) "Отменить пресейв" else "Пресейв: в коллекцию в день выхода",
+                { app.setPresave(u, !on) },
+                // Круглая кнопка в 6dp от края обложки.
+                Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                size = 40.dp, pop = on,
+                container = if (on) cs.primaryContainer else cs.surfaceContainerHighest.copy(alpha = 0.92f),
+                tint = if (on) cs.onPrimaryContainer else cs.onSurface,
+            )
+        }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(u.kind, style = MaterialTheme.typography.labelMedium, color = cs.primary)
@@ -1254,14 +1262,6 @@ fun UpcomingCard(
                 Text(u.due, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        Spacer(Modifier.width(8.dp))
-        ShapeIconButton(
-            if (on) Ic.BellOn else Ic.Bell, if (on) "Отменить пресейв" else "Пресейв: в коллекцию в день выхода",
-            { app.setPresave(u, !on) },
-            size = 44.dp, pop = on,
-            container = if (on) cs.primaryContainer else cs.surfaceContainerHighest,
-            tint = if (on) cs.onPrimaryContainer else cs.onSurface,
-        )
     }
 }
 
