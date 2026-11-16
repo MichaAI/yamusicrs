@@ -1,0 +1,16 @@
+# Шаблон: @-переменные подставляет nix/arch/default.nix; бинарь уже собран nix'ом.
+pkgname=yamusicrs
+pkgver=@version@
+pkgrel=1
+pkgdesc='TUI-клиент Яндекс Музыки: lossless, PipeWire, kitty-обложки'
+arch=('@carch@')
+url='https://github.com/MichaAI/yamusicrs'
+license=('Apache-2.0')
+depends=('glibc>=@glibc@' 'gcc-libs' 'pipewire')
+optdepends=('vulkan-icd-loader: рендеринг на GPU через Vulkan'
+            'libglvnd: запасной рендеринг через OpenGL')
+options=('!strip' '!debug' '!lto')
+
+package() {
+  cp -a "$startdir/root/." "$pkgdir/"
+}

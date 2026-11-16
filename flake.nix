@@ -33,6 +33,8 @@
         packages = {
           default = yamusicrs;
           inherit yamusicrs;
+          # Пакет для Arch: `nix build .#arch` → result/yamusicrs-*.pkg.tar.zst, ставить `pacman -U`.
+          arch = pkgs.callPackage ./nix/arch { inherit yamusicrs; };
         };
 
         apps.default = flake-utils.lib.mkApp { drv = yamusicrs; };

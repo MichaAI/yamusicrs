@@ -49,6 +49,18 @@ nix profile install .             # в профиль: бинарь, ярлык 
 `nixosModules.default` и `homeManagerModules.default` — подробности и примеры
 конфигурации в [nix/README.md](nix/README.md).
 
+### Arch Linux (пакет собирается тоже Nix'ом)
+
+```sh
+nix build .#arch                  # → result/yamusicrs-<версия>-x86_64.pkg.tar.zst
+sudo pacman -U result/yamusicrs-*.pkg.tar.zst
+```
+
+Бинарь тот же, что в Nix-пакете, но с интерпретатором `/lib64` и без путей в
+`/nix/store`; упаковывает настоящий `makepkg` из nixpkgs. glibc у бинаря свежий
+(из nixpkgs), поэтому `depends` требует glibc не ниже той, с которой он собран, —
+на актуальном Arch это не мешает.
+
 ### Без Nix
 
 Зависимости: Rust (edition 2024, свежий stable), `pkg-config`, `clang`/libclang
