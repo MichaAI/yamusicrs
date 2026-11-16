@@ -149,6 +149,8 @@ pub enum Entity {
     AlbumLike,
     ArtistLike,
     ArtistDislike,
+    /// Пресейв будущего релиза.
+    Presave,
 }
 
 pub enum Loadable<T> {
@@ -293,6 +295,8 @@ pub struct Engine {
     pub liked_albums: HashSet<String>,
     pub liked_artists: HashSet<String>,
     pub disliked_artists: HashSet<String>,
+    /// Пресейвнутые будущие релизы — что известно из открытых карточек и списка пресейвов.
+    pub presaved: HashSet<String>,
     pub likes: Loadable<Vec<Track>>,
     pub playlists: Loadable<Vec<Playlist>>,
     pub queue: Queue,
@@ -417,6 +421,7 @@ impl Engine {
             liked_albums: HashSet::new(),
             liked_artists: HashSet::new(),
             disliked_artists: HashSet::new(),
+            presaved: HashSet::new(),
             likes: Loadable::Loading,
             playlists: Loadable::Loading,
             queue: Queue {
@@ -2171,6 +2176,7 @@ impl Engine {
             Entity::AlbumLike => &mut self.liked_albums,
             Entity::ArtistLike => &mut self.liked_artists,
             Entity::ArtistDislike => &mut self.disliked_artists,
+            Entity::Presave => &mut self.presaved,
         }
     }
 
@@ -2183,6 +2189,14 @@ impl Engine {
             return self.toast_err("У этого исполнителя нет страницы на Яндекс Музыке".into());
         }
         let on = !self.entity_set(what).contains(&id);
+        self.set_entity(what, id, name, on);
+    }
+
+    /// Как `toggle_entity`, но в заданное состояние.
+    pub fn set_entity(&mut self, what: Entity, id: String, name: String, on: bool) {
+        if self.client.is_none() {
+            return self.toast_err("Без сети не сохранить".into());
+        }
         self.apply_entity(what, &id, on);
         let msg = match (what, on) {
             (Entity::AlbumLike, true) => format!("\u{f004} Альбом в коллекции: {name}"),
@@ -2191,6 +2205,8 @@ impl Engine {
             (Entity::ArtistLike, false) => format!("\u{f08a} Исполнитель убран из коллекции: {name}"),
             (Entity::ArtistDislike, true) => format!("⊘ Не рекомендовать: {name} (D — вернуть)"),
             (Entity::ArtistDislike, false) => format!("Снова рекомендовать: {name}"),
+            (Entity::Presave, true) => format!("\u{f004} В день выхода добавится в коллекцию: {name}"),
+            (Entity::Presave, false) => format!("Пресейв отменён: {name}"),
         };
         self.notice(msg);
         self.spawn(move |c, tx| async move {
@@ -2198,6 +2214,7 @@ impl Engine {
                 Entity::AlbumLike => c.set_album_like(&id, on).await,
                 Entity::ArtistLike => c.set_artist_like(&id, on).await,
                 Entity::ArtistDislike => c.set_artist_dislike(&id, on).await,
+                Entity::Presave => c.set_presave(&id, on).await,
             };
             if let Err(e) = r {
                 let _ = tx.send(Msg::EntityFailed {
@@ -2210,6 +2227,11 @@ impl Engine {
         });
     }
 
+    /// Сервер сообщил, пресейвнут ли релиз (карточка исполнителя, список пресейвов).
+    pub fn note_presave(&mut self, u: &api::Upcoming) {
+        self.apply_entity(Entity::Presave, &u.id, u.presaved);
+    }
+
     pub fn apply_entity(&mut self, what: Entity, id: &str, on: bool) {
         if on {
             self.entity_set(what).insert(id.to_string());
@@ -2217,7 +2239,7 @@ impl Engine {
             match what {
                 Entity::ArtistLike => self.disliked_artists.remove(id),
                 Entity::ArtistDislike => self.liked_artists.remove(id),
-                Entity::AlbumLike => false,
+                Entity::AlbumLike | Entity::Presave => false,
             };
         } else {
             self.entity_set(what).remove(id);

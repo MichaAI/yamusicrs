@@ -1018,6 +1018,11 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                             .unwrap_or_default();
                         RowKind::Other(format!("♪ {when} · {}{title}", place.join(", ")), price)
                     }
+                    ArtistRow::Upcoming(u) => {
+                        let mark = if app.engine.presaved.contains(&u.id) { "✓ пресейв · " } else { "Enter — пресейв · " };
+                        let when = u.when_label().unwrap_or_default();
+                        RowKind::Other(format!("◷ {}", u.title), format!("{mark}{} · {when}", u.kind_label().to_lowercase()))
+                    }
                     ArtistRow::Album(a) => {
                         // У чужих релизов (сборники, фиты) показываем, чьи они.
                         let whose = if a.artists.iter().any(|x| x.id == me) {

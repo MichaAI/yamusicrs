@@ -1472,6 +1472,10 @@ impl App {
                         let a = (*a).clone();
                         self.open_artist(a);
                     }
+                    Some(ArtistRow::Upcoming(u)) => {
+                        let (id, title) = (u.id.clone(), u.title.clone());
+                        self.engine.toggle_entity(Entity::Presave, id, title);
+                    }
                     Some(ArtistRow::Wave(id)) => {
                         let (seed, name) = (format!("artist:{id}"), format!("Волна: {name}"));
                         self.set_tab(Tab::Wave);
@@ -1922,6 +1926,7 @@ impl App {
                 match brief.ready().and_then(|b| artist_rows(b).get(sel).map(|r| match r {
                     ArtistRow::Album(a) => Some((Entity::AlbumLike, a.id.clone(), a.title.clone())),
                     ArtistRow::Artist(a) => Some((Entity::ArtistLike, a.id.clone(), a.name.clone())),
+                    ArtistRow::Upcoming(u) => Some((Entity::Presave, u.id.clone(), u.title.clone())),
                     _ => None,
                 })) {
                     Some(Some(t)) => Some(t),
@@ -2167,6 +2172,9 @@ impl App {
                             .as_ref()
                             .ok()
                             .and_then(|b| b.artist.as_ref()?.cover_uri().map(str::to_owned));
+                        if let Some(u) = result.as_ref().ok().and_then(|b| b.upcoming_album.as_ref()) {
+                            self.engine.note_presave(u);
+                        }
                         *brief = match result {
                             Ok(b) => Loadable::Ready(b),
                             Err(e) => Loadable::Failed(e),
@@ -3463,6 +3471,8 @@ pub enum ArtistRow<'a> {
     /// Трек секции: вся секция и номер в ней (Enter играет секцию с этого места).
     Track(&'a [Track], usize),
     Concert(&'a api::Concert),
+    /// Анонсированный релиз: Enter или F — пресейв.
+    Upcoming(&'a api::Upcoming),
     Album(&'a api::Album),
     Artist(&'a api::Artist),
 }
@@ -3471,6 +3481,10 @@ pub fn artist_rows(b: &ArtistBrief) -> Vec<ArtistRow<'_>> {
     let mut v = Vec::new();
     if let Some(a) = b.artist.as_ref().filter(|a| !a.id.is_empty()) {
         v.push(ArtistRow::Wave(&a.id));
+    }
+    if let Some(u) = &b.upcoming_album {
+        v.push(ArtistRow::Header("Скоро выйдет"));
+        v.push(ArtistRow::Upcoming(u));
     }
     if !b.familiar.is_empty() {
         v.push(ArtistRow::Header("Знакомое вам"));

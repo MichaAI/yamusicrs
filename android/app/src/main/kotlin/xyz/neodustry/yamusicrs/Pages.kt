@@ -82,6 +82,7 @@ import uniffi.yamusic_android.PlaylistItem
 import uniffi.yamusic_android.SettingsData
 import uniffi.yamusic_android.Source
 import uniffi.yamusic_android.TrackItem
+import uniffi.yamusic_android.UpcomingItem
 
 // ── навигация ────────────────────────────────────────────────────────────────
 
@@ -788,7 +789,7 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
                     Text(p.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
                 val have = p.tracks.count { app.isDownloaded(it.id) }
-                if (p.playlist && have > 0) {
+                if (have > 0) {
                     Spacer(Modifier.height(14.dp))
                     DownloadProgress(have, p.tracks.size)
                 }
@@ -1010,6 +1011,12 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source, share:
                 }
             }
         }
+        p.upcoming?.let { u ->
+            item(contentType = "upcoming") {
+                Section("Скоро выйдет", 20.dp)
+                UpcomingCard(app, u, showArtist = false, Modifier.padding(horizontal = 20.dp))
+            }
+        }
         // Популярное, своё и услышанное в волне — отдельными вкладками, каждая со всем списком.
         val tabs = artistTabs(p)
         if (tabs.isNotEmpty()) {
@@ -1172,12 +1179,49 @@ fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
     ) {
         Art(app, a.cover, (if (width != null) Modifier.size(width) else Modifier.fillMaxWidth().aspectRatio(1f)).then(cover), corner = 20.dp)
         Spacer(Modifier.height(8.dp))
-        Text(a.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        // Место под две строки всегда: иначе ряд (LazyRow меряет только видимые) прыгает по высоте,
+        // когда в кадр въезжает или уходит длинное название.
+        Text(a.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Text(a.artists, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(a.kind, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             a.year?.let { Text(it.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
+    }
+}
+
+/**
+ * Анонсированный релиз: страницы у него до выхода нет, поэтому карточка не открывается, а несёт
+ * пресейв — в день выхода релиз сам ляжет в коллекцию. Концентрично: обложка 16 + отступ 12 = 28.
+ */
+@Composable
+fun UpcomingCard(app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Modifier = Modifier) {
+    val cs = MaterialTheme.colorScheme
+    var on by remember(u.id) { mutableStateOf(u.presaved) }
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.surfaceContainerHigh).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Art(app, u.cover, Modifier.size(84.dp), corner = 16.dp)
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(u.kind, style = MaterialTheme.typography.labelMedium, color = cs.primary)
+            Text(u.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (showArtist && u.artists.isNotEmpty()) {
+                Text(u.artists, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (u.due.isNotEmpty()) {
+                Text(u.due, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        ShapeIconButton(
+            if (on) Ic.BellOn else Ic.Bell, if (on) "Отменить пресейв" else "Пресейв: в коллекцию в день выхода",
+            { on = !on; app.core.setPresave(u.id, u.title, on) },
+            size = 48.dp, pop = on,
+            container = if (on) cs.primaryContainer else cs.surfaceContainerHighest,
+            tint = if (on) cs.onPrimaryContainer else cs.onSurface,
+        )
     }
 }
 
@@ -1196,7 +1240,7 @@ fun PlaylistCard(app: YaApp, p: PlaylistItem, width: Dp?, onClick: () -> Unit) {
             if (p.cover == null) Icon(Ic.Queue, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(40.dp))
         }
         Spacer(Modifier.height(8.dp))
-        Text(p.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(p.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Text(
             p.description ?: p.owner,
             style = MaterialTheme.typography.bodySmall,
@@ -1442,6 +1486,10 @@ fun ReleasesTab(app: YaApp, nav: Nav) {
                     items(personal, key = { it.uid + ":" + it.kind }) { pl -> PlaylistCard(app, pl, 148.dp) { nav.playlist(pl) } }
                 }
             }
+        }
+        (page as? Page.Albums)?.upcoming?.takeIf { it.isNotEmpty() }?.let { up ->
+            full { Section("Ждёте", 8.dp) }
+            up.forEach { u -> full { UpcomingCard(app, u, showArtist = true, Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) } }
         }
         full { Section("Новые релизы", 8.dp) }
         when (page) {

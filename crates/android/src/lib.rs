@@ -348,6 +348,8 @@ enum Cmd {
     NewPlaylist(Source, u32, String),
     ArtistLike(String, String, bool),
     AlbumLike(String, String, bool),
+    /// Пресейв будущего релиза (id, название, вкл).
+    Presave(String, String, bool),
     /// Экспорт трека источника в формате (`flac`, `mp3`, `aac`, `small`, `wav`).
     Export(Source, u32, String),
     Shutdown,
@@ -748,6 +750,11 @@ impl Core {
     /// Альбом в коллекцию или из неё.
     pub fn set_album_like(&self, id: String, name: String, on: bool) {
         self.send(Cmd::AlbumLike(id, name, on));
+    }
+
+    /// Пресейв: будущий релиз сам ляжет в коллекцию в день выхода.
+    pub fn set_presave(&self, id: String, name: String, on: bool) {
+        self.send(Cmd::Presave(id, name, on));
     }
 
     /// «Вы недавно слушали» — страница треков.
@@ -1299,6 +1306,7 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
                 e.toggle_entity(engine::Entity::AlbumLike, id, name);
             }
         }
+        Cmd::Presave(id, name, on) => e.set_entity(engine::Entity::Presave, id, name, on),
         Cmd::Export(..) => {}
         Cmd::Shutdown => {}
     }

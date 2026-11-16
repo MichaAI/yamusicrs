@@ -45,6 +45,36 @@ impl From<&Album> for AlbumItem {
     }
 }
 
+/// Анонсированный релиз: страницы у него до выхода нет, только пресейв.
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct UpcomingItem {
+    pub id: String,
+    pub title: String,
+    pub artists: String,
+    /// «Сингл», «Альбом»…
+    pub kind: String,
+    /// «Через 3 дня, 20 ноября».
+    pub due: String,
+    pub cover: Option<String>,
+    pub presaved: bool,
+    pub explicit: bool,
+}
+
+impl From<&api::Upcoming> for UpcomingItem {
+    fn from(u: &api::Upcoming) -> Self {
+        Self {
+            id: u.id.clone(),
+            title: u.title.clone(),
+            artists: u.artist_names(),
+            kind: u.kind_label().into(),
+            due: u.when_label().unwrap_or_default(),
+            cover: u.cover_uri.as_deref().map(|c| api::cover_url(c, 400)),
+            presaved: u.presaved,
+            explicit: u.content_warning.as_deref() == Some("explicit"),
+        }
+    }
+}
+
 #[derive(uniffi::Record, Clone, PartialEq, Debug)]
 pub struct ArtistItem {
     pub id: String,
@@ -124,6 +154,8 @@ pub enum Page {
     Albums {
         title: String,
         albums: Vec<AlbumItem>,
+        /// Ожидаемые релизы (в «Новинках» — пресейвы пользователя).
+        upcoming: Vec<UpcomingItem>,
     },
     /// Список исполнителей (любимые).
     Artists {
@@ -147,6 +179,8 @@ pub enum Page {
         albums: Vec<AlbumItem>,
         also: Vec<AlbumItem>,
         similar: Vec<ArtistItem>,
+        /// Анонсированный релиз исполнителя.
+        upcoming: Option<UpcomingItem>,
     },
     Failed {
         error: String,
@@ -190,7 +224,7 @@ pub enum Loaded {
         seed: Option<String>,
     },
     Search(String, SearchResult),
-    Albums(String, Vec<Album>),
+    Albums(String, Vec<Album>, Vec<api::Upcoming>),
     Artists(String, Vec<Artist>),
     Artist(String, Box<ArtistBrief>),
 }
@@ -266,9 +300,10 @@ impl Pages {
                         .unwrap_or_default(),
                 }
             }
-            Loaded::Albums(title, v) => Page::Albums {
+            Loaded::Albums(title, v, up) => Page::Albums {
                 title,
                 albums: v.iter().map(AlbumItem::from).collect(),
+                upcoming: up.iter().map(UpcomingItem::from).collect(),
             },
             Loaded::Artists(title, v) => Page::Artists {
                 title,
@@ -309,6 +344,7 @@ impl Pages {
                     albums: albums.iter().map(AlbumItem::from).collect(),
                     also: b.also_albums.iter().map(AlbumItem::from).collect(),
                     similar: b.similar_artists.iter().map(ArtistItem::from).collect(),
+                    upcoming: b.upcoming_album.as_ref().map(UpcomingItem::from),
                 }
             }
         }
@@ -365,6 +401,7 @@ fn offline_artist(e: &Engine, aid: &str) -> Result<Loaded, String> {
         collection: e.offline_tracks(ts),
         wave: Vec::new(),
         concerts: Vec::new(),
+        upcoming_album: None,
     };
     Ok(Loaded::Artist(name, Box::new(brief)))
 }
@@ -492,7 +529,15 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
             })
         }
         Req::LikedArtists => Ok(Loaded::Artists("Исполнители".into(), c.liked_artists().await.map_err(err_str)?)),
-        Req::Releases => Ok(Loaded::Albums("Новые релизы".into(), c.new_releases().await.map_err(err_str)?)),
+        Req::Releases => {
+            // Пресейвы — дополнение: их ошибка новинки не роняет.
+            let (albums, pre) = tokio::join!(c.new_releases(), c.presaves());
+            let pre = pre.unwrap_or_else(|e| {
+                tracing::warn!("пресейвы: {e}");
+                Vec::new()
+            });
+            Ok(Loaded::Albums("Новые релизы".into(), albums.map_err(err_str)?, pre))
+        }
         Req::Chart => {
             let pl = c.chart().await.map_err(err_str)?;
             let tracks = c.playlist_tracks(&pl).await.map_err(err_str)?;

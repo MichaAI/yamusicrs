@@ -789,6 +789,24 @@ impl Client {
             .collect())
     }
 
+    /// Ожидаемые релизы, которые пользователь сохранил заранее (как «Пресейвы» мобильного клиента).
+    pub async fn presaves(&self) -> Result<Vec<Upcoming>> {
+        let q = [("includeUpcoming", "true".to_string()), ("includeReleased", "false".into())];
+        let mut p: Presaves = self.get(&format!("/users/{}/presaves", self.uid), &q).await?;
+        p.upcoming_albums.iter_mut().for_each(|u| u.presaved = true);
+        Ok(p.upcoming_albums)
+    }
+
+    /// Пресейв: в день выхода релиз сам ляжет в коллекцию (`likeAfterRelease`, как в мобильном клиенте —
+    /// там параметры POST идут в строке запроса, тело пустое).
+    pub async fn set_presave(&self, album_id: &str, on: bool) -> Result<()> {
+        let action = if on { "add" } else { "remove" };
+        let q = [("albumId", album_id.to_string()), ("likeAfterRelease", "true".into())];
+        let path = format!("/users/{}/presaves/{action}", self.uid);
+        let _: Value = self.send(self.req(reqwest::Method::POST, &path).query(&q)).await?;
+        Ok(())
+    }
+
     /// Карточка исполнителя; дискография целиком догружается вторым запросом
     /// (в `brief-info` только десяток альбомов). Её ошибка карточку не роняет.
     pub async fn artist(&self, id: &str) -> Result<ArtistBrief> {

@@ -52,6 +52,18 @@ where
         .collect())
 }
 
+/// Необязательный объект: кривой не роняет весь ответ.
+fn lenient_opt<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(raw.filter(|v| !v.is_null()).and_then(|v| {
+        serde_json::from_value(v).map_err(|e| tracing::warn!("пропускаю поле ответа: {e}")).ok()
+    }))
+}
+
 /// Превращает `avatars.yandex.net/.../%%` в полноценный URL нужного размера.
 pub fn cover_url(uri: &str, size: u32) -> String {
     let u = uri.replace("%%", &format!("{size}x{size}"));
@@ -454,6 +466,91 @@ pub struct ArtistBrief {
     pub wave: Vec<Track>,
     #[serde(skip)]
     pub concerts: Vec<Concert>,
+    /// Анонсированный, ещё не вышедший релиз (его можно «пресейвить»).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub upcoming_album: Option<Upcoming>,
+}
+
+/// Будущий релиз: из `brief-info` исполнителя (`upcomingAlbum`) и из `/users/{uid}/presaves`.
+/// Страницы у него до выхода нет — `/albums/{id}` отдаёт пустоту.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Upcoming {
+    #[serde(deserialize_with = "id_or_empty")]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// UTC, «2026-11-19T21:00:00Z» — полночь дня выхода по Москве.
+    pub release_date: Option<String>,
+    pub cover_uri: Option<String>,
+    pub content_warning: Option<String>,
+    /// В `brief-info` — `presaved`; в списке пресейвов его нет, там все сохранены.
+    #[serde(default)]
+    pub presaved: bool,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub artists: Vec<Artist>,
+}
+
+impl Upcoming {
+    pub fn artist_names(&self) -> String {
+        join_artists(&self.artists)
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind.as_deref() {
+            Some("single") => "Сингл",
+            Some("compilation") => "Сборник",
+            _ => "Альбом",
+        }
+    }
+
+    /// День выхода в местном времени.
+    fn day(&self) -> Option<chrono::NaiveDate> {
+        let d = chrono::DateTime::parse_from_rfc3339(self.release_date.as_deref()?).ok()?;
+        Some(d.with_timezone(&chrono::Local).date_naive())
+    }
+
+    /// «Через 3 дня, 20 ноября», «Завтра, 20 ноября», «20 ноября 2027».
+    pub fn when_label(&self) -> Option<String> {
+        use chrono::Datelike;
+        const MONTHS: [&str; 12] = [
+            "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря",
+        ];
+        let day = self.day()?;
+        let today = chrono::Local::now().date_naive();
+        let mut date = format!("{} {}", day.day(), MONTHS[day.month0() as usize]);
+        if day.year() != today.year() {
+            date = format!("{date} {}", day.year());
+        }
+        let n = (day - today).num_days();
+        Some(match n {
+            ..=0 => format!("Сегодня, {date}"),
+            1 => format!("Завтра, {date}"),
+            2..=30 => format!("Через {n} {}, {date}", plural(n as u64, ["день", "дня", "дней"])),
+            _ => date,
+        })
+    }
+}
+
+/// 1 день, 2 дня, 5 дней.
+fn plural(n: u64, f: [&'static str; 3]) -> &'static str {
+    match (n % 10, n % 100) {
+        (_, 11..=14) => f[2],
+        (1, _) => f[0],
+        (2..=4, _) => f[1],
+        _ => f[2],
+    }
+}
+
+/// Пресейвы пользователя.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Presaves {
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub upcoming_albums: Vec<Upcoming>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
