@@ -1538,7 +1538,15 @@ fun ReleasesTab(app: YaApp, nav: Nav) {
                 val screen = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp - 32.dp
                 // Шире, чтобы подписи не жались; следующая выглядывает на ~40dp.
                 val w = if (waiting.size == 1) screen else screen - 40.dp
-                LazyRow(Modifier.bleed(16.dp), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                // Листается с фиксацией на каждой карточке: после броска встаёт к левому краю ряда.
+                val row = androidx.compose.foundation.lazy.rememberLazyListState()
+                LazyRow(
+                    Modifier.bleed(16.dp), state = row,
+                    contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    flingBehavior = androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior(
+                        row, androidx.compose.foundation.gestures.snapping.SnapPosition.Start,
+                    ),
+                ) {
                     items(waiting, key = { it.id }) { u ->
                         UpcomingCard(
                             app, u, showArtist = true, Modifier.width(w).animateItem(), titleLines = 3,
