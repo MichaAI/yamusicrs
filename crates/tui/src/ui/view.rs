@@ -399,6 +399,7 @@ fn main_screen(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     app.areas.header = header;
     app.areas.main = main;
     app.areas.list = Rect::default();
+    app.areas.search = Rect::default();
     app.areas.lyrics = Rect::default();
 
     app.areas.cover = Rect::default();
@@ -1781,6 +1782,7 @@ fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 
 fn draw_search(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     let [input, results] = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(area);
+    app.areas.search = input;
     let border = if app.search_editing {
         ctx.p.accent
     } else {

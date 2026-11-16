@@ -595,6 +595,8 @@ pub struct Areas {
     pub lyrics: ratatui::layout::Rect,
     /// Видимая область текущего списка (для мыши).
     pub list: ratatui::layout::Rect,
+    /// Поле ввода поиска (клик — начать печатать).
+    pub search: ratatui::layout::Rect,
     pub progress: ratatui::layout::Rect,
     pub player: ratatui::layout::Rect,
     /// Вкладки в шапке: (x начала, x конца, вкладка).
@@ -2864,6 +2866,8 @@ impl App {
                     {
                         self.set_tab(Tab::ALL[i]);
                     }
+                } else if !stage && inside(self.areas.search) {
+                    self.search_editing = true;
                 } else if inside(self.areas.progress) {
                     if let Some(dur) = self.engine.now.as_ref().map(|n| n.track.duration_secs()) {
                         let frac = (m.column - self.areas.progress.x) as f64 / self.areas.progress.width.max(1) as f64;
