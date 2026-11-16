@@ -244,7 +244,8 @@ pub enum Source {
 /// Что открыть.
 pub enum Req {
     Playlist { uid: String, kind: String },
-    Album(String),
+    /// Альбом; `true` — с «Похожим».
+    Album(String, bool),
     Artist(String),
     Similar { track_id: String, title: String },
     Search(String),
@@ -543,11 +544,13 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 extra: Extra::default(),
             })
         }
-        Req::Album(id) => {
-            // «Похожее» — дополнение: его ошибка альбом не роняет.
-            let (a, similar) = tokio::join!(c.album(&id), c.album_similar(&id));
+        Req::Album(id, with_similar) => {
+            // «Похожее» — дополнение: его ошибка альбом не роняет; выключено в настройках — не спрашиваем.
+            let sim = async {
+                if with_similar { c.album_similar(&id).await.map_err(|e| tracing::warn!("похожее на альбом {id}: {e}")).ok() } else { None }
+            };
+            let (a, similar) = tokio::join!(c.album(&id), sim);
             let a = a.map_err(err_str)?;
-            let similar = similar.map_err(|e| tracing::warn!("похожее на альбом {id}: {e}")).ok();
             let tracks = a.volume_tracks();
             Ok(Loaded::Tracks {
                 title: a.full_title(),

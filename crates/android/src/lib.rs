@@ -205,6 +205,8 @@ pub struct SettingsData {
     pub offline_mode: bool,
     /// Полная дата выхода альбома в его шапке.
     pub full_release_date: bool,
+    /// «Похожее» под альбомом.
+    pub album_similar: bool,
     /// Умное скачивание треков для офлайн-волны.
     pub smart_download: bool,
     /// Его качество: `lossless`, `hq` или `nq`.
@@ -321,6 +323,7 @@ enum Cmd {
     WaveAfterList(bool),
     OfflineMode(bool),
     FullReleaseDate(bool),
+    AlbumSimilar(bool),
     SmartDownload(bool),
     SmartQuality(String),
     SmartLimit(f32),
@@ -500,7 +503,7 @@ impl Core {
     }
 
     pub fn open_album(&self, id: String) -> u64 {
-        self.open(Req::Album(id))
+        self.open(Req::Album(id, true))
     }
 
     pub fn open_artist(&self, id: String) -> u64 {
@@ -639,6 +642,10 @@ impl Core {
 
     pub fn set_full_release_date(&self, on: bool) {
         self.send(Cmd::FullReleaseDate(on));
+    }
+
+    pub fn set_album_similar(&self, on: bool) {
+        self.send(Cmd::AlbumSimilar(on));
     }
 
     pub fn set_smart_download(&self, on: bool) {
@@ -1143,6 +1150,10 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
                 e.state.save(&e.paths);
             }
             tracing::debug!("открываю страницу {id}");
+            let req = match req {
+                Req::Album(a, _) => Req::Album(a, e.cfg.album_similar),
+                r => r,
+            };
             pages::open(e, id, req, ptx);
         }
         Cmd::ClosePage(id) => {
@@ -1247,6 +1258,10 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
         Cmd::OfflineMode(on) => e.set_offline_mode(on),
         Cmd::FullReleaseDate(on) => {
             e.cfg.full_release_date = on;
+            e.cfg.save(&e.paths);
+        }
+        Cmd::AlbumSimilar(on) => {
+            e.cfg.album_similar = on;
             e.cfg.save(&e.paths);
         }
         Cmd::ClearDownloads(only_smart) => {
@@ -1428,6 +1443,7 @@ impl Publisher {
             ynison: e.cfg.ynison,
             offline_mode: e.cfg.offline_mode,
             full_release_date: e.cfg.full_release_date,
+            album_similar: e.cfg.album_similar,
             smart_download: e.cfg.smart_download,
             smart_quality: quality_str(e.cfg.smart_quality).into(),
             smart_limit_gb: e.cfg.smart_limit_gb as f32,

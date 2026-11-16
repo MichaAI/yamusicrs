@@ -1040,8 +1040,9 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source, share:
                 }
                 if (p.artist.id.isNotEmpty()) {
                     Spacer(Modifier.height(16.dp))
+                    // На странице исполнителя и так ясно, по кому волна и чей трейлер.
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Pill(Ic.Wave, "Волна по исполнителю", accent = true) {
+                        Pill(Ic.Wave, "Волна", accent = true) {
                             app.core.startWaveWith(listOf("artist:${p.artist.id}"), "Волна по «${p.artist.name}»")
                         }
                         Pill(Ic.Play, "Трейлер", accent = false) { app.core.playTrailer("artists", p.artist.id, p.artist.name) }
@@ -1304,11 +1305,11 @@ fun UpcomingCard(
 
 /** Кнопка-«пилюля»: главная — залитая, второстепенная — тихая (52 = 2 × 26, концентрично). */
 @Composable
-private fun Pill(icon: ImageVector?, text: String, accent: Boolean, onClick: () -> Unit) {
+private fun Pill(icon: ImageVector?, text: String, accent: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val (bg, fg) = if (accent) cs.primaryContainer to cs.onPrimaryContainer else cs.surfaceContainerHighest to cs.onSurface
     Row(
-        Modifier.height(52.dp).bounceClick(RoundedCornerShape(26.dp), onClick = onClick).background(bg)
+        modifier.height(52.dp).bounceClick(RoundedCornerShape(26.dp), onClick = onClick).background(bg)
             .padding(start = if (icon != null) 18.dp else 22.dp, end = 22.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1316,7 +1317,9 @@ private fun Pill(icon: ImageVector?, text: String, accent: Boolean, onClick: () 
             Icon(icon, null, tint = fg, modifier = Modifier.size(22.dp))
             Spacer(Modifier.width(10.dp))
         }
-        Text(text, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = fg)
+        // Всегда в одну строку: не влезает — многоточие, а не перенос посреди слова.
+        Text(text, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = fg,
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -2102,6 +2105,13 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                     else "Обложка в рамке карточки, со скруглёнными углами",
                     app.flushCovers(),
                 ) { app.setFlushCovers(it) }
+            }
+            Group(null, null) {
+                Toggle("«Похожее» у альбомов",
+                    if (s.albumSimilar) "Под треками альбома — похожие волны, альбомы и исполнители"
+                    else "Выключено — альбом открывается без лишнего запроса",
+                    s.albumSimilar,
+                ) { app.core.setAlbumSimilar(it) }
             }
             Group(null, null) {
                 Toggle("Полная дата выхода",
