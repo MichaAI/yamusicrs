@@ -46,6 +46,8 @@ pub struct Config {
     pub offline_mode: bool,
     /// В шапке альбома — полная дата выхода (день и месяц), а не только год.
     pub full_release_date: bool,
+    /// В котором часу дня выхода пресейва напомнить уведомлением (по местному времени).
+    pub presave_hour: u8,
     /// Умное скачивание: сервер подбирает треки для офлайн-волны, они докачиваются сами.
     pub smart_download: bool,
     /// Качество умного скачивания — отдельно от качества стрима: lossless | hq | nq.
@@ -101,6 +103,7 @@ impl Default for Config {
             wave_after_list: true,
             offline_mode: false,
             full_release_date: false,
+            presave_hour: 10,
             smart_download: false,
             smart_quality: Quality::Hq,
             smart_limit_gb: 2.0,

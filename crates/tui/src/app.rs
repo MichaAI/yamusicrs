@@ -133,6 +133,8 @@ pub enum Setting {
     SmartWindow,
     SmartWifiOnly,
     FullReleaseDate,
+    /// Час уведомления о выходе пресейва.
+    PresaveHour,
     Fps,
     Dither,
     Visualizer,
@@ -147,7 +149,7 @@ pub enum Setting {
 
 impl Setting {
     /// Порядок по смыслу: звук → сеть и устройства → вид → прочее.
-    pub const ALL: [Setting; 17] = [
+    pub const ALL: [Setting; 18] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
@@ -163,6 +165,7 @@ impl Setting {
         Setting::Fps,
         Setting::Dither,
         Setting::FullReleaseDate,
+        Setting::PresaveHour,
         Setting::ReportPlays,
         Setting::Recheck,
     ];
@@ -200,6 +203,7 @@ impl Setting {
             Setting::SmartQuality => "Качество докачки",
             Setting::SmartLimit => "Место под докачку",
             Setting::FullReleaseDate => "Полная дата выхода альбома",
+            Setting::PresaveHour => "Уведомление о выходе пресейва",
             Setting::Fps => "Кадров в секунду",
             Setting::Dither => "Дизеринг блоба",
             Setting::Visualizer => "Фон плеера",
@@ -228,6 +232,7 @@ impl Setting {
             Setting::SmartQuality => "Отдельно от качества стрима: докачка может быть экономнее.",
             Setting::SmartLimit => "Сколько места отдать подобранным трекам.",
             Setting::FullReleaseDate => "В шапке альбома — день, месяц и год выхода, а не только год.",
+            Setting::PresaveHour => "В котором часу дня выхода пресейвнутого релиза показать уведомление (по местному времени; релизы выходят в полночь по Москве). Приходит, пока yamusicrs запущен; запущен позже — придёт сразу.",
             Setting::Fps => "Частота кадров анимаций (блоб, прокрутка, перебор символов).",
             Setting::Visualizer => "Блоб — мягкие пятна цвета обложки, спектр — столбики по звучанию, оба — столбики поверх блоба.",
             Setting::Equalizer => "10 полос; пресеты: плоский, бас, вокал, яркий. Точная настройка — eq_gains в config.toml. Плоский и выключенный не трогают звук.",
@@ -505,6 +510,12 @@ pub struct App {
     pub grid_card_h: u16,
     grid_wheel: f32,
     pub grid_hits: Vec<(ratatui::layout::Rect, usize)>,
+    /// Строки «Ждёте» над сеткой новинок — для мыши: (строка, id исполнителя, имя).
+    pub wait_hits: Vec<(ratatui::layout::Rect, String, String)>,
+    /// Пресейвы, о выходе которых уже напомнили (переживает перезапуск).
+    /// None — ещё не прочитано с диска.
+    pub presave_notified: Option<std::collections::HashSet<String>>,
+    pub presave_checked: Instant,
     pub search_input: String,
     pub search_editing: bool,
     pub search: Option<Loadable<Vec<SearchItem>>>,
@@ -654,6 +665,9 @@ impl App {
             grid_card_h: 1,
             grid_wheel: 0.0,
             grid_hits: Vec::new(),
+            wait_hits: Vec::new(),
+            presave_notified: None,
+            presave_checked: Instant::now() - Duration::from_secs(3600),
             search_input: String::new(),
             search_editing: false,
             search: None,
@@ -724,13 +738,56 @@ impl App {
             return Vec::new();
         };
         let mut v: Vec<PlaylistRow> = self.engine.personal.iter().map(PlaylistRow::Personal).collect();
-        v.extend(own.iter().map(PlaylistRow::Own));
+        // Альбомы — сразу под «Настроили для вас», как на телефоне.
         if !self.engine.offline {
             v.push(PlaylistRow::LikedAlbums);
+        }
+        v.extend(own.iter().map(PlaylistRow::Own));
+        if !self.engine.offline {
             v.push(PlaylistRow::LikedArtists);
             v.push(PlaylistRow::TopArtists);
         }
         v
+    }
+
+    /// «Ждёте»: пресейвнутые анонсы, ближайшие первыми.
+    pub fn waiting(&self) -> Vec<api::Upcoming> {
+        let mut v: Vec<_> = self.engine.upcoming.values().filter(|u| self.engine.presaved.contains(&u.id)).cloned().collect();
+        v.sort_by_key(|u| u.release_ms().unwrap_or(i64::MAX));
+        v
+    }
+
+    /// Наступил час уведомления о выходе пресейва — системное уведомление (один раз на релиз).
+    fn check_presaves(&mut self) {
+        use chrono::TimeZone;
+        let now = chrono::Local::now();
+        let hour = self.engine.cfg.presave_hour.min(23) as u32;
+        let mut fired = Vec::new();
+        let dir = self.engine.data_dir.clone();
+        let done = self.presave_notified.get_or_insert_with(|| load_notified(&dir)).clone();
+        for u in self.waiting() {
+            if done.contains(&u.id) {
+                continue;
+            }
+            let Some(ms) = u.release_ms() else { continue };
+            let Some(release) = chrono::Local.timestamp_millis_opt(ms).single() else { continue };
+            let at = release
+                .date_naive()
+                .and_hms_opt(hour, 0, 0)
+                .and_then(|t| chrono::Local.from_local_datetime(&t).earliest())
+                .map_or(release, |t| t.max(release));
+            // Неделю не запускали — старое уже не новость.
+            if now < at || now - at > chrono::Duration::days(2) {
+                continue;
+            }
+            let who = u.artist_names();
+            desktop_notify(&u.title, &format!("Вышел {}: {who}. Уже в коллекции", u.kind_label().to_lowercase()));
+            fired.push(u.id.clone());
+        }
+        if let Some(set) = self.presave_notified.as_mut().filter(|_| !fired.is_empty()) {
+            set.extend(fired);
+            save_notified(&dir, set);
+        }
     }
 
     fn load_releases(&mut self) {
@@ -1536,6 +1593,7 @@ impl App {
             },
             Setting::SmartWifiOnly => if self.engine.cfg.smart_wifi_only { "да" } else { "нет" }.into(),
             Setting::FullReleaseDate => if self.engine.cfg.full_release_date { "да" } else { "только год" }.into(),
+            Setting::PresaveHour => format!("в {}:00", self.engine.cfg.presave_hour),
             Setting::Fps => self.engine.cfg.fps.to_string(),
             Setting::Dither => match self.engine.cfg.blob_dither {
                 0 => "выкл".into(),
@@ -1662,6 +1720,11 @@ impl App {
             }
             Setting::FullReleaseDate => {
                 self.engine.cfg.full_release_date = !self.engine.cfg.full_release_date;
+                self.engine.cfg.save(&self.engine.paths);
+            }
+            Setting::PresaveHour => {
+                let d = if dir == 0 { 1 } else { dir };
+                self.engine.cfg.presave_hour = (self.engine.cfg.presave_hour as isize + d).rem_euclid(24) as u8;
                 self.engine.cfg.save(&self.engine.paths);
             }
             Setting::Fps => {
@@ -2271,6 +2334,10 @@ impl App {
     /// Вызывается каждый кадр: движок синхронизирует «что играет», UI — анимации.
     pub fn tick(&mut self) {
         self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(4));
+        if self.presave_checked.elapsed() > Duration::from_secs(30) {
+            self.presave_checked = Instant::now();
+            self.check_presaves();
+        }
         // Дуга волны догоняет курсор.
         if let Some(p) = self.stack.iter().find(|p| matches!(p.view, View::Wave)) {
             let target = p.sel as f32;
@@ -2812,6 +2879,12 @@ impl App {
         // Сетка релизов: клик выбирает карточку, повторный — открывает; колесо — по рядам.
         if !stage && !self.lyrics_mode && matches!(self.page().view, View::Releases) && inside(self.areas.main) {
             match m.kind {
+                MouseEventKind::Down(MouseButton::Left) if self.wait_hits.iter().any(|(r, ..)| inside(*r)) => {
+                    if let Some((_, id, name)) = self.wait_hits.iter().find(|(r, ..)| inside(*r)).cloned() {
+                        self.open_artist(api::Artist { id, name, cover: None, og_image: None, cutout_cover: None });
+                    }
+                    return;
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(i) = self.grid_hits.iter().find(|(r, _)| inside(*r)).map(|h| h.1) {
                         if self.page().sel == i {
@@ -3462,6 +3535,43 @@ fn search_items(r: SearchResult) -> Vec<SearchItem> {
         v.extend(b.results.into_iter().take(10).map(SearchItem::Playlist));
     }
     v
+}
+
+fn load_notified(dir: &std::path::Path) -> std::collections::HashSet<String> {
+    std::fs::read(dir.join("presave_notified.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_notified(dir: &std::path::Path, ids: &std::collections::HashSet<String>) {
+    if let Ok(b) = serde_json::to_vec(ids) {
+        let _ = std::fs::write(dir.join("presave_notified.json"), b);
+    }
+}
+
+/// Системное уведомление через org.freedesktop.Notifications (в фоне: D-Bus не ждём).
+fn desktop_notify(summary: &str, body: &str) {
+    let (summary, body) = (summary.to_string(), body.to_string());
+    tokio::spawn(async move {
+        let r: zbus::Result<()> = async {
+            let c = zbus::Connection::session().await?;
+            let hints: std::collections::HashMap<&str, zbus::Variant> = std::collections::HashMap::new();
+            c.call_method(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                Some("org.freedesktop.Notifications"),
+                "Notify",
+                &("yamusicrs", 0u32, "yamusicrs", summary.as_str(), body.as_str(), Vec::<&str>::new(), hints, -1i32),
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        if let Err(e) = r {
+            tracing::warn!("уведомление о выходе: {e}");
+        }
+    });
 }
 
 pub enum ArtistRow<'a> {

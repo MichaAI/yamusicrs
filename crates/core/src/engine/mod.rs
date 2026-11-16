@@ -60,6 +60,7 @@ pub enum Msg {
         result: Result<Vec<Track>, String>,
     },
     Found(Result<Vec<api::Found>, String>),
+    Presaves(Result<Vec<api::Upcoming>, String>),
     /// Программа офлайн-волны и треки, под которые она собрана.
     OfflineProgram(Result<(Vec<i32>, Vec<i32>), String>),
     /// Метаданные скачанных треков для офлайн-снимка.
@@ -297,6 +298,8 @@ pub struct Engine {
     pub disliked_artists: HashSet<String>,
     /// Пресейвнутые будущие релизы — что известно из открытых карточек и списка пресейвов.
     pub presaved: HashSet<String>,
+    /// Анонсы, о которых знаем (список пресейвов, карточки исполнителей): id → релиз.
+    pub upcoming: HashMap<String, api::Upcoming>,
     pub likes: Loadable<Vec<Track>>,
     pub playlists: Loadable<Vec<Playlist>>,
     pub queue: Queue,
@@ -422,6 +425,7 @@ impl Engine {
             liked_artists: HashSet::new(),
             disliked_artists: HashSet::new(),
             presaved: HashSet::new(),
+            upcoming: HashMap::new(),
             likes: Loadable::Loading,
             playlists: Loadable::Loading,
             queue: Queue {
@@ -831,6 +835,17 @@ impl Engine {
                     self.load_playlists();
                 }
             }
+            Msg::Presaves(r) => match r {
+                Ok(v) => {
+                    // Список с сервера полный: чего в нём нет, то не пресейвнуто.
+                    self.presaved = v.iter().map(|u| u.id.clone()).collect();
+                    for u in v {
+                        self.upcoming.insert(u.id.clone(), u);
+                    }
+                    self.emit(Effect::LikesChanged);
+                }
+                Err(e) => tracing::warn!("пресейвы: {e}"),
+            },
             Msg::LibraryIds(r) => match r {
                 Ok(ids) => {
                     self.liked_albums = api::LibraryIds::with(&ids.albums, 1);
@@ -1212,6 +1227,9 @@ impl Engine {
             .await
             .map_err(err_str);
             let _ = tx.send(Msg::Likes(r));
+        });
+        self.spawn(|c, tx| async move {
+            let _ = tx.send(Msg::Presaves(c.presaves().await.map_err(err_str)));
         });
         self.spawn(|c, tx| async move {
             let _ = tx.send(Msg::LibraryIds(c.library_ids().await.map_err(err_str)));
@@ -2230,6 +2248,7 @@ impl Engine {
     /// Сервер сообщил, пресейвнут ли релиз (карточка исполнителя, список пресейвов).
     pub fn note_presave(&mut self, u: &api::Upcoming) {
         self.apply_entity(Entity::Presave, &u.id, u.presaved);
+        self.upcoming.insert(u.id.clone(), u.clone());
     }
 
     pub fn apply_entity(&mut self, what: Entity, id: &str, on: bool) {

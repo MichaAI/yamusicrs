@@ -1130,6 +1130,21 @@ fn draw_collection_head(
             ctx.dim(),
         ));
     }
+    // Сколько списка уже играет без сети — полоса и счёт (альбомы и плейлисты одинаково).
+    if let Some(ts) = tracks.filter(|t| !t.is_empty()) {
+        let have = ts.iter().filter(|t| app.engine.library.contains(&t.id)).count();
+        if have > 0 {
+            const W: usize = 16;
+            let fill = (have * W).div_ceil(ts.len()).min(W);
+            let label = if have == ts.len() { "скачан целиком".to_string() } else { format!("скачано {have} из {}", ts.len()) };
+            lines.push(Line::from(vec![
+                Span::styled(" ⇣ ", ctx.accent()),
+                Span::styled("━".repeat(fill), ctx.accent()),
+                Span::styled("━".repeat(W - fill), ctx.dim()),
+                Span::styled(format!(" {label}"), ctx.accent()),
+            ]));
+        }
+    }
     lines.push(Line::styled(
         " Enter — играть с выбранного · s — перемешивание",
         ctx.dim(),
@@ -1640,6 +1655,39 @@ fn draw_settings(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
 /// Сетка «Новые релизы», как на сайте: обложка, под ней название, артисты и тип.
 fn draw_releases(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
     app.grid_hits.clear();
+    app.wait_hits.clear();
+    // «Ждёте» — пресейвы над сеткой: по строке на релиз, клик открывает исполнителя.
+    let waiting = app.waiting();
+    let area = if waiting.is_empty() || area.height < 12 {
+        area
+    } else {
+        const MAX: usize = 3;
+        let shown = waiting.len().min(MAX);
+        let h = 1 + shown as u16 + u16::from(waiting.len() > MAX) + 1;
+        let w = area.width.saturating_sub(2) as usize;
+        let mut lines = vec![Line::from(Span::styled(" Ждёте", ctx.accent().add_modifier(Modifier::BOLD)))];
+        for (i, u) in waiting.iter().take(MAX).enumerate() {
+            let due = u.when_label().unwrap_or_default();
+            let who = u.artist_names();
+            let head = format!("  ◷ {}", u.title);
+            let tail = format!("  {due}");
+            let room = w.saturating_sub(head.width() + tail.width() + 3);
+            lines.push(Line::from(vec![
+                Span::styled(fit(&head, w.saturating_sub(tail.width() + 3)), ctx.fg().add_modifier(Modifier::BOLD)),
+                Span::styled(if room > 4 { format!(" — {}", fit(&who, room)) } else { String::new() }, ctx.dim()),
+                Span::styled(tail, ctx.dim()),
+            ]));
+            if let Some(a) = u.artists.iter().find(|a| !a.id.is_empty()) {
+                let r = Rect { x: area.x, y: area.y + 1 + i as u16, width: area.width, height: 1 };
+                app.wait_hits.push((r, a.id.clone(), a.name.clone()));
+            }
+        }
+        if waiting.len() > MAX {
+            lines.push(Line::styled(format!("  и ещё {}", waiting.len() - MAX), ctx.dim()));
+        }
+        f.render_widget(Paragraph::new(lines), Rect { height: h, ..area });
+        Rect { y: area.y + h, height: area.height - h, ..area }
+    };
     let albums = match &app.releases {
         Some(Loadable::Ready(a)) => a.clone(),
         Some(other) => return status(f, area, other, ctx, "Загружаю новые релизы"),
