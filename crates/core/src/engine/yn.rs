@@ -324,7 +324,15 @@ impl Engine {
         }
     }
 
+    /// Играет трейлер: Ynison о нём не знает (фрагменты другим устройствам не передать).
+    fn yn_quiet(&self) -> bool {
+        self.queue.items.iter().any(|t| t.preview)
+    }
+
     fn yn_queue(&self) -> Option<QueueState> {
+        if self.yn_quiet() {
+            return None;
+        }
         let pos = self.queue.pos?;
         let n = self.queue.items.len();
         // Окно не больше WINDOW треков вокруг текущего.
@@ -361,7 +369,7 @@ impl Engine {
 
     /// Позиция/пауза — на сервер, если мы активны.
     pub fn yn_publish_status(&mut self) {
-        if !self.yn_active {
+        if !self.yn_active || self.yn_quiet() {
             return;
         }
         if let Some(h) = &self.ynison {
@@ -382,7 +390,7 @@ impl Engine {
 
     /// Забрать воспроизведение себе (включили что-то здесь).
     fn yn_claim(&mut self) {
-        if self.yn_active || !self.yn_connected {
+        if self.yn_active || !self.yn_connected || self.yn_quiet() {
             return;
         }
         if let Some(h) = &self.ynison {

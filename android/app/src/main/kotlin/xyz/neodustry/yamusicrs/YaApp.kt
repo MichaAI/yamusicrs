@@ -90,6 +90,12 @@ class YaApp : Application(), CoreListener {
         ReleaseAlarms.set(this, u, on)
     }
 
+    /** Сохранённые чужие плейлисты (вкладка «Плейлисты»). */
+    var savedId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
+
+    /** Треки, возвращённые в рекомендации со страницы «Скрытые треки» (пропадают из неё сразу). */
+    val undisliked = androidx.compose.runtime.mutableStateListOf<String>()
+
     /** Альбомы в коллекции (вкладка «Плейлисты»). */
     var albumsId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
 
@@ -106,6 +112,8 @@ class YaApp : Application(), CoreListener {
         core.refresh()
         val (oldReleases, oldArtists) = releasesId to artistsId
         val oldAlbums = albumsId
+        val oldSaved = savedId
+        if (oldSaved != null) savedId = core.likedPlaylists()
         if (oldReleases != null) releasesId = core.releases()
         if (oldArtists != null) artistsId = core.likedArtists()
         if (oldAlbums != null) albumsId = core.likedAlbums()
@@ -115,7 +123,7 @@ class YaApp : Application(), CoreListener {
             kotlinx.coroutines.withTimeoutOrNull(6000) {
                 pages.first { p ->
                     (releasesId == oldReleases || releasesId in p) && (artistsId == oldArtists || artistsId in p) &&
-                        (albumsId == oldAlbums || albumsId in p)
+                        (albumsId == oldAlbums || albumsId in p) && (savedId == oldSaved || savedId in p)
                 }
             }
             kotlinx.coroutines.delay((600 - (System.currentTimeMillis() - t0)).coerceAtLeast(0))
@@ -123,6 +131,7 @@ class YaApp : Application(), CoreListener {
             if (oldReleases != null && oldReleases != releasesId) closePage(oldReleases)
             if (oldArtists != null && oldArtists != artistsId) closePage(oldArtists)
             if (oldAlbums != null && oldAlbums != albumsId) closePage(oldAlbums)
+            if (oldSaved != null && oldSaved != savedId) closePage(oldSaved)
             refreshing = false
         }
     }

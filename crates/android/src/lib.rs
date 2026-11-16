@@ -348,6 +348,10 @@ enum Cmd {
     NewPlaylist(Source, u32, String),
     ArtistLike(String, String, bool),
     AlbumLike(String, String, bool),
+    /// Трейлер: (`artists`/`albums`, id, название).
+    Trailer(String, String, String),
+    /// Вернуть трек источника в рекомендации.
+    Undislike(Source, u32),
     /// Пресейв будущего релиза (id, название, вкл).
     Presave(String, String, bool),
     /// Экспорт трека источника в формате (`flac`, `mp3`, `aac`, `small`, `wav`).
@@ -750,6 +754,31 @@ impl Core {
     /// Альбом в коллекцию или из неё.
     pub fn set_album_like(&self, id: String, name: String, on: bool) {
         self.send(Cmd::AlbumLike(id, name, on));
+    }
+
+    /// Трейлер исполнителя (`artists`) или альбома (`albums`): фрагменты треков подряд.
+    pub fn play_trailer(&self, kind: String, id: String, name: String) {
+        self.send(Cmd::Trailer(kind, id, name));
+    }
+
+    /// «Об исполнителе» целиком (страница `Page::About`).
+    pub fn about_artist(&self, id: String) -> u64 {
+        self.open(Req::About(id))
+    }
+
+    /// Чужие плейлисты в коллекции (страница `Page::Playlists`).
+    pub fn liked_playlists(&self) -> u64 {
+        self.open(Req::LikedPlaylists)
+    }
+
+    /// Скрытые треки (страница `Page::Tracks` с `hidden`).
+    pub fn disliked(&self) -> u64 {
+        self.open(Req::Disliked)
+    }
+
+    /// Вернуть трек в рекомендации.
+    pub fn undislike_from(&self, source: Source, index: u32) {
+        self.send(Cmd::Undislike(source, index));
     }
 
     /// Пресейв: будущий релиз сам ляжет в коллекцию в день выхода.
@@ -1309,6 +1338,12 @@ fn command(e: &mut Engine, pages: &mut Pages, ptx: &UnboundedSender<Reply>, c: C
         Cmd::AlbumLike(id, name, on) => {
             if e.liked_albums.contains(&id) != on {
                 e.toggle_entity(engine::Entity::AlbumLike, id, name);
+            }
+        }
+        Cmd::Trailer(kind, id, name) => e.play_trailer(if kind == "albums" { "albums" } else { "artists" }, id, name),
+        Cmd::Undislike(s, i) => {
+            if let Some(t) = source_tracks(e, pages, &s).and_then(|(_, v)| v.get(i as usize).cloned()) {
+                e.undislike(t);
             }
         }
         Cmd::Presave(id, name, on) => e.set_entity(engine::Entity::Presave, id, name, on),

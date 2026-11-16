@@ -300,12 +300,22 @@ impl Client {
         self.file_info_codecs(track_id, quality, FILE_CODECS).await
     }
 
+    /// Фрагмент трейлера: тот же get-file-info, но `quality=smart_preview` (как плеер мобильного
+    /// клиента для трейлеров); сервер отдаёт короткий mp3 с готовыми затуханиями.
+    pub async fn file_info_preview(&self, track_id: &str) -> Result<DownloadInfo> {
+        self.file_info_raw(track_id, "smart_preview", FILE_CODECS, false).await
+    }
+
     /// То же, но только в перечисленных кодеках (экспорт в конкретный формат).
     pub async fn file_info_codecs(&self, track_id: &str, quality: Quality, codecs_list: &[&str]) -> Result<DownloadInfo> {
+        self.file_info_raw(track_id, quality.as_str(), codecs_list, quality == Quality::Auto).await
+    }
+
+    async fn file_info_raw(&self, track_id: &str, quality: &str, codecs_list: &[&str], net: bool) -> Result<DownloadInfo> {
         let ts = now_ts();
         let codecs = codecs_list.join("");
         let transport = "encraw";
-        let msg = format!("{ts}{track_id}{}{codecs}{transport}", quality.as_str());
+        let msg = format!("{ts}{track_id}{quality}{codecs}{transport}");
         let mut sign = hmac_b64(DESKTOP_SIGN_KEY, &msg);
         sign.pop();
         let rb = self
@@ -313,12 +323,12 @@ impl Client {
             .query(&[
                 ("ts", ts.to_string()),
                 ("trackId", track_id.to_string()),
-                ("quality", quality.as_str().to_string()),
+                ("quality", quality.to_string()),
                 ("codecs", codecs_list.join(",")),
                 ("transports", transport.to_string()),
                 ("sign", sign),
             ]);
-        let rb = if quality == Quality::Auto { rb.query(&NET.query()) } else { rb };
+        let rb = if net { rb.query(&NET.query()) } else { rb };
         let fi: FileInfo = self.send(rb).await?;
         Ok(fi.download_info)
     }
@@ -391,6 +401,33 @@ impl Client {
                 &format!("/users/{}/likes/tracks/{action}", self.uid),
                 &[("track-ids", track_id.to_string())],
             )
+            .await?;
+        Ok(())
+    }
+
+    /// Скрытые треки («не рекомендовать»), свежие сверху.
+    pub async fn disliked_tracks(&self) -> Result<Vec<Track>> {
+        let v: Value = self.get(&format!("/users/{}/dislikes/tracks", self.uid), &[]).await?;
+        let ids: Vec<String> = v["library"]["tracks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| match &t["id"] {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.tracks(&ids).await
+    }
+
+    /// Вернуть трек в рекомендации (как мобильный клиент: `dislikes/tracks/{id}/remove`).
+    pub async fn undislike(&self, track_id: &str) -> Result<()> {
+        let _: Value = self
+            .post_form(&format!("/users/{}/dislikes/tracks/{track_id}/remove", self.uid), &[])
             .await?;
         Ok(())
     }
@@ -787,6 +824,62 @@ impl Client {
                     .ok()
             })
             .collect())
+    }
+
+    /// Трейлер исполнителя или альбома: несколько фрагментов по 10–20 с (`kind` — `artists`/`albums`).
+    pub async fn trailer(&self, kind: &str, id: &str) -> Result<Vec<Track>> {
+        let q: Vec<(&str, String)> =
+            if kind == "artists" { vec![("rankedByBackgroundVideo", "false".into())] } else { Vec::new() };
+        let v: Value = self.get(&format!("/{kind}/{id}/trailer"), &q).await?;
+        Ok(v["trailer"]["tracks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| {
+                let mut tr: Track = serde_json::from_value(t.clone()).ok()?;
+                tr.preview = true;
+                if let Some(ms) = t["smartPreviewParams"]["durationMs"].as_u64() {
+                    tr.duration_ms = Some(ms);
+                }
+                Some(tr)
+            })
+            .collect())
+    }
+
+    /// «Об исполнителе» целиком: описание, ссылки, фото, прирост слушателей.
+    pub async fn about_artist(&self, id: &str) -> Result<AboutArtist> {
+        self.get(&format!("/artists/{id}/about-artist"), &[]).await
+    }
+
+    /// Похожее на альбом: альбомы, исполнители и волны (как карусель под альбомом в мобильном клиенте).
+    pub async fn album_similar(&self, id: &str) -> Result<Similar> {
+        let v: Value = self.get(&format!("/albums/{id}/similar-entities"), &[]).await?;
+        let mut s = Similar::default();
+        for it in v["items"].as_array().into_iter().flatten() {
+            let d = &it["data"];
+            match it["type"].as_str() {
+                Some("album_item") => s.albums.extend(serde_json::from_value::<Album>(d["album"].clone()).ok()),
+                Some("artist_item") => s.artists.extend(serde_json::from_value::<Artist>(d["artist"].clone()).ok()),
+                Some("wave_agent_item") => {
+                    let w = &d["wave"];
+                    s.waves.push(SearchWave {
+                        title: w["name"].as_str().unwrap_or_default().to_string(),
+                        sub_title: w["description"].as_str().map(str::to_owned),
+                        seeds: serde_json::from_value(w["seeds"].clone()).unwrap_or_default(),
+                        color: d["agent"]["cover"]["color"].as_str().map(str::to_owned),
+                        agent: serde_json::from_value(d["agent"].clone()).ok(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(s)
+    }
+
+    /// Чужие плейлисты, сохранённые в коллекцию.
+    pub async fn liked_playlists(&self) -> Result<Vec<Playlist>> {
+        let v: Vec<Value> = self.get(&format!("/users/{}/likes/playlists", self.uid), &[]).await?;
+        Ok(v.into_iter().filter_map(|x| serde_json::from_value::<Playlist>(x["playlist"].clone()).ok()).collect())
     }
 
     /// Ожидаемые релизы, которые пользователь сохранил заранее (как «Пресейвы» мобильного клиента).

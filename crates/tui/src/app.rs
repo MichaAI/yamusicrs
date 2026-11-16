@@ -37,6 +37,7 @@ pub enum Msg {
     },
     Metatags { view_id: u64, result: Result<Vec<api::MetaTree>, String> },
     Metatag { view_id: u64, result: Result<api::Metatag, String> },
+    About { view_id: u64, result: Result<api::AboutArtist, String> },
     Credits { track_id: String, result: Result<Vec<(String, String)>, String> },
     Releases(Result<Vec<api::Album>, String>),
     Tracks {
@@ -348,6 +349,8 @@ pub enum View {
         playlist: Option<String>,
         /// id альбома, если это страница альбома (для лайка альбома).
         album: Option<String>,
+        /// «Скрытые треки»: `d` возвращает выбранный в рекомендации.
+        hidden: bool,
     },
     Artist {
         id: u64,
@@ -487,8 +490,12 @@ pub enum PlaylistRow<'a> {
     Personal(&'a api::PersonalPlaylist),
     Own(&'a Playlist),
     LikedAlbums,
+    /// Чужие плейлисты в коллекции.
+    SavedPlaylists,
     LikedArtists,
     TopArtists,
+    /// Скрытые треки — последней строкой, чтобы не мозолили глаза.
+    Hidden,
 }
 
 pub struct App {
@@ -744,8 +751,10 @@ impl App {
         }
         v.extend(own.iter().map(PlaylistRow::Own));
         if !self.engine.offline {
+            v.push(PlaylistRow::SavedPlaylists);
             v.push(PlaylistRow::LikedArtists);
             v.push(PlaylistRow::TopArtists);
+            v.push(PlaylistRow::Hidden);
         }
         v
     }
@@ -821,6 +830,7 @@ impl App {
             tracks: Loadable::Loading,
             playlist: own.then(|| pl.kind.clone()),
             album: None,
+            hidden: false,
         });
         if let Some(c) = pl.cover_uri() {
             let c = c.to_string();
@@ -856,6 +866,7 @@ impl App {
             tracks: Loadable::Loading,
             playlist: None,
             album: None,
+            hidden: false,
         });
         self.spawn(move |c, tx| async move {
             let r = c.history().await.map_err(err_str);
@@ -873,6 +884,7 @@ impl App {
             tracks: Loadable::Loading,
             playlist: None,
             album: None,
+            hidden: false,
         });
         if let Some(c) = track.cover_uri() {
             let c = c.to_string();
@@ -900,6 +912,7 @@ impl App {
             tracks: Loadable::Loading,
             playlist: None,
             album: None,
+            hidden: false,
         });
         self.spawn(move |c, tx| async move {
             let r = async {
@@ -926,6 +939,7 @@ impl App {
             tracks: Loadable::Loading,
             playlist: None,
             album: (!album.id.is_empty()).then(|| album.id.clone()),
+            hidden: false,
         });
         if let Some(c) = album.cover_uri() {
             let c = c.to_string();
@@ -1409,6 +1423,10 @@ impl App {
                     self.open_playlist(pl);
                 }
                 Some(PlaylistRow::LikedAlbums) => self.open_liked_albums(),
+                Some(PlaylistRow::SavedPlaylists) => self.open_meta("Сохранённые плейлисты".into(), |c| async move {
+                    Ok(api::Metatag { station_id: None, playlists: c.liked_playlists().await?, albums: Vec::new(), artists: Vec::new() })
+                }),
+                Some(PlaylistRow::Hidden) => self.open_hidden(),
                 Some(PlaylistRow::LikedArtists) => self.open_liked_artists(),
                 Some(PlaylistRow::TopArtists) => self.open_top_artists(),
                 None => {}
@@ -1507,7 +1525,8 @@ impl App {
                     _ => {}
                 }
             }
-            View::Artist { brief, name, .. } => {
+            View::Artist { id: vid, brief, name, .. } => {
+                let vid = *vid;
                 let Some(b) = brief.ready() else { return };
                 let rows = artist_rows(b);
                 match rows.get(sel) {
@@ -1528,6 +1547,18 @@ impl App {
                     Some(ArtistRow::Artist(a)) => {
                         let a = (*a).clone();
                         self.open_artist(a);
+                    }
+                    Some(ArtistRow::AboutMore) => {
+                        let (view_id, aid) = (vid, b.artist.as_ref().map(|a| a.id.clone()).unwrap_or_default());
+                        self.spawn(move |c, tx| async move {
+                            let r = c.about_artist(&aid).await.map_err(err_str);
+                            let _ = tx.send(Msg::About { view_id, result: r });
+                        });
+                    }
+                    Some(ArtistRow::Link(l)) => {
+                        let u = l.url.clone();
+                        crate::ui::term::copy_to_clipboard(&mut self.osc_out, &u);
+                        self.toast(format!("Ссылка скопирована: {u}"));
                     }
                     Some(ArtistRow::Upcoming(u)) => {
                         let (id, title) = (u.id.clone(), u.title.clone());
@@ -2047,6 +2078,62 @@ impl App {
         });
     }
 
+    /// Список «как у жанра» (волна, плейлисты, альбомы, исполнители) из произвольного запроса.
+    fn open_meta<F, Fut>(&mut self, title: String, f: F)
+    where
+        F: FnOnce(Client) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = api::Result<api::Metatag>> + Send + 'static,
+    {
+        let id = self.new_view_id();
+        self.push(View::Metatag { id, title, page: Loadable::Loading });
+        self.spawn(move |c, tx| async move {
+            let r = f(c).await.map_err(err_str);
+            let _ = tx.send(Msg::Metatag { view_id: id, result: r });
+        });
+    }
+
+    /// «Похожее» на альбом: его волна, похожие альбомы и исполнители.
+    fn open_album_similar(&mut self, album_id: String, title: String) {
+        self.open_meta(format!("Похоже на «{title}»"), move |c| async move {
+            let s = c.album_similar(&album_id).await?;
+            Ok(api::Metatag { station_id: Some(format!("album:{album_id}")), playlists: Vec::new(), albums: s.albums, artists: s.artists })
+        });
+    }
+
+    /// Скрытые треки («не рекомендовать»): `d` возвращает выбранный.
+    fn open_hidden(&mut self) {
+        let id = self.new_view_id();
+        self.push(View::Tracks {
+            id,
+            title: "Скрытые треки".into(),
+            subtitle: "Волна их не ставит · d — вернуть в рекомендации".into(),
+            cover: None,
+            tracks: Loadable::Loading,
+            playlist: None,
+            album: None,
+            hidden: true,
+        });
+        self.spawn(move |c, tx| async move {
+            let r = c.disliked_tracks().await.map_err(err_str);
+            let _ = tx.send(Msg::Tracks { view_id: id, result: r });
+        });
+    }
+
+    /// Трейлер того, что открыто: исполнителя или альбома.
+    fn play_trailer_here(&mut self) {
+        match &self.page().view {
+            View::Artist { artist_id, name, .. } if !artist_id.is_empty() => {
+                let (id, name) = (artist_id.clone(), name.clone());
+                self.engine.play_trailer("artists", id, name);
+            }
+            View::Tracks { album: Some(a), title, .. } => {
+                let (id, name) = (a.clone(), title.clone());
+                self.engine.play_trailer("albums", id, name);
+            }
+            _ => self.toast("Трейлер есть у исполнителя и альбома: открой его страницу и нажми T".into()),
+        }
+    }
+
     fn open_liked_albums(&mut self) {
         let id = self.new_view_id();
         self.push(View::Albums {
@@ -2204,6 +2291,18 @@ impl App {
                     self.skip_headers(1);
                 }
             }
+            Msg::About { view_id, result } => match result {
+                Ok(a) => {
+                    for p in &mut self.stack {
+                        if let View::Artist { id, brief: Loadable::Ready(b), .. } = &mut p.view
+                            && *id == view_id
+                        {
+                            b.about = Some(a.clone());
+                        }
+                    }
+                }
+                Err(e) => self.toast(format!("Не загрузилось: {e}")),
+            },
             Msg::Metatag { view_id, result } => {
                 for p in &mut self.stack {
                     if let View::Metatag { id, page, .. } = &mut p.view
@@ -3256,7 +3355,20 @@ impl App {
                     self.engine.toggle_like(t);
                 }
             }
+            // В «Скрытых треках» d — наоборот, вернуть выбранный в рекомендации.
+            KeyCode::Char('d') if matches!(self.page().view, View::Tracks { hidden: true, .. }) => {
+                if let Some(t) = self.selected_track().cloned() {
+                    self.engine.undislike(t);
+                }
+            }
             KeyCode::Char('d') => self.engine.dislike_current(),
+            KeyCode::Char('T') => self.play_trailer_here(),
+            KeyCode::Char('b') => {
+                if let View::Tracks { album: Some(a), title, .. } = &self.page().view {
+                    let (a, t) = (a.clone(), title.clone());
+                    self.open_album_similar(a, t);
+                }
+            }
             KeyCode::Char('a') => {
                 if let Some(t) = self.selected_track().cloned() {
                     self.engine.enqueue(t, false);
@@ -3583,6 +3695,12 @@ pub enum ArtistRow<'a> {
     Concert(&'a api::Concert),
     /// Анонсированный релиз: Enter или F — пресейв.
     Upcoming(&'a api::Upcoming),
+    /// «Подробнее»: Enter догружает «Об исполнителе» целиком.
+    AboutMore,
+    /// Строка описания исполнителя.
+    Text(String),
+    /// Ссылка исполнителя: Enter копирует адрес.
+    Link(&'a api::AboutLink),
     Album(&'a api::Album),
     Artist(&'a api::Artist),
 }
@@ -3633,7 +3751,39 @@ pub fn artist_rows(b: &ArtistBrief) -> Vec<ArtistRow<'_>> {
         v.push(ArtistRow::Header("Похожие исполнители"));
         v.extend(b.similar_artists.iter().filter(|a| !a.id.is_empty()).map(ArtistRow::Artist));
     }
+    // «Об исполнителе» целиком — в конце: по Enter догружается описание и ссылки.
+    if b.artist.as_ref().is_some_and(|a| !a.id.is_empty()) {
+        v.push(ArtistRow::Header("Об исполнителе"));
+        match &b.about {
+            None => v.push(ArtistRow::AboutMore),
+            Some(a) => {
+                for para in a.description.as_deref().unwrap_or("").split('\n').filter(|l| !l.trim().is_empty()) {
+                    v.extend(wrap_words(para, 90).into_iter().map(ArtistRow::Text));
+                }
+                v.extend(a.links.iter().map(ArtistRow::Link));
+            }
+        }
+    }
     v
+}
+
+/// Перенос по словам в строки не длиннее `w` символов.
+fn wrap_words(s: &str, w: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > w {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
 }
 
 #[cfg(test)]

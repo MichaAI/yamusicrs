@@ -241,6 +241,10 @@ pub struct Track {
     pub lyrics_info: Option<LyricsInfo>,
     pub content_warning: Option<String>,
     pub r128: Option<R128>,
+    /// Фрагмент трейлера (`quality=smart_preview`), а не трек целиком: качается отдельно,
+    /// в библиотеку не ложится, в историю и Ynison не уходит. Ставим сами, сервер так не зовёт.
+    #[serde(default, rename = "yamusicrsPreview", skip_serializing_if = "std::ops::Not::not")]
+    pub preview: bool,
 }
 
 fn yes() -> bool {
@@ -466,6 +470,9 @@ pub struct ArtistBrief {
     pub wave: Vec<Track>,
     #[serde(skip)]
     pub concerts: Vec<Concert>,
+    /// «Об исполнителе» целиком — догружается по запросу (TUI: строка «Подробнее»).
+    #[serde(skip)]
+    pub about: Option<AboutArtist>,
     /// Анонсированный, ещё не вышедший релиз (его можно «пресейвить»).
     #[serde(default, deserialize_with = "lenient_opt")]
     pub upcoming_album: Option<Upcoming>,
@@ -548,6 +555,46 @@ fn plural(n: u64, f: [&'static str; 3]) -> &'static str {
         (2..=4, _) => f[1],
         _ => f[2],
     }
+}
+
+/// «Об исполнителе» целиком (`/artists/{id}/about-artist`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AboutArtist {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub links: Vec<AboutLink>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub covers: Vec<Cover>,
+    #[serde(default)]
+    pub stats: Option<AboutStats>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AboutLink {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AboutStats {
+    pub last_month_listeners: Option<u64>,
+    /// Прирост за месяц (может быть отрицательным).
+    pub last_month_listeners_delta: Option<i64>,
+}
+
+/// «Похожее» у альбома (`/albums/{id}/similar-entities`): альбомы, исполнители, волны.
+#[derive(Debug, Clone, Default)]
+pub struct Similar {
+    pub albums: Vec<Album>,
+    pub artists: Vec<Artist>,
+    pub waves: Vec<SearchWave>,
 }
 
 /// Пресейвы пользователя.

@@ -1018,6 +1018,12 @@ fn draw_page(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                             .unwrap_or_default();
                         RowKind::Other(format!("♪ {when} · {}{title}", place.join(", ")), price)
                     }
+                    ArtistRow::AboutMore => RowKind::Other("ⓘ Подробнее: описание и ссылки".into(), "Enter".into()),
+                    ArtistRow::Text(t) => RowKind::Other(format!("  {t}"), String::new()),
+                    ArtistRow::Link(l) => RowKind::Other(
+                        format!("↗ {}", l.title),
+                        l.subtitle.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| l.url.clone()),
+                    ),
                     ArtistRow::Upcoming(u) => {
                         let mark = if app.engine.presaved.contains(&u.id) { "✓ пресейв · " } else { "Enter — пресейв · " };
                         let when = u.when_label().unwrap_or_default();
@@ -1617,6 +1623,8 @@ fn draw_playlists(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 RowKind::Other("\u{f004} Альбомы".into(), format!("{}", app.engine.liked_albums.len()))
             }
             PlaylistRow::TopArtists => RowKind::Other("★ Топ исполнителей за месяц".into(), String::new()),
+            PlaylistRow::SavedPlaylists => RowKind::Other("\u{f004} Сохранённые плейлисты".into(), String::new()),
+            PlaylistRow::Hidden => RowKind::Other("⊘ Скрытые треки".into(), String::new()),
             PlaylistRow::LikedArtists => {
                 RowKind::Other("\u{f004} Исполнители".into(), format!("{}", app.engine.liked_artists.len()))
             }
@@ -3531,6 +3539,8 @@ fn draw_help(f: &mut Frame, area: Rect, ctx: &Ctx) {
         ("M", "жанры, настроения, занятия, эпохи"),
         ("F", "альбом / исполнитель в коллекцию (выделенный или открытый)"),
         ("D", "исполнитель: не рекомендовать / вернуть"),
+        ("T", "трейлер открытого исполнителя или альбома: фрагменты треков"),
+        ("b", "похожее на открытый альбом"),
         ("/", "поиск"),
         ("Del", "убрать запрос из истории поиска"),
         ("t", "текст на весь экран"),

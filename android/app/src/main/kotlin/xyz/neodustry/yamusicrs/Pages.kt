@@ -232,7 +232,7 @@ class FlyBack(val routeId: ULong, val tap: Tap, val from: androidx.compose.ui.ge
 }
 
 /** Трек, для которого открыто меню: откуда он и под каким индексом. */
-data class MenuTarget(val track: TrackItem, val source: Source, val index: Int)
+data class MenuTarget(val track: TrackItem, val source: Source, val index: Int, val hidden: Boolean = false)
 
 /**
  * Стек страниц поверх вкладок, сцена, очередь и меню трека. Переход на страницу
@@ -304,6 +304,12 @@ class Nav(private val app: YaApp) {
             else -> artist(t.artistId, t.artists)
         }
     }
+
+    /** «Об исполнителе» целиком: фото, описание, ссылки. */
+    fun about(id: String) = push(app.core.aboutArtist(id), "Об исполнителе")
+
+    /** Скрытые треки («не рекомендовать»). */
+    fun disliked() = push(app.core.disliked(), "Скрытые треки")
 
     fun artist(id: String?, name: String) {
         push(app.core.openArtist(id ?: return), name, share = "/artist/$id")
@@ -581,6 +587,13 @@ private fun PageView(app: YaApp, nav: Nav, route: Route) {
             TopBar(p.title, nav)
             ArtistsGrid(app, nav, p.artists)
         }
+        is Page.About -> AboutPage(app, nav, p, route.title)
+        is Page.Playlists -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            TopBar(p.title, nav)
+            LazyVerticalGrid(GridCells.Adaptive(156.dp), contentPadding = gridPadding()) {
+                items(p.playlists, key = { it.uid + ":" + it.kind }) { pl -> PlaylistCard(app, pl, null) { nav.playlist(pl) } }
+            }
+        }
     }
     }
 }
@@ -785,6 +798,10 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
                         (a.released?.takeIf { full } ?: a.year?.toString())?.let { Chip(it) }
                         if (p.tracks.isNotEmpty()) Chip(tracksWord(p.tracks.size))
                     }
+                    if (p.tracks.size > 1) {
+                        Spacer(Modifier.height(12.dp))
+                        Pill(Ic.Play, "Трейлер", accent = false) { app.core.playTrailer("albums", a.id, a.title) }
+                    }
                 } else if (p.subtitle.isNotEmpty()) {
                     Text(p.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
@@ -799,10 +816,30 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
         }
         if (p.tracks.isEmpty()) item { Empty("В этом списке нет треков") }
         itemsIndexed(p.tracks, contentType = { _, _ -> "track" }) { i, t ->
+            // Возвращённый в рекомендации пропадает из «Скрытых» сразу; индексы источника те же.
+            if (p.hidden && t.id in app.undisliked) return@itemsIndexed
             TrackRow(
                 app, t, current = now.id == t.id, playing = now.playing,
-                onLongClick = { nav.menu = MenuTarget(t, src, i) },
+                onLongClick = { nav.menu = MenuTarget(t, src, i, hidden = p.hidden) },
             ) { app.core.playFrom(src, i.toUInt()) }
+        }
+        if (p.similarAlbums.isNotEmpty() || p.similarArtists.isNotEmpty() || p.similarWaves.isNotEmpty()) {
+            item { Section("Похожее", 20.dp) }
+            if (p.similarWaves.isNotEmpty()) item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(p.similarWaves, key = { it.seeds.joinToString() }) { w -> WaveCard(app, w) { app.core.startWaveWith(w.seeds, w.name) } }
+                }
+            }
+            if (p.similarAlbums.isNotEmpty()) item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(p.similarAlbums, key = { it.id }) { a -> AlbumCard(app, a, 148.dp) { nav.album(a.id, a.title) } }
+                }
+            }
+            if (p.similarArtists.isNotEmpty()) item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(p.similarArtists, key = { it.id }) { a -> ArtistCircle(app, a) { nav.artist(a.id, a.name) } }
+                }
+            }
         }
     }
     ShapeIconButton(
@@ -1003,16 +1040,11 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source, share:
                 }
                 if (p.artist.id.isNotEmpty()) {
                     Spacer(Modifier.height(16.dp))
-                    Row(
-                        Modifier.height(52.dp).clip(RoundedCornerShape(26.dp)).background(MaterialTheme.colorScheme.primaryContainer)
-                            .clickable { app.core.startWaveWith(listOf("artist:${p.artist.id}"), "Волна по «${p.artist.name}»") }
-                            .padding(start = 18.dp, end = 22.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Ic.Wave, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text("Волна по исполнителю", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Pill(Ic.Wave, "Волна по исполнителю", accent = true) {
+                            app.core.startWaveWith(listOf("artist:${p.artist.id}"), "Волна по «${p.artist.name}»")
+                        }
+                        Pill(Ic.Play, "Трейлер", accent = false) { app.core.playTrailer("artists", p.artist.id, p.artist.name) }
                     }
                 }
             }
@@ -1067,19 +1099,24 @@ private fun ArtistPage(app: YaApp, nav: Nav, p: Page.Artist, src: Source, share:
                 }
             }
         }
-        p.about?.let { about ->
+        // Короткое описание здесь; целиком — с фото и ссылками — отдельной страницей.
+        if (p.about != null || p.artist.id.isNotEmpty()) {
             item { Section("Об исполнителе", 20.dp) }
-            item {
-                var open by rememberSaveable { mutableStateOf(false) }
-                Text(
-                    about,
-                    maxLines = if (open) Int.MAX_VALUE else 5,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 12.dp).clip(RoundedCornerShape(16.dp))
-                        .clickable { open = !open }.padding(8.dp),
-                )
+            p.about?.let { about ->
+                item {
+                    Text(
+                        about,
+                        maxLines = 5,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 12.dp).clip(RoundedCornerShape(16.dp))
+                            .clickable(enabled = p.artist.id.isNotEmpty()) { nav.about(p.artist.id) }.padding(8.dp),
+                    )
+                }
+            }
+            if (p.artist.id.isNotEmpty()) {
+                item { Box(Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) { Pill(null, "Подробнее", accent = false) { nav.about(p.artist.id) } } }
             }
         }
     }
@@ -1261,6 +1298,84 @@ fun UpcomingCard(
             if (u.due.isNotEmpty()) {
                 Text(u.due, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+        }
+    }
+}
+
+/** Кнопка-«пилюля»: главная — залитая, второстепенная — тихая (52 = 2 × 26, концентрично). */
+@Composable
+private fun Pill(icon: ImageVector?, text: String, accent: Boolean, onClick: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val (bg, fg) = if (accent) cs.primaryContainer to cs.onPrimaryContainer else cs.surfaceContainerHighest to cs.onSurface
+    Row(
+        Modifier.height(52.dp).bounceClick(RoundedCornerShape(26.dp), onClick = onClick).background(bg)
+            .padding(start = if (icon != null) 18.dp else 22.dp, end = 22.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (icon != null) {
+            Icon(icon, null, tint = fg, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(text, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = fg)
+    }
+}
+
+/** «Об исполнителе» целиком: фото лентой, слушатели с приростом, описание, ссылки. */
+@Composable
+private fun AboutPage(app: YaApp, nav: Nav, p: Page.About, title: String) {
+    val cs = MaterialTheme.colorScheme
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        TopBar(title, nav)
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+            if (p.photos.isNotEmpty()) item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(p.photos) { u -> Art(app, u, Modifier.size(if (p.photos.size == 1) 300.dp else 240.dp), corner = 28.dp) }
+                }
+            }
+            p.listeners?.let { n ->
+                item {
+                    Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 20.dp)) {
+                        Text("${grouped(n.toLong())} слушателей за месяц", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        p.delta?.takeIf { it != 0L }?.let { d ->
+                            Text(
+                                (if (d > 0) "+" else "−") + grouped(kotlin.math.abs(d)) + " за месяц",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (d > 0) cs.primary else cs.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            p.description?.let { d ->
+                item {
+                    Text(
+                        d, style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp), color = cs.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp),
+                    )
+                }
+            }
+            if (p.links.isNotEmpty()) {
+                item { Section("Ссылки", 20.dp) }
+                items(p.links) { l ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(16.dp))
+                            .clickable { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(l.url))) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Ic.Share, null, tint = cs.primary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(l.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            l.subtitle?.takeIf { it.isNotEmpty() }?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+            if (p.description == null && p.links.isEmpty() && p.photos.isEmpty()) item { Empty("Яндекс пока ничего не рассказал об этом исполнителе") }
         }
     }
 }
@@ -1609,7 +1724,11 @@ fun PlaylistsGrid(app: YaApp, nav: Nav) {
     var lastAlbums by remember { mutableStateOf<List<AlbumItem>>(emptyList()) }
     (app.albumsId?.let { pages[it] } as? Page.Albums)?.let { lastAlbums = it.albums }
     val albums = lastAlbums
-    if (own.isEmpty() && personal.isEmpty() && albums.isEmpty()) {
+    LaunchedEffect(Unit) { if (app.savedId == null) app.savedId = app.core.likedPlaylists() }
+    var lastSaved by remember { mutableStateOf<List<PlaylistItem>>(emptyList()) }
+    (app.savedId?.let { pages[it] } as? Page.Playlists)?.let { lastSaved = it.playlists }
+    val saved = lastSaved
+    if (own.isEmpty() && personal.isEmpty() && albums.isEmpty() && saved.isEmpty()) {
         Empty("Плейлисты, которые вы создадите или сохраните в Яндекс Музыке, появятся здесь")
         return
     }
@@ -1632,6 +1751,20 @@ fun PlaylistsGrid(app: YaApp, nav: Nav) {
             full { Section("Альбомы", 8.dp) }
             items(albums, key = { "a" + it.id }) { a ->
                 Box(Modifier.animateItem()) { AlbumCard(app, a, null) { nav.album(a.id, a.title) } }
+            }
+        }
+        if (saved.isNotEmpty()) {
+            full { Section("Сохранённые плейлисты", 8.dp) }
+            items(saved, key = { "s" + it.uid + ":" + it.kind }) { pl ->
+                Box(Modifier.animateItem()) { PlaylistCard(app, pl, null) { nav.playlist(pl) } }
+            }
+        }
+        // Скрытое — в самом низу и тихо: нужно редко, глаза не мозолит.
+        full {
+            Box(Modifier.fillMaxWidth().padding(top = 24.dp), contentAlignment = Alignment.Center) {
+                TextButton(onClick = { nav.disliked() }) {
+                    Text("Скрытые треки", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }
@@ -2256,6 +2389,9 @@ fun TrackMenu(app: YaApp, nav: Nav) {
                 shareText(ctx, if (t.albumId != null) "/album/${t.albumId}/track/${t.id}" else "/track/${t.id}"); close()
             }
             if (hasLyrics) MenuItem(Ic.Lyrics, "Текст песни целиком") { close(); nav.lyrics = true }
+            if (m.hidden) MenuItem(Ic.Dislike, "Вернуть в рекомендации") {
+                app.core.undislikeFrom(m.source, m.index.toUInt()); app.undisliked.add(t.id); close()
+            }
         }
     }
 }

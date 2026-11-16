@@ -61,6 +61,9 @@ pub enum Msg {
     },
     Found(Result<Vec<api::Found>, String>),
     Presaves(Result<Vec<api::Upcoming>, String>),
+    Trailer { name: String, result: Result<Vec<Track>, String> },
+    /// Фоновая операция не удалась — тостом.
+    Failed(String),
     /// Программа офлайн-волны и треки, под которые она собрана.
     OfflineProgram(Result<(Vec<i32>, Vec<i32>), String>),
     /// Метаданные скачанных треков для офлайн-снимка.
@@ -835,6 +838,8 @@ impl Engine {
                     self.load_playlists();
                 }
             }
+            Msg::Trailer { name, result } => self.on_trailer(name, result),
+            Msg::Failed(e) => self.toast_err(e),
             Msg::Presaves(r) => match r {
                 Ok(v) => {
                     // Список с сервера полный: чего в нём нет, то не пресейвнуто.
@@ -1266,6 +1271,28 @@ impl Engine {
         };
         self.replace_queue(tracks, QueueKind::List, title);
         self.play_index(start);
+    }
+
+    /// Трейлер исполнителя или альбома (`kind` — `artists`/`albums`): фрагменты подряд, без перемешивания.
+    pub fn play_trailer(&mut self, kind: &'static str, id: String, name: String) {
+        if self.client.is_none() {
+            return self.toast_err("Трейлер без сети не послушать".into());
+        }
+        self.spawn(move |c, tx| async move {
+            let r = c.trailer(kind, &id).await.map_err(err_str);
+            let _ = tx.send(Msg::Trailer { name, result: r });
+        });
+    }
+
+    pub(super) fn on_trailer(&mut self, name: String, r: Result<Vec<Track>, String>) {
+        match r {
+            Ok(v) if v.is_empty() => self.toast("Трейлера нет".into()),
+            Ok(v) => {
+                self.replace_queue(v, QueueKind::List, format!("Трейлер: {name}"));
+                self.play_index(0);
+            }
+            Err(e) => self.toast_err(format!("Трейлер не загрузился: {e}")),
+        }
     }
 
     pub fn replace_queue(&mut self, items: Vec<Track>, kind: QueueKind, title: String) {
@@ -2113,6 +2140,10 @@ impl Engine {
         let Some((_, _, t)) = self.tokens.get(&token).cloned() else {
             return;
         };
+        // Фрагменты трейлера не прослушивания: ни в историю, ни в отклик волны.
+        if t.preview {
+            return;
+        }
         let full = played >= t.duration_secs() - 2.0;
         self.wave_feedback(if skipped && !full { "skip" } else { "trackFinished" }, &t, Some(played));
         if self.cfg.report_plays && played > 1.0 {
@@ -2263,6 +2294,19 @@ impl Engine {
         } else {
             self.entity_set(what).remove(id);
         }
+    }
+
+    /// Вернуть скрытый трек в рекомендации.
+    pub fn undislike(&mut self, t: Track) {
+        if self.client.is_none() {
+            return self.toast_err("Без сети не сохранить".into());
+        }
+        self.notice(format!("Снова рекомендовать: {}", t.full_title()));
+        self.spawn(move |c, tx| async move {
+            if let Err(e) = c.undislike(&t.id).await {
+                let _ = tx.send(Msg::Failed(format!("не сохранилось: {e}")));
+            }
+        });
     }
 
     pub fn dislike_current(&mut self) {
@@ -2491,7 +2535,9 @@ impl Engine {
         // Так же и быстрый старт из сети: начали с AAC — просим lossless.
         let origin = self.now.as_ref().and_then(|n| n.origin.as_ref());
         let lossy = self.now.as_ref().is_some_and(|n| !matches!(n.info.codec.as_str(), "FLAC" | "ALAC"));
+        // Фрагмент трейлера — не трек целиком: не подменяем ни на что.
         if let Some(f) = &self.fetcher
+            && !track.preview
             && (matches!(origin, Some(Origin::Library)) && f.should_upgrade(&track)
                 || matches!(origin, Some(Origin::Network { .. }))
                     && lossy

@@ -45,6 +45,26 @@ impl From<&Album> for AlbumItem {
     }
 }
 
+/// Ссылка исполнителя (соцсети, сайт).
+#[derive(uniffi::Record, Clone, PartialEq, Debug)]
+pub struct LinkItem {
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub url: String,
+}
+
+/// Волна из поиска или «Похожего» → пресет для карточки волны.
+pub fn wave_preset(w: &api::SearchWave) -> crate::WavePreset {
+    crate::WavePreset {
+        name: w.title.clone(),
+        description: w.sub_title.clone(),
+        icon: w.icon().map(|u| api::cover_url(u, 200)),
+        color: w.color.as_deref().and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok()),
+        seeds: w.seeds.clone(),
+        home: false,
+    }
+}
+
 /// Анонсированный релиз: страницы у него до выхода нет, только пресейв.
 #[derive(uniffi::Record, Clone, PartialEq, Debug)]
 pub struct UpcomingItem {
@@ -147,6 +167,26 @@ pub enum Page {
         /// Альбом в коллекции (для страницы альбома).
         liked: bool,
         tracks: Vec<TrackItem>,
+        /// Список скрытых треков: их можно вернуть в рекомендации.
+        hidden: bool,
+        /// «Похожее» под альбомом.
+        similar_albums: Vec<AlbumItem>,
+        similar_artists: Vec<ArtistItem>,
+        similar_waves: Vec<crate::WavePreset>,
+    },
+    /// «Об исполнителе» целиком.
+    About {
+        description: Option<String>,
+        links: Vec<LinkItem>,
+        /// Фото исполнителя (https, 1000×1000).
+        photos: Vec<String>,
+        listeners: Option<u64>,
+        /// Прирост слушателей за месяц.
+        delta: Option<i64>,
+    },
+    Playlists {
+        title: String,
+        playlists: Vec<PlaylistItem>,
     },
     Search {
         query: String,
@@ -218,6 +258,12 @@ pub enum Req {
     LikedAlbums,
     /// «Вы недавно слушали».
     History,
+    /// «Об исполнителе» целиком.
+    About(String),
+    /// Чужие плейлисты в коллекции.
+    LikedPlaylists,
+    /// Скрытые треки («не рекомендовать»).
+    Disliked,
 }
 
 /// Сырой ответ сети; в `Page` превращается уже в потоке движка.
@@ -230,14 +276,25 @@ pub enum Loaded {
         tracks: Vec<Track>,
         /// Сид волны «по этому списку».
         seed: Option<String>,
+        extra: Extra,
     },
     Search(String, SearchResult),
+    About(api::AboutArtist),
+    Playlists(String, Vec<Playlist>),
     Albums(String, Vec<Album>, Vec<api::Upcoming>),
     Artists(String, Vec<Artist>),
     Artist(String, Box<ArtistBrief>),
 }
 
 pub type Reply = (u64, Result<Loaded, String>);
+
+/// Дополнения к списку треков: «Похожее» у альбома, пометка списка скрытых.
+#[derive(Default)]
+pub struct Extra {
+    pub similar: Option<api::Similar>,
+    /// Скрытые треки: в меню трека — «Вернуть в рекомендации».
+    pub hidden: bool,
+}
 
 /// Треки открытых страниц: id → (название очереди, треки); сиды волны «по этому списку».
 #[derive(Default)]
@@ -261,8 +318,10 @@ impl Pages {
                 album,
                 tracks,
                 seed,
+                extra,
             } => {
                 let items = tracks.iter().map(TrackItem::from).collect();
+                let sim = extra.similar.unwrap_or_default();
                 self.tracks.insert(id, (title.clone(), tracks));
                 let playlist = seed.as_deref().is_some_and(|s| s.starts_with("playlist:"));
                 if let Some(seed) = seed {
@@ -276,29 +335,34 @@ impl Pages {
                     cover,
                     album: album.as_ref().map(AlbumItem::from),
                     tracks: items,
+                    hidden: extra.hidden,
+                    similar_albums: sim.albums.iter().map(AlbumItem::from).collect(),
+                    similar_artists: sim.artists.iter().filter(|a| !a.id.is_empty()).map(ArtistItem::from).collect(),
+                    similar_waves: sim.waves.iter().map(wave_preset).collect(),
                 }
             }
+            Loaded::About(a) => Page::About {
+                description: a.description.filter(|d| !d.is_empty()),
+                links: a
+                    .links
+                    .into_iter()
+                    .map(|l| LinkItem { title: l.title, subtitle: l.subtitle, url: l.url })
+                    .collect(),
+                photos: a.covers.iter().filter_map(|c| c.uri.as_deref()).map(|u| api::cover_url(u, 1000)).collect(),
+                listeners: a.stats.and_then(|s| s.last_month_listeners),
+                delta: a.stats.and_then(|s| s.last_month_listeners_delta),
+            },
+            Loaded::Playlists(title, v) => Page::Playlists {
+                title,
+                playlists: v.iter().map(PlaylistItem::from).collect(),
+            },
             Loaded::Search(query, r) => {
                 let tracks = r.tracks.map(|b| b.results).unwrap_or_default();
                 let items = tracks.iter().map(TrackItem::from).collect();
                 self.tracks.insert(id, (format!("Поиск: {query}"), tracks));
                 Page::Search {
                     query,
-                    waves: r
-                        .waves
-                        .iter()
-                        .map(|w| crate::WavePreset {
-                            name: w.title.clone(),
-                            description: w.sub_title.clone(),
-                            icon: w.icon().map(|u| api::cover_url(u, 200)),
-                            color: w
-                                .color
-                                .as_deref()
-                                .and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok()),
-                            seeds: w.seeds.clone(),
-                            home: false,
-                        })
-                        .collect(),
+                    waves: r.waves.iter().map(wave_preset).collect(),
                     tracks: items,
                     albums: r.albums.map(|b| b.results.iter().map(AlbumItem::from).collect()).unwrap_or_default(),
                     artists: r.artists.map(|b| b.results.iter().map(ArtistItem::from).collect()).unwrap_or_default(),
@@ -378,6 +442,7 @@ fn downloaded(e: &Engine) -> Loaded {
         album: None,
         tracks: e.offline_tracks(ts),
         seed: None,
+        extra: Extra::default(),
     }
 }
 
@@ -410,6 +475,7 @@ fn offline_artist(e: &Engine, aid: &str) -> Result<Loaded, String> {
         wave: Vec::new(),
         concerts: Vec::new(),
         upcoming_album: None,
+        about: None,
     };
     Ok(Loaded::Artist(name, Box::new(brief)))
 }
@@ -432,6 +498,7 @@ pub fn open(e: &Engine, id: u64, req: Req, tx: &UnboundedSender<Reply>) {
                 album: None,
                 tracks: e.offline_tracks(ts.clone()),
                 seed: Some(format!("playlist:{}_{}", p.uid, p.kind)),
+                extra: Extra::default(),
             }),
             None => Err("Этот плейлист не успел сохраниться для офлайна".into()),
         };
@@ -473,10 +540,14 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 album: None,
                 tracks,
                 seed: Some(format!("playlist:{uid}_{kind}")),
+                extra: Extra::default(),
             })
         }
         Req::Album(id) => {
-            let a = c.album(&id).await.map_err(err_str)?;
+            // «Похожее» — дополнение: его ошибка альбом не роняет.
+            let (a, similar) = tokio::join!(c.album(&id), c.album_similar(&id));
+            let a = a.map_err(err_str)?;
+            let similar = similar.map_err(|e| tracing::warn!("похожее на альбом {id}: {e}")).ok();
             let tracks = a.volume_tracks();
             Ok(Loaded::Tracks {
                 title: a.full_title(),
@@ -485,6 +556,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 album: Some(Album { volumes: Vec::new(), ..a }),
                 tracks,
                 seed: Some(format!("album:{id}")),
+                extra: Extra { similar, hidden: false },
             })
         }
         Req::Artist(id) => {
@@ -519,6 +591,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 album: None,
                 tracks,
                 seed: Some(format!("track:{track_id}")),
+                extra: Extra::default(),
             })
         }
         Req::Search(q) => Ok(Loaded::Search(q.clone(), c.search(&q).await.map_err(err_str)?)),
@@ -534,6 +607,26 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 album: None,
                 tracks,
                 seed: None,
+                extra: Extra::default(),
+            })
+        }
+        Req::About(id) => Ok(Loaded::About(c.about_artist(&id).await.map_err(err_str)?)),
+        Req::LikedPlaylists => {
+            Ok(Loaded::Playlists("Сохранённые плейлисты".into(), c.liked_playlists().await.map_err(err_str)?))
+        }
+        Req::Disliked => {
+            let tracks = c.disliked_tracks().await.map_err(err_str)?;
+            if tracks.is_empty() {
+                return Err("Скрытых треков нет: то, что вы попросите не рекомендовать, появится здесь".into());
+            }
+            Ok(Loaded::Tracks {
+                title: "Скрытые треки".into(),
+                subtitle: format!("{}: волна их не ставит", tracks_word(tracks.len())),
+                cover: None,
+                album: None,
+                tracks,
+                seed: None,
+                extra: Extra { similar: None, hidden: true },
             })
         }
         Req::LikedAlbums => Ok(Loaded::Albums("Альбомы".into(), c.liked_albums().await.map_err(err_str)?, Vec::new())),
@@ -557,6 +650,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 album: None,
                 tracks,
                 seed: None,
+                extra: Extra::default(),
             })
         }
     }

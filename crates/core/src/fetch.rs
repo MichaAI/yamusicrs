@@ -186,7 +186,7 @@ impl Fetcher {
             keep
         });
         for t in tracks {
-            if warm.contains_key(&t.id) || self.active.lock().contains_key(&t.id) || self.library.contains(&t.id) {
+            if t.preview || warm.contains_key(&t.id) || self.active.lock().contains_key(&t.id) || self.library.contains(&t.id) {
                 continue;
             }
             let (this, id) = (self.clone(), t.id.clone());
@@ -235,6 +235,25 @@ impl Fetcher {
     }
 
     pub async fn open(&self, track: &Track) -> Result<(Source, Origin)> {
+        // Фрагмент трейлера: свой файл, мимо библиотеки и общего списка загрузок (id тот же,
+        // что у трека целиком, — иначе полный трек мог бы сыграть отрывком и наоборот).
+        if track.preview {
+            let info = self.client.file_info_preview(&track.id).await?;
+            let urls = info.urls();
+            if urls.is_empty() {
+                return Err(eyre!("сервер не дал ссылку на фрагмент"));
+            }
+            let key = cipher_key(&info)?;
+            let buf = StreamBuffer::new(info.size)?;
+            let (this, b) = (self.clone(), buf.clone());
+            tokio::spawn(async move {
+                match this.download(&urls, key, &b, 0, None).await {
+                    Ok(()) => b.finish(),
+                    Err(e) => b.fail(e.to_string()),
+                }
+            });
+            return Ok((Source::stream(buf.clone()), Origin::Network { buf }));
+        }
         // Уже качается (предзагрузка или апгрейд) — тот же буфер: он не хуже файла.
         if let Some(buf) = self.active.lock().get(&track.id).cloned() {
             return Ok((Source::stream(buf.clone()), Origin::Network { buf }));
@@ -263,7 +282,8 @@ impl Fetcher {
 
     /// Скачанный трек хуже lossless и пора спросить сервер о лучшем (подмена на ходу).
     pub fn should_upgrade(&self, track: &Track) -> bool {
-        self.quality() == Quality::Lossless && self.library.needs_upgrade(&track.id, quality_rank(Quality::Lossless))
+        !track.preview
+            && self.quality() == Quality::Lossless && self.library.needs_upgrade(&track.id, quality_rank(Quality::Lossless))
     }
 
     /// Источник получше для играющего трека (горячая подмена на lossless).
