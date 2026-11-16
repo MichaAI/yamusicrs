@@ -61,6 +61,13 @@ sudo pacman -U result/yamusicrs-*.pkg.tar.zst
 (из nixpkgs), поэтому `depends` требует glibc не ниже той, с которой он собран, —
 на актуальном Arch это не мешает.
 
+Без Nix — сборка из исходников по [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD)
+(пакет `yamusicrs-git`, свежий master):
+
+```sh
+cd packaging/aur && makepkg -si
+```
+
 ### Без Nix
 
 Зависимости: Rust (edition 2024, свежий stable), `pkg-config`, `clang`/libclang

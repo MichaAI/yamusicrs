@@ -1,0 +1,24 @@
+pkgbase = yamusicrs-git
+	pkgdesc = TUI-клиент Яндекс Музыки: lossless, PipeWire, kitty-обложки
+	pkgver = 0.1.0.r193.g2e53db8
+	pkgrel = 1
+	url = https://github.com/MichaAI/yamusicrs
+	arch = x86_64
+	arch = aarch64
+	license = Apache-2.0
+	makedepends = git
+	makedepends = cargo
+	makedepends = clang
+	makedepends = pkgconf
+	depends = glibc
+	depends = gcc-libs
+	depends = pipewire
+	optdepends = vulkan-icd-loader: рендеринг на GPU через Vulkan
+	optdepends = libglvnd: запасной рендеринг через OpenGL
+	provides = yamusicrs
+	conflicts = yamusicrs
+	options = !lto
+	source = yamusicrs::git+https://github.com/MichaAI/yamusicrs.git
+	sha256sums = SKIP
+
+pkgname = yamusicrs-git

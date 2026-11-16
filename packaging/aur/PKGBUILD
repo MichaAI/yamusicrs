@@ -1,0 +1,49 @@
+# Сборка из исходников без Nix — для AUR (yay -S yamusicrs-git).
+# После правки: makepkg --printsrcinfo > .SRCINFO
+pkgname=yamusicrs-git
+_pkgname=yamusicrs
+pkgver=0.1.0.r193.g2e53db8
+pkgrel=1
+pkgdesc='TUI-клиент Яндекс Музыки: lossless, PipeWire, kitty-обложки'
+arch=('x86_64' 'aarch64')
+url='https://github.com/MichaAI/yamusicrs'
+license=('Apache-2.0')
+depends=('glibc' 'gcc-libs' 'pipewire')
+# clang — bindgen для привязок к PipeWire.
+makedepends=('git' 'cargo' 'clang' 'pkgconf')
+optdepends=('vulkan-icd-loader: рендеринг на GPU через Vulkan'
+            'libglvnd: запасной рендеринг через OpenGL')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+# Профиль dist уже с LTO — makepkg'овский поверх не нужен.
+options=('!lto')
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  local ver
+  ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+  printf '%s.r%s.g%s' "$ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --profile dist -p yamusicrs
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 target/dist/yamusicrs "$pkgdir/usr/bin/yamusicrs"
+  install -Dm644 data/yamusicrs.desktop "$pkgdir/usr/share/applications/yamusicrs.desktop"
+  install -Dm644 data/yamusicrs.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/yamusicrs.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
