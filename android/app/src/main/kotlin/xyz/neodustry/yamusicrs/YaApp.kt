@@ -221,6 +221,14 @@ class YaApp : Application(), CoreListener {
 
     private fun prefs() = getSharedPreferences("ui", MODE_PRIVATE)
 
+    /** Обложка анонса во всю высоту карточки, без отступа (настройка «Вид»). */
+    private val flushState by lazy { androidx.compose.runtime.mutableStateOf(prefs().getBoolean("flush_covers", false)) }
+    fun flushCovers(): Boolean = flushState.value
+    fun setFlushCovers(on: Boolean) {
+        flushState.value = on
+        prefs().edit().putBoolean("flush_covers", on).apply()
+    }
+
     private fun savePalette(p: Pal) {
         val ints = (listOf(p.accent, p.accent2, p.surface) + p.blob).joinToString(",") { it.value.toString() }
         prefs().edit().putString("palette", ints).apply()

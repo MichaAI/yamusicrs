@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.CompositionLocalProvider
@@ -28,7 +30,7 @@ import uniffi.yamusic_android.UpcomingItem
 /** Карточки альбомов (подпись всегда в две строки) и анонс будущего релиза с пресейвом. */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [35], application = android.app.Application::class, qualifiers = "w411dp-h1200dp-xxhdpi")
+@Config(sdk = [35], application = android.app.Application::class, qualifiers = "w411dp-h1600dp-xxhdpi")
 class CardsShots {
     @get:Rule val rule = createComposeRule()
 
@@ -43,6 +45,9 @@ class CardsShots {
         val app = Mockito.mock(YaApp::class.java)
         val on = upcoming("2", "Я буду драться", "Сингл", true)
         Mockito.`when`(app.presaves).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(mapOf(on.id to on)))
+        val flat = Mockito.mock(YaApp::class.java)
+        Mockito.`when`(flat.presaves).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(mapOf(on.id to on)))
+        Mockito.`when`(flat.flushCovers()).thenReturn(true)
         rule.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) { androidx.compose.material3.Surface {
                 CompositionLocalProvider(LocalNav provides Nav(app)) {
@@ -53,6 +58,13 @@ class CardsShots {
                         Section("Скоро выйдет", 20.dp)
                         UpcomingCard(app, upcoming("1", "если я буду в средневековье у меня будет огромный меч", "Сингл", false), showArtist = false, Modifier.padding(horizontal = 20.dp))
                         UpcomingCard(app, upcoming("2", "Я буду драться", "Сингл", true), showArtist = true, Modifier.padding(horizontal = 20.dp))
+                        Section("Ждёте", 20.dp)
+                        for (who in listOf(app, flat)) {
+                            Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                UpcomingCard(who, upcoming("1", "если я буду в средневековье у меня будет огромный меч", "Сингл", false), showArtist = true, Modifier.width(339.dp), titleLines = 3)
+                                UpcomingCard(who, on, showArtist = true, Modifier.width(339.dp), titleLines = 3)
+                            }
+                        }
                         Section("Настроили для вас", 20.dp)
                         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             PlaylistCard(app, PlaylistItem("u", "1", "Премьера", "", 0u, null, null, false), 110.dp) {}

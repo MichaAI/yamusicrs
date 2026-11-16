@@ -1216,36 +1216,49 @@ fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
  * Концентрично: обложка 16 + отступ 12 = 28.
  */
 @Composable
-fun UpcomingCard(app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
+fun UpcomingCard(
+    app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    /** В ряду: под название всегда три строки, чтобы подписи соседних карточек стояли вровень. */
+    titleLines: Int = 1,
+) {
     val cs = MaterialTheme.colorScheme
     val on = app.presaves.collectAsStateWithLifecycle().value.containsKey(u.id)
+    // Без отступа обложка — во всю высоту, её левые углы скругляет сама карточка.
+    val flush = app.flushCovers()
     Row(
-        modifier.fillMaxWidth()
+        // Высота постоянная (обложка 112 + отступы 12): строки сведений по одной, карточки в ряду равны.
+        modifier.fillMaxWidth().height(136.dp)
             .then(if (onClick != null) Modifier.bounceClick(RoundedCornerShape(28.dp), onClick = onClick) else Modifier.clip(RoundedCornerShape(28.dp)))
-            .background(cs.surfaceContainerHigh).padding(12.dp),
+            .background(cs.surfaceContainerHigh)
+            .padding(if (flush) PaddingValues(end = 12.dp) else PaddingValues(12.dp)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Art(app, u.cover, Modifier.size(112.dp), corner = 16.dp)
+        Art(
+            app, u.cover,
+            if (flush) Modifier.fillMaxHeight().aspectRatio(1f) else Modifier.size(112.dp),
+            corner = if (flush) 0.dp else 16.dp,
+        )
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(u.kind, style = MaterialTheme.typography.labelMedium, color = cs.primary)
             Text(
                 u.title,
                 style = MaterialTheme.typography.titleMedium.copy(lineHeight = 20.sp),
-                fontWeight = FontWeight.Bold, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                fontWeight = FontWeight.Bold, minLines = titleLines, maxLines = 3, overflow = TextOverflow.Ellipsis,
             )
             if (showArtist && u.artists.isNotEmpty()) {
                 Text(u.artists, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (u.due.isNotEmpty()) {
-                Text(u.due, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                Text(u.due, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         Spacer(Modifier.width(8.dp))
         ShapeIconButton(
             if (on) Ic.BellOn else Ic.Bell, if (on) "Отменить пресейв" else "Пресейв: в коллекцию в день выхода",
             { app.setPresave(u, !on) },
-            size = 48.dp, pop = on,
+            size = 44.dp, pop = on,
             container = if (on) cs.primaryContainer else cs.surfaceContainerHighest,
             tint = if (on) cs.onPrimaryContainer else cs.onSurface,
         )
@@ -1523,11 +1536,12 @@ fun ReleasesTab(app: YaApp, nav: Nav) {
             full {
                 // Ряд, как «Настроили для вас»: соседняя карточка выглядывает до края экрана.
                 val screen = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp - 32.dp
-                val w = if (waiting.size == 1) screen else screen * 0.86f
+                // Шире, чтобы подписи не жались; следующая выглядывает на ~40dp.
+                val w = if (waiting.size == 1) screen else screen - 40.dp
                 LazyRow(Modifier.bleed(16.dp), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(waiting, key = { it.id }) { u ->
                         UpcomingCard(
-                            app, u, showArtist = true, Modifier.width(w).animateItem(),
+                            app, u, showArtist = true, Modifier.width(w).animateItem(), titleLines = 3,
                             onClick = u.artistId?.let { id -> { nav.artist(id, u.artists) } },
                         )
                     }
@@ -1940,6 +1954,13 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                 Segments(listOf("Блоб", "Спектр", "Оба"), kinds.indexOf(s.visualizer).coerceAtLeast(0), {
                     app.core.setVisualizer(kinds[it])
                 }, Modifier.fillMaxWidth())
+            }
+            Group(null, null) {
+                Toggle("Обложки анонсов без отступа",
+                    if (app.flushCovers()) "Обложка во всю высоту карточки «Скоро выйдет» и «Ждёте»"
+                    else "Обложка в рамке карточки, со скруглёнными углами",
+                    app.flushCovers(),
+                ) { app.setFlushCovers(it) }
             }
             Group(null, null) {
                 Toggle("Полная дата выхода",
