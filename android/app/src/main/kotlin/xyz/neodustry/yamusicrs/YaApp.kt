@@ -233,6 +233,14 @@ class YaApp : Application(), CoreListener {
     /** Обложка анонса во всю высоту карточки, без отступа (настройка «Вид»). */
     private val flushState by lazy { androidx.compose.runtime.mutableStateOf(prefs().getBoolean("flush_covers", false)) }
     fun flushCovers(): Boolean = flushState.value
+
+    /** Компактная шапка альбома и плейлиста (настройка «Вид»). */
+    private val compactState by lazy { androidx.compose.runtime.mutableStateOf(prefs().getBoolean("compact_header", false)) }
+    fun compactHeader(): Boolean = compactState.value
+    fun setCompactHeader(on: Boolean) {
+        compactState.value = on
+        prefs().edit().putBoolean("compact_header", on).apply()
+    }
     fun setFlushCovers(on: Boolean) {
         flushState.value = on
         prefs().edit().putBoolean("flush_covers", on).apply()

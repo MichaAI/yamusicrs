@@ -181,20 +181,24 @@ fun rememberCoverTap(url: String?): Pair<Modifier, () -> Unit> {
     return mod to tap
 }
 
-/** «Скачано N из M» с полосой: сколько списка уже играет без сети. */
+/** «Скачано N из M» с полосой: сколько списка уже играет без сети. `compact` — по левому краю, во всю ширину. */
 @Composable
-private fun DownloadProgress(have: Int, total: Int) {
+private fun DownloadProgress(have: Int, total: Int, compact: Boolean = false) {
     val f by animateFloatAsState(have.toFloat() / total, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "have")
-    Column(Modifier.fillMaxWidth(0.7f), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        Modifier.fillMaxWidth(if (compact) 1f else 0.7f),
+        horizontalAlignment = if (compact) Alignment.Start else Alignment.CenterHorizontally,
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Ic.Download, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+            Icon(Ic.Download, null, Modifier.size(if (compact) 14.dp else 16.dp), tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(6.dp))
             Text(
                 if (have == total) "Скачан целиком" else "Скачано $have из $total",
-                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+                style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(if (compact) 4.dp else 6.dp))
         Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
             Box(Modifier.fillMaxWidth(f).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
         }
@@ -747,26 +751,11 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
     LazyColumn(Modifier.fillMaxSize().statusBarsPadding(), state = list, contentPadding = PaddingValues(bottom = 120.dp)) {
         // Место под «Назад»: сама кнопка висит поверх списка и не уезжает с ним.
         item(contentType = "bar") { Spacer(Modifier.height(64.dp)) }
+        if (app.compactHeader()) item(contentType = "hero-compact") { CompactHero(app, nav, p, src) } else
         item(contentType = "hero") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 if (p.cover != null) {
-                    val pid = (src as? Source.Page)?.id
-                    Art(
-                        app, p.cover,
-                        fallbackUrl = nav.stack.lastOrNull { it.id == pid }?.tap?.url,
-                        modifier = Modifier.size(232.dp)
-                            .onGloballyPositioned { c ->
-                                val r = c.boundsInRoot()
-                                if (pid != null) nav.heroRects[pid] = r
-                                // Сюда прилетает обложка нажатой карточки.
-                                if (nav.fly?.routeId == pid) {
-                                    if (nav.flyTarget != r) nav.flyTarget = r
-                                    nav.flyUrl = p.cover
-                                }
-                            }
-                            .graphicsLayer { alpha = if (nav.fly?.routeId == pid || nav.flyBack?.routeId == pid) 0f else 1f },
-                        corner = 36.dp,
-                    )
+                    HeroCover(app, nav, p, src, 232.dp, 36.dp)
                     Spacer(Modifier.height(20.dp))
                 }
                 Text(
@@ -956,14 +945,84 @@ fun BoxScope.ListJumps(app: YaApp, state: androidx.compose.foundation.lazy.LazyL
 }
 
 @Composable
-private fun Chip(text: String) {
+private fun Chip(text: String, small: Boolean = false) {
     Text(
         text,
-        style = MaterialTheme.typography.labelLarge,
+        style = if (small) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSecondaryContainer,
-        modifier = Modifier.appear().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.secondaryContainer)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+        maxLines = 1,
+        modifier = Modifier.appear().clip(RoundedCornerShape(if (small) 10.dp else 12.dp)).background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(horizontal = if (small) 8.dp else 10.dp, vertical = if (small) 2.dp else 4.dp),
     )
+}
+
+/** Обложка шапки списка — сюда прилетает обложка нажатой карточки (и улетает обратно). */
+@Composable
+private fun HeroCover(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, size: Dp, corner: Dp) {
+    val pid = (src as? Source.Page)?.id
+    Art(
+        app, p.cover,
+        fallbackUrl = nav.stack.lastOrNull { it.id == pid }?.tap?.url,
+        modifier = Modifier.size(size)
+            .onGloballyPositioned { c ->
+                val r = c.boundsInRoot()
+                if (pid != null) nav.heroRects[pid] = r
+                if (nav.fly?.routeId == pid) {
+                    if (nav.flyTarget != r) nav.flyTarget = r
+                    nav.flyUrl = p.cover
+                }
+            }
+            .graphicsLayer { alpha = if (nav.fly?.routeId == pid || nav.flyBack?.routeId == pid) 0f else 1f },
+        corner = corner,
+    )
+}
+
+/**
+ * Компактная шапка (настройка «Вид»): обложка слева, всё остальное — плотным столбцом справа.
+ * Ничего не теряется: название, исполнители с аватарами, тип, дата, число треков, скачанное, трейлер.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun CompactHero(app: YaApp, nav: Nav, p: Page.Tracks, src: Source) {
+    val cs = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (p.cover != null) {
+            HeroCover(app, nav, p, src, 128.dp, 24.dp)
+            Spacer(Modifier.width(16.dp))
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                p.title, style = MaterialTheme.typography.titleLarge.copy(lineHeight = 26.sp), fontWeight = FontWeight.Black,
+                maxLines = 3, overflow = TextOverflow.Ellipsis,
+            )
+            val a = p.album
+            if (a != null) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(12.dp)).clickable { p.tracks.firstOrNull()?.let { t -> nav.artistOf(t) } },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    p.tracks.firstOrNull()?.artistList?.takeIf { it.isNotEmpty() }?.let {
+                        AvatarStack(app, it, 22.dp, cs.background, max = 3)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(a.artists, style = MaterialTheme.typography.titleSmall, color = cs.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Chip(a.kind, small = true)
+                    val full = app.settings.collectAsStateWithLifecycle().value?.fullReleaseDate == true
+                    (a.released?.takeIf { full } ?: a.year?.toString())?.let { Chip(it, small = true) }
+                    if (p.tracks.isNotEmpty()) Chip(tracksWord(p.tracks.size), small = true)
+                }
+            } else if (p.subtitle.isNotEmpty()) {
+                Text(p.subtitle, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+            val have = p.tracks.count { app.isDownloaded(it.id) }
+            if (have > 0) DownloadProgress(have, p.tracks.size, compact = true)
+            if (a != null && p.tracks.size > 1) {
+                Pill(Ic.Play, "Трейлер", accent = false, small = true) { app.core.playTrailer("albums", a.id, a.title) }
+            }
+        }
+    }
 }
 
 fun tracksWord(n: Int): String {
@@ -1305,17 +1364,18 @@ fun UpcomingCard(
 
 /** Кнопка-«пилюля»: главная — залитая, второстепенная — тихая (52 = 2 × 26, концентрично). */
 @Composable
-private fun Pill(icon: ImageVector?, text: String, accent: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun Pill(icon: ImageVector?, text: String, accent: Boolean, modifier: Modifier = Modifier, small: Boolean = false, onClick: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val (bg, fg) = if (accent) cs.primaryContainer to cs.onPrimaryContainer else cs.surfaceContainerHighest to cs.onSurface
+    val h = if (small) 36.dp else 52.dp
     Row(
-        modifier.height(52.dp).bounceClick(RoundedCornerShape(26.dp), onClick = onClick).background(bg)
-            .padding(start = if (icon != null) 18.dp else 22.dp, end = 22.dp),
+        modifier.height(h).bounceClick(RoundedCornerShape(h / 2), onClick = onClick).background(bg)
+            .padding(start = if (icon != null) (if (small) 10.dp else 18.dp) else 22.dp, end = if (small) 14.dp else 22.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
-            Icon(icon, null, tint = fg, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(10.dp))
+            Icon(icon, null, tint = fg, modifier = Modifier.size(if (small) 18.dp else 22.dp))
+            Spacer(Modifier.width(if (small) 6.dp else 10.dp))
         }
         // Всегда в одну строку: не влезает — многоточие, а не перенос посреди слова.
         Text(text, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = fg,
@@ -2105,6 +2165,13 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                     else "Обложка в рамке карточки, со скруглёнными углами",
                     app.flushCovers(),
                 ) { app.setFlushCovers(it) }
+            }
+            Group(null, null) {
+                Toggle("Компактная шапка",
+                    if (app.compactHeader()) "Альбом и плейлист: обложка слева, сведения рядом — треки видны сразу"
+                    else "Альбом и плейлист: большая обложка по центру, сведения под ней",
+                    app.compactHeader(),
+                ) { app.setCompactHeader(it) }
             }
             Group(null, null) {
                 Toggle("«Похожее» у альбомов",
