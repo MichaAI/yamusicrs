@@ -71,6 +71,10 @@ pub struct Config {
     pub keep_played: Option<bool>,
     /// Лимит кеша сыгранного не из коллекции, ГиБ (0 — без лимита).
     pub cache_gb: f64,
+    /// Куда класть треки, сохранённые файлом; не задано — «YandexMusic Export» рядом с библиотекой.
+    pub export_dir: Option<PathBuf>,
+    /// Спрашивать, куда сохранить, системным диалогом (xdg-desktop-portal) на каждый трек.
+    pub export_ask: bool,
 }
 
 impl Default for Config {
@@ -109,7 +113,16 @@ impl Default for Config {
             switch_fade_secs: 0.4,
             keep_played: None,
             cache_gb: 1.0,
+            export_dir: None,
+            export_ask: false,
         }
+    }
+}
+
+impl Config {
+    /// Папка экспорта с учётом умолчания.
+    pub fn export_dir(&self) -> PathBuf {
+        self.export_dir.clone().unwrap_or_else(|| self.library_dir.with_file_name("YandexMusic Export"))
     }
 }
 

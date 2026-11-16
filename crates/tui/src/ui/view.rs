@@ -605,7 +605,14 @@ fn draw_popup(f: &mut Frame, area: Rect, app: &mut App, ctx: &Ctx) {
                 ]));
             }
             lines.push(Line::raw(""));
-            lines.push(Line::styled("  Файл ляжет в «YandexMusic Export» рядом с библиотекой", ctx.dim()));
+            lines.push(Line::styled(
+                if app.engine.cfg.export_ask {
+                    "  Куда — спросит системный диалог".to_string()
+                } else {
+                    format!("  Файл ляжет в {}", app.setting_value(crate::app::Setting::ExportDir))
+                },
+                ctx.dim(),
+            ));
             lines.push(Line::styled("  Enter — сохранить · Esc — закрыть", ctx.dim()));
             let w = lines.iter().map(Line::width).max().unwrap_or(0).max(36) as u16 + 4;
             (" Сохранить файлом ", w)

@@ -34,6 +34,14 @@ import uniffi.yamusic_android.WavePreset
 /** Сообщение поверх экрана: ошибка или то, что иначе не видно (экспорт); `action` — кнопка. */
 data class UiToast(val text: String, val error: Boolean, val action: ToastAction? = null, val id: Long = System.nanoTime())
 
+/** Режимы «Сохранить файлом» (см. [YaApp.exportMode]). */
+const val EXPORT_MUSIC = "music"
+const val EXPORT_FOLDER = "folder"
+const val EXPORT_ASK = "ask"
+
+/** Экспортированный файл во временной папке ждёт окна «Сохранить как». */
+data class PendingSave(val path: String, val name: String, val mime: String)
+
 /** Текст играющего трека: `lyrics == null` — текста нет. */
 data class TrackLyrics(val trackId: String, val lyrics: LyricsData?)
 
@@ -172,6 +180,7 @@ class YaApp : Application(), CoreListener {
             .replaceFirstChar { it.uppercase() }
         // Палитра прошлого запуска — сразу: тема не перекрашивается на глазах, пока грузится обложка.
         loadPalette()?.let { palette.value = it }
+        loadExportPrefs()
         core = Core(filesDir.absolutePath, cacheDir.absolutePath, music.absolutePath, name, this)
         watchNetwork()
         scope.launch {
@@ -234,15 +243,105 @@ class YaApp : Application(), CoreListener {
      * (Music/yamusicrs) — оттуда его видят плееры, файловый менеджер и компьютер по USB.
      */
     override fun onExported(path: String, name: String) {
+        if (exportMode.value == EXPORT_ASK) {
+            // Окно «Сохранить как» откроет интерфейс (ему нужна активность), см. SaveAsHost.
+            pendingSave.update { it + PendingSave(path, name, mimeOf(name)) }
+            return
+        }
+        val tree = exportTree.value?.takeIf { exportMode.value == EXPORT_FOLDER }
         scope.launch(Dispatchers.IO) {
             val src = File(path)
-            val where = runCatching { publish(src, name) }
+            val where = runCatching { if (tree != null) toTree(src, name, android.net.Uri.parse(tree)) else publish(src, name) }
             src.delete()
             where.fold(
                 { say("Сохранено: $it") },
                 { e -> ylog("экспорт не перенёсся: $e"); say("Не удалось сохранить «$name»: ${e.message}", error = true) },
             )
         }
+    }
+
+    /** Куда кладётся «Сохранить файлом»: в «Музыку», в выбранную папку или спрашивать каждый раз. */
+    val exportMode = MutableStateFlow(EXPORT_MUSIC)
+    /** Папка (URI дерева SAF с постоянным доступом) для режима [EXPORT_FOLDER]. */
+    val exportTree = MutableStateFlow<String?>(null)
+    /** Готовые файлы ждут, пока пользователь выберет, куда их сохранить (по одному окну). */
+    val pendingSave = MutableStateFlow<List<PendingSave>>(emptyList())
+
+    private fun loadExportPrefs() {
+        exportMode.value = prefs().getString("export_mode", EXPORT_MUSIC) ?: EXPORT_MUSIC
+        exportTree.value = prefs().getString("export_tree", null)
+    }
+
+    fun setExportMode(mode: String) {
+        exportMode.value = mode
+        prefs().edit().putString("export_mode", mode).apply()
+    }
+
+    /** Папка выбрана в системном окне: закрепляем доступ к ней между запусками. */
+    fun setExportTree(uri: android.net.Uri) {
+        val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        runCatching { contentResolver.takePersistableUriPermission(uri, flags) }
+        exportTree.value?.takeIf { it != uri.toString() }?.let { old ->
+            runCatching { contentResolver.releasePersistableUriPermission(android.net.Uri.parse(old), flags) }
+        }
+        exportTree.value = uri.toString()
+        prefs().edit().putString("export_tree", uri.toString()).putString("export_mode", EXPORT_FOLDER).apply()
+        exportMode.value = EXPORT_FOLDER
+    }
+
+    /** Ответ окна «Сохранить как»: `null` — отменили. */
+    fun finishSave(p: PendingSave, dst: android.net.Uri?) {
+        pendingSave.update { it - p }
+        scope.launch(Dispatchers.IO) {
+            val src = File(p.path)
+            if (dst == null) {
+                src.delete()
+                say("Сохранение отменено")
+                return@launch
+            }
+            val r = runCatching {
+                contentResolver.openOutputStream(dst, "wt").use { out -> src.inputStream().use { it.copyTo(out ?: error("нет доступа на запись")) } }
+            }
+            src.delete()
+            r.fold(
+                { say("Сохранено: ${p.name}") },
+                { e -> ylog("экспорт не записался: $e"); say("Не удалось сохранить «${p.name}»: ${e.message}", error = true) },
+            )
+        }
+    }
+
+    /** Человеческое имя папки из URI дерева: «primary:Music/Rips» → «Music/Rips». */
+    fun treeLabel(tree: String?): String? = tree?.let {
+        runCatching {
+            val id = android.provider.DocumentsContract.getTreeDocumentId(android.net.Uri.parse(it))
+            val (vol, rel) = id.substringBefore(':') to id.substringAfter(':', "")
+            when {
+                vol == "primary" -> rel.ifEmpty { "Память телефона" }
+                rel.isEmpty() -> vol
+                else -> "$vol/$rel"
+            }
+        }.getOrNull()
+    }
+
+    private fun toTree(src: File, name: String, tree: android.net.Uri): String {
+        val parent = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, android.provider.DocumentsContract.getTreeDocumentId(tree))
+        val doc = android.provider.DocumentsContract.createDocument(contentResolver, parent, mimeOf(name), name)
+            ?: error("папка не приняла файл — выберите её заново в настройках")
+        try {
+            contentResolver.openOutputStream(doc).use { out -> src.inputStream().use { it.copyTo(out ?: error("нет доступа на запись")) } }
+        } catch (e: Exception) {
+            runCatching { android.provider.DocumentsContract.deleteDocument(contentResolver, doc) }
+            throw e
+        }
+        return "${treeLabel(tree.toString()) ?: "папка"}/$name"
+    }
+
+    private fun mimeOf(name: String) = when (name.substringAfterLast('.').lowercase()) {
+        "flac" -> "audio/flac"
+        "mp3" -> "audio/mpeg"
+        "m4a" -> "audio/mp4"
+        "wav" -> "audio/x-wav"
+        else -> "audio/aac"
     }
 
     private fun publish(src: File, name: String): String {
@@ -252,13 +351,7 @@ class YaApp : Application(), CoreListener {
             src.copyTo(File(dir, name), overwrite = true)
             return "Android/data/$packageName/files/export/$name"
         }
-        val mime = when (name.substringAfterLast('.').lowercase()) {
-            "flac" -> "audio/flac"
-            "mp3" -> "audio/mpeg"
-            "m4a" -> "audio/mp4"
-            "wav" -> "audio/x-wav"
-            else -> "audio/aac"
-        }
+        val mime = mimeOf(name)
         val values = android.content.ContentValues().apply {
             put(android.provider.MediaStore.Audio.Media.DISPLAY_NAME, name)
             put(android.provider.MediaStore.Audio.Media.MIME_TYPE, mime)

@@ -1767,6 +1767,27 @@ private fun MainSettings(app: YaApp, s: SettingsData, openSub: () -> Unit) {
                 ) { app.core.setReportPlays(it) }
             }
         }
+        Section("Сохранение файлом") {
+            val mode by app.exportMode.collectAsStateWithLifecycle()
+            val tree by app.exportTree.collectAsStateWithLifecycle()
+            val pickFolder = androidx.activity.compose.rememberLauncherForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
+            ) { uri -> if (uri != null) app.setExportTree(uri) }
+            val modes = listOf(EXPORT_MUSIC, EXPORT_FOLDER, EXPORT_ASK)
+            Group("Куда сохранять", when (mode) {
+                EXPORT_FOLDER -> "В папку ${app.treeLabel(tree) ?: "—"}. Нажмите «Папка» ещё раз, чтобы выбрать другую"
+                EXPORT_ASK -> "На каждый трек — системное окно «Сохранить как»"
+                else -> "В Музыка/yamusicrs — там файлы видят плееры и компьютер по USB"
+            }) {
+                Segments(listOf("Музыка", "Папка", "Спрашивать"), modes.indexOf(mode).coerceAtLeast(0), {
+                    when {
+                        // Папку выбирают всегда заново по нажатию: так её и меняют.
+                        modes[it] == EXPORT_FOLDER -> runCatching { pickFolder.launch(tree?.let(android.net.Uri::parse)) }
+                        else -> app.setExportMode(modes[it])
+                    }
+                }, Modifier.fillMaxWidth())
+            }
+        }
         Section("Устройства и сеть") {
             Group(null, null) {
                 SubmenuRow(
@@ -2119,10 +2140,17 @@ fun ExportSheet(app: YaApp, nav: Nav) {
         shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
     ) {
         Column(Modifier.padding(bottom = 24.dp)) {
+            val mode by app.exportMode.collectAsStateWithLifecycle()
+            val tree by app.exportTree.collectAsStateWithLifecycle()
+            val where = when (mode) {
+                EXPORT_ASK -> "Куда сохранить «${titleShort(m.track)}», спросит система, когда файл будет готов."
+                EXPORT_FOLDER -> "«${titleShort(m.track)}» ляжет в ${app.treeLabel(tree) ?: "выбранную папку"}."
+                else -> "«${titleShort(m.track)}» ляжет в Музыка/yamusicrs."
+            }
             Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
                 Text("Сохранить файлом", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                 Text(
-                    "«${titleShort(m.track)}» ляжет в Музыка/yamusicrs. Форматы берутся с сервера как есть, без пережатия; WAV — распаковка.",
+                    "$where Форматы берутся с сервера как есть, без пережатия; WAV — распаковка.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -2138,6 +2166,41 @@ fun ExportSheet(app: YaApp, nav: Nav) {
                         color = MaterialTheme.colorScheme.primary)
                     Text(hint, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            }
+        }
+    }
+}
+
+/** «Сохранить как» с именем и типом файла на каждый вызов (у CreateDocument тип один на контракт). */
+private class SaveAs : androidx.activity.result.contract.ActivityResultContract<PendingSave, android.net.Uri?>() {
+    override fun createIntent(context: android.content.Context, input: PendingSave) =
+        android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT)
+            .addCategory(android.content.Intent.CATEGORY_OPENABLE)
+            .setType(input.mime)
+            .putExtra(android.content.Intent.EXTRA_TITLE, input.name)
+
+    override fun parseResult(resultCode: Int, intent: android.content.Intent?) =
+        intent?.data?.takeIf { resultCode == android.app.Activity.RESULT_OK }
+}
+
+/** Режим «спрашивать»: по одному системному окну на каждый готовый файл. */
+@Composable
+fun SaveAsHost(app: YaApp) {
+    val queue by app.pendingSave.collectAsStateWithLifecycle()
+    // Путь файла, для которого окно уже открыто: переживает поворот, окно не открывается дважды.
+    var asking by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val launcher = androidx.activity.compose.rememberLauncherForActivityResult(SaveAs()) { uri ->
+        app.pendingSave.value.firstOrNull { it.path == asking }?.let { app.finishSave(it, uri) }
+        asking = null
+    }
+    val next = queue.firstOrNull()
+    LaunchedEffect(next, asking) {
+        if (next != null && asking == null) {
+            asking = next.path
+            runCatching { launcher.launch(next) }.onFailure {
+                ylog("окно «Сохранить как» не открылось: $it")
+                app.finishSave(next, null)
+                asking = null
             }
         }
     }

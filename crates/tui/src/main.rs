@@ -1,6 +1,7 @@
 mod app;
 mod imgcache;
 mod mpris;
+mod portal;
 mod render;
 mod ui;
 

@@ -62,6 +62,8 @@ pub enum Msg {
         raw: Option<String>,
     },
     Mpris(mpris::Command),
+    /// Экспорт с системным диалогом закончен: текст тоста и ошибка ли это.
+    ExportSaved { text: String, error: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,11 +139,15 @@ pub enum Setting {
     Equalizer,
     /// Действие: перепроверить качество скачанных треков.
     Recheck,
+    /// Папка для «Сохранить файлом» (Enter — ввести путь).
+    ExportDir,
+    /// Спрашивать, куда сохранить, системным диалогом.
+    ExportAsk,
 }
 
 impl Setting {
     /// Порядок по смыслу: звук → сеть и устройства → вид → прочее.
-    pub const ALL: [Setting; 15] = [
+    pub const ALL: [Setting; 17] = [
         Setting::Quality,
         Setting::Normalize,
         Setting::TargetLufs,
@@ -150,6 +156,8 @@ impl Setting {
         Setting::Equalizer,
         Setting::Offline,
         Setting::KeepPlayed,
+        Setting::ExportDir,
+        Setting::ExportAsk,
         Setting::Ynison,
         Setting::Visualizer,
         Setting::Fps,
@@ -171,7 +179,7 @@ impl Setting {
 
     /// Открывает подменю, а не меняет значение.
     pub fn is_action(self) -> bool {
-        matches!(self, Setting::Recheck | Setting::Offline)
+        matches!(self, Setting::Recheck | Setting::Offline | Setting::ExportDir)
     }
 
     pub fn label(self) -> &'static str {
@@ -197,6 +205,8 @@ impl Setting {
             Setting::Visualizer => "Фон плеера",
             Setting::Equalizer => "Эквалайзер",
             Setting::Recheck => "Перепроверить качество скачанного",
+            Setting::ExportDir => "Куда сохранять файлы",
+            Setting::ExportAsk => "Спрашивать, куда сохранить",
         }
     }
 
@@ -223,6 +233,8 @@ impl Setting {
             Setting::Equalizer => "10 полос; пресеты: плоский, бас, вокал, яркий. Точная настройка — eq_gains в config.toml. Плоский и выключенный не трогают звук.",
             Setting::Dither => "Шум против «колец» на градиентах блоба, в ступенях 8 бит; 0 — выключен.",
             Setting::Recheck => "Сервер не дал lossless — трек помечается и не перепроверяется 30 дней. Enter снимает пометки: каждый трек хуже lossless спросит сервер заново при следующем проигрывании и, если дадут лучше, перекачается.",
+            Setting::ExportDir => "Папка для «Сохранить файлом» (клавиша S). Enter — ввести путь; пустой — по умолчанию «YandexMusic Export» рядом с библиотекой.",
+            Setting::ExportAsk => "На каждый трек — системное окно «Сохранить как» (xdg-desktop-portal), открывается в папке выше. Нет портала (ssh, консоль) — файл молча ляжет в эту папку.",
         }
     }
 }
@@ -292,6 +304,8 @@ pub enum InputAction {
     Describe(String),
     /// Путь к своему аудиофайлу — загрузить в плейлист `kind`.
     Upload(String),
+    /// Папка экспорта; пустая строка — по умолчанию.
+    ExportDir,
 }
 
 pub enum ConfirmAction {
@@ -1502,6 +1516,14 @@ impl App {
                 0 => "всё уже в lossless".into(),
                 n => format!("{n} тр. хуже lossless"),
             },
+            Setting::ExportDir => {
+                let p = self.engine.cfg.export_dir();
+                match std::env::var_os("HOME").and_then(|h| p.strip_prefix(h).ok().map(|r| r.to_path_buf())) {
+                    Some(rest) => format!("~/{}", rest.display()),
+                    None => p.display().to_string(),
+                }
+            }
+            Setting::ExportAsk => if self.engine.cfg.export_ask { "системным диалогом" } else { "нет, сразу в папку" }.into(),
         }
     }
 
@@ -1638,6 +1660,18 @@ impl App {
             }
             Setting::Recheck if dir == 0 => self.engine.recheck_library(),
             Setting::Recheck => {}
+            Setting::ExportDir if dir == 0 => {
+                self.popup = Some(Popup::Input {
+                    title: " Куда сохранять файлы ",
+                    text: self.setting_value(Setting::ExportDir),
+                    action: InputAction::ExportDir,
+                })
+            }
+            Setting::ExportDir => {}
+            Setting::ExportAsk => {
+                self.engine.cfg.export_ask = !self.engine.cfg.export_ask;
+                self.engine.cfg.save(&self.engine.paths);
+            }
         }
     }
 
@@ -1771,18 +1805,28 @@ impl App {
             }
             return self.engine.pl_op(PlOp::Describe { kind, text: title });
         }
+        // Путь можно вставить как есть: в кавычках, с ~ и с file:// из файлового менеджера.
+        let as_path = |s: &str| {
+            let p = s.trim_matches(|c| c == '"' || c == '\'').trim_start_matches("file://");
+            match p.strip_prefix("~/").or((p == "~").then_some("")) {
+                Some(rest) => std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(rest),
+                None => std::path::PathBuf::from(p),
+            }
+        };
+        if let InputAction::ExportDir = action {
+            self.engine.cfg.export_dir = (!title.is_empty()).then(|| as_path(&title));
+            if self.engine.cfg.export_dir.as_deref() == Some(&self.engine.cfg.library_dir.with_file_name("YandexMusic Export")) {
+                self.engine.cfg.export_dir = None;
+            }
+            return self.engine.cfg.save(&self.engine.paths);
+        }
         if title.is_empty() {
             return;
         }
         match action {
-            InputAction::Describe(_) => {}
+            InputAction::Describe(_) | InputAction::ExportDir => {}
             InputAction::Upload(kind) => {
-                // Путь можно вставить как есть: в кавычках, с ~ и с file:// из файлового менеджера.
-                let p = title.trim_matches(|c| c == '"' || c == '\'').trim_start_matches("file://");
-                let p = match p.strip_prefix("~/") {
-                    Some(rest) => std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(rest),
-                    None => std::path::PathBuf::from(p),
-                };
+                let p = as_path(&title);
                 if p.is_file() {
                     self.engine.upload(kind, p);
                 } else {
@@ -2014,6 +2058,7 @@ impl App {
                     Err(e) => Loadable::Failed(e),
                 });
             }
+            Msg::ExportSaved { text, error } => self.toasts.push(Toast { text, at: Instant::now(), error }),
             Msg::Credits { track_id, result } => match result {
                 Ok(v) => {
                     self.credits.insert(track_id, v);
@@ -2328,9 +2373,47 @@ impl App {
             }
             Effect::PlaylistOpFailed { kind } => self.reload_playlist_views(&kind),
             Effect::LibraryMeta => self.cover_files = None,
-            // Файл уже лежит где просили; сообщение показал тост ядра.
-            Effect::Exported { .. } => {}
+            // Файл уже лежит где просили (сообщение показал тост ядра) или ждёт диалога.
+            Effect::Exported { path } => {
+                if path.starts_with(self.ask_export_dir()) {
+                    self.ask_where_to_save(path);
+                }
+            }
         }
+    }
+
+    /// Временная папка экспорта в режиме «спрашивать, куда сохранить».
+    fn ask_export_dir(&self) -> std::path::PathBuf {
+        self.engine.paths.cache_dir.join("export")
+    }
+
+    /// Системный диалог «Сохранить как» для готового файла; без портала — в папку экспорта.
+    fn ask_where_to_save(&self, src: std::path::PathBuf) {
+        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let folder = self.engine.cfg.export_dir();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let picked = crate::portal::save_file("Сохранить трек", &name, &folder).await;
+            let (text, error) = match picked {
+                Ok(None) => {
+                    let _ = std::fs::remove_file(&src);
+                    ("Сохранение отменено".to_string(), false)
+                }
+                Ok(Some(dst)) => match crate::portal::move_file(&src, &dst) {
+                    Ok(()) => (format!("Сохранено: {}", dst.display()), false),
+                    Err(e) => (format!("Не удалось сохранить в {}: {e}", dst.display()), true),
+                },
+                Err(e) => {
+                    tracing::warn!("портал FileChooser: {e}");
+                    let dst = folder.join(&name);
+                    match crate::portal::move_file(&src, &dst) {
+                        Ok(()) => (format!("Системного диалога нет — сохранено в {}", dst.display()), false),
+                        Err(e) => (format!("Не удалось сохранить в {}: {e}", dst.display()), true),
+                    }
+                }
+            };
+            let _ = tx.send(Msg::ExportSaved { text, error });
+        });
     }
 
     /// Фоновая задача с клиентом API (если вошли); ответ — в канал интерфейса.
@@ -2471,7 +2554,8 @@ impl App {
             Some(Popup::Confirm { action, .. }) => self.confirm(action),
             Some(Popup::Export { track, .. }) => {
                 if let Some(fmt) = EXPORT_FORMATS.get(i).and_then(|(code, _)| yamusic_core::export::Format::parse(code)) {
-                    let dir = self.engine.cfg.library_dir.with_file_name("YandexMusic Export");
+                    // Со «спрашивать» файл сперва ложится во временную папку, диалог — когда он готов.
+                    let dir = if self.engine.cfg.export_ask { self.ask_export_dir() } else { self.engine.cfg.export_dir() };
                     self.engine.export(track, fmt, dir);
                 }
             }

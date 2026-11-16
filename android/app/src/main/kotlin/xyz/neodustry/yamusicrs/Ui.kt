@@ -636,6 +636,7 @@ private fun Main(app: YaApp, pal: Pal, s: PlayerState) {
     DevicesSheet(app, nav, s)
     TrackMenu(app, nav)
     ExportSheet(app, nav)
+    SaveAsHost(app)
     PlaylistPicker(app, nav)
     ArtistPicker(app, nav)
     LyricsSheet(app, nav)
