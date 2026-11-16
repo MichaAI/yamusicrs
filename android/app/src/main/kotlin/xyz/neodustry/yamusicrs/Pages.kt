@@ -830,7 +830,13 @@ private fun TracksPage(app: YaApp, nav: Nav, p: Page.Tracks, src: Source, share:
             var liked by remember(a.id) { mutableStateOf(p.liked) }
             ShapeIconButton(
                 if (liked) Ic.Heart else Ic.HeartOutline, if (liked) "Убрать из коллекции" else "В коллекцию",
-                { liked = !liked; app.core.setAlbumLike(a.id, a.title, liked) },
+                {
+                    liked = !liked
+                    app.core.setAlbumLike(a.id, a.title, liked)
+                    // «Альбомы» во вкладке плейлистов перечитаются при следующем заходе.
+                    app.albumsId?.let(app::closePage)
+                    app.albumsId = null
+                },
                 pop = liked, size = 48.dp, container = plate,
                 tint = if (liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             )
@@ -1168,6 +1174,20 @@ fun LazyGridScope.albumGrid(app: YaApp, nav: Nav, albums: List<AlbumItem>) {
     items(albums, key = { it.id }) { a -> AlbumCard(app, a, null) { nav.album(a.id, a.title) } }
 }
 
+/**
+ * Подписи карточки под обложкой. Высота всегда как у самого длинного варианта (название в две
+ * строки и ещё две строки сведений), иначе ряд — LazyRow меряет только видимые — прыгает по
+ * высоте, когда в кадр въезжает длинное название. Сведения идут сразу за названием, а запас
+ * остаётся снизу. `info` — стили строк сведений, которые у карточки правда есть: под пустые
+ * место не держим (у «Настроили для вас» нет ни описания, ни числа треков).
+ */
+@Composable
+private fun CardText(vararg info: androidx.compose.ui.text.TextStyle, content: @Composable ColumnScope.() -> Unit) {
+    val title = MaterialTheme.typography.titleSmall
+    val h = with(LocalDensity.current) { (title.lineHeight * 2).toDp() + info.fold(0.dp) { acc, st -> acc + st.lineHeight.toDp() } }
+    Column(Modifier.height(h), content = content)
+}
+
 /** Обложка альбома и подписи; `width == null` — по ширине ячейки сетки. */
 @Composable
 fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
@@ -1179,34 +1199,42 @@ fun AlbumCard(app: YaApp, a: AlbumItem, width: Dp?, onClick: () -> Unit) {
     ) {
         Art(app, a.cover, (if (width != null) Modifier.size(width) else Modifier.fillMaxWidth().aspectRatio(1f)).then(cover), corner = 20.dp)
         Spacer(Modifier.height(8.dp))
-        // Место под две строки всегда: иначе ряд (LazyRow меряет только видимые) прыгает по высоте,
-        // когда в кадр въезжает или уходит длинное название.
-        Text(a.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Text(a.artists, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(a.kind, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-            a.year?.let { Text(it.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        CardText(MaterialTheme.typography.bodySmall, MaterialTheme.typography.labelSmall) {
+            Text(a.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(a.artists, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(a.kind, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                a.year?.let { Text(it.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
         }
     }
 }
 
 /**
  * Анонсированный релиз: страницы у него до выхода нет, поэтому карточка не открывается, а несёт
- * пресейв — в день выхода релиз сам ляжет в коллекцию. Концентрично: обложка 16 + отступ 12 = 28.
+ * пресейв — в день выхода релиз сам ляжет в коллекцию, а телефон напомнит уведомлением.
+ * Концентрично: обложка 16 + отступ 12 = 28.
  */
 @Composable
-fun UpcomingCard(app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Modifier = Modifier) {
+fun UpcomingCard(app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val cs = MaterialTheme.colorScheme
     var on by remember(u.id) { mutableStateOf(u.presaved) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     Row(
-        modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.surfaceContainerHigh).padding(12.dp),
+        modifier.fillMaxWidth()
+            .then(if (onClick != null) Modifier.bounceClick(RoundedCornerShape(28.dp), onClick = onClick) else Modifier.clip(RoundedCornerShape(28.dp)))
+            .background(cs.surfaceContainerHigh).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Art(app, u.cover, Modifier.size(84.dp), corner = 16.dp)
+        Art(app, u.cover, Modifier.size(112.dp), corner = 16.dp)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(u.kind, style = MaterialTheme.typography.labelMedium, color = cs.primary)
-            Text(u.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                u.title,
+                style = MaterialTheme.typography.titleMedium.copy(lineHeight = 20.sp),
+                fontWeight = FontWeight.Bold, maxLines = 3, overflow = TextOverflow.Ellipsis,
+            )
             if (showArtist && u.artists.isNotEmpty()) {
                 Text(u.artists, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -1217,7 +1245,11 @@ fun UpcomingCard(app: YaApp, u: UpcomingItem, showArtist: Boolean, modifier: Mod
         Spacer(Modifier.width(8.dp))
         ShapeIconButton(
             if (on) Ic.BellOn else Ic.Bell, if (on) "Отменить пресейв" else "Пресейв: в коллекцию в день выхода",
-            { on = !on; app.core.setPresave(u.id, u.title, on) },
+            {
+                on = !on
+                app.core.setPresave(u.id, u.title, on)
+                ReleaseAlarms.set(ctx, u, on)
+            },
             size = 48.dp, pop = on,
             container = if (on) cs.primaryContainer else cs.surfaceContainerHighest,
             tint = if (on) cs.onPrimaryContainer else cs.onSurface,
@@ -1240,16 +1272,19 @@ fun PlaylistCard(app: YaApp, p: PlaylistItem, width: Dp?, onClick: () -> Unit) {
             if (p.cover == null) Icon(Ic.Queue, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(40.dp))
         }
         Spacer(Modifier.height(8.dp))
-        Text(p.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Text(
-            p.description ?: p.owner,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        val sub = (p.description ?: p.owner).takeIf { it.isNotBlank() }
+        val info = listOfNotNull(
+            sub?.let { MaterialTheme.typography.bodySmall },
+            MaterialTheme.typography.labelSmall.takeIf { p.trackCount > 0u },
         )
-        if (p.trackCount > 0u) {
-            Text(tracksWord(p.trackCount.toInt()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+        CardText(*info.toTypedArray()) {
+            Text(p.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (sub != null) {
+                Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (p.trackCount > 0u) {
+                Text(tracksWord(p.trackCount.toInt()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
         }
     }
 }
@@ -1489,7 +1524,14 @@ fun ReleasesTab(app: YaApp, nav: Nav) {
         }
         (page as? Page.Albums)?.upcoming?.takeIf { it.isNotEmpty() }?.let { up ->
             full { Section("Ждёте", 8.dp) }
-            up.forEach { u -> full { UpcomingCard(app, u, showArtist = true, Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) } }
+            up.forEach { u ->
+                full {
+                    UpcomingCard(
+                        app, u, showArtist = true, Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                        onClick = u.artistId?.let { id -> { nav.artist(id, u.artists) } },
+                    )
+                }
+            }
         }
         full { Section("Новые релизы", 8.dp) }
         when (page) {
@@ -1538,7 +1580,13 @@ private fun ShortcutCard(icon: ImageVector, title: String, hint: String, accent:
 @Composable
 fun PlaylistsGrid(app: YaApp, nav: Nav) {
     val (own, personal) = app.playlists.collectAsStateWithLifecycle().value
-    if (own.isEmpty() && personal.isEmpty()) {
+    val pages by app.pages.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { if (app.albumsId == null) app.albumsId = app.core.likedAlbums() }
+    // Пока альбомы перечитываются (потянули вниз или лайкнули новый) — на экране прежние.
+    var lastAlbums by remember { mutableStateOf<List<AlbumItem>>(emptyList()) }
+    (app.albumsId?.let { pages[it] } as? Page.Albums)?.let { lastAlbums = it.albums }
+    val albums = lastAlbums
+    if (own.isEmpty() && personal.isEmpty() && albums.isEmpty()) {
         Empty("Плейлисты, которые вы создадите или сохраните в Яндекс Музыке, появятся здесь")
         return
     }
@@ -1555,6 +1603,12 @@ fun PlaylistsGrid(app: YaApp, nav: Nav) {
             full { Section("Настроили для вас", 8.dp) }
             items(personal, key = { "p" + it.uid + ":" + it.kind }) { pl ->
                 Box(Modifier.animateItem()) { PlaylistCard(app, pl, null) { nav.playlist(pl) } }
+            }
+        }
+        if (albums.isNotEmpty()) {
+            full { Section("Альбомы", 8.dp) }
+            items(albums, key = { "a" + it.id }) { a ->
+                Box(Modifier.animateItem()) { AlbumCard(app, a, null) { nav.album(a.id, a.title) } }
             }
         }
     }

@@ -77,6 +77,9 @@ class YaApp : Application(), CoreListener {
     var refreshing by androidx.compose.runtime.mutableStateOf(false)
         private set
 
+    /** Альбомы в коллекции (вкладка «Плейлисты»). */
+    var albumsId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
+
     /** Страница любимых исполнителей (вкладка «Коллекция»). */
     var artistsId by androidx.compose.runtime.mutableStateOf<ULong?>(null)
 
@@ -89,18 +92,24 @@ class YaApp : Application(), CoreListener {
         refreshing = true
         core.refresh()
         val (oldReleases, oldArtists) = releasesId to artistsId
+        val oldAlbums = albumsId
         if (oldReleases != null) releasesId = core.releases()
         if (oldArtists != null) artistsId = core.likedArtists()
+        if (oldAlbums != null) albumsId = core.likedAlbums()
         scope.launch {
             // Индикатор держится, пока не пришли новые страницы (но не меньше 0,6 с и не больше 6 с).
             val t0 = System.currentTimeMillis()
             kotlinx.coroutines.withTimeoutOrNull(6000) {
-                pages.first { p -> (releasesId == oldReleases || releasesId in p) && (artistsId == oldArtists || artistsId in p) }
+                pages.first { p ->
+                    (releasesId == oldReleases || releasesId in p) && (artistsId == oldArtists || artistsId in p) &&
+                        (albumsId == oldAlbums || albumsId in p)
+                }
             }
             kotlinx.coroutines.delay((600 - (System.currentTimeMillis() - t0)).coerceAtLeast(0))
             // Прежние страницы закрываем, когда новые уже на экране: список не мигает пустым.
             if (oldReleases != null && oldReleases != releasesId) closePage(oldReleases)
             if (oldArtists != null && oldArtists != artistsId) closePage(oldArtists)
+            if (oldAlbums != null && oldAlbums != albumsId) closePage(oldAlbums)
             refreshing = false
         }
     }
@@ -380,6 +389,12 @@ class YaApp : Application(), CoreListener {
 
     override fun onPage(id: ULong, page: Page) {
         pages.update { it + (id to page) }
+        // Пресейвы — в будильники уведомлений о выходе.
+        when (page) {
+            is Page.Albums -> if (id == releasesId) ReleaseAlarms.sync(this, page.upcoming)
+            is Page.Artist -> page.upcoming?.let { ReleaseAlarms.set(this, it, it.presaved) }
+            else -> {}
+        }
     }
 
     override fun onPlaylists(own: List<PlaylistItem>, personal: List<PlaylistItem>) {

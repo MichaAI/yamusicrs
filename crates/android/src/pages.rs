@@ -51,6 +51,8 @@ pub struct UpcomingItem {
     pub id: String,
     pub title: String,
     pub artists: String,
+    /// Первый исполнитель — куда ведёт нажатие на карточку.
+    pub artist_id: Option<String>,
     /// «Сингл», «Альбом»…
     pub kind: String,
     /// «Через 3 дня, 20 ноября».
@@ -58,6 +60,8 @@ pub struct UpcomingItem {
     pub cover: Option<String>,
     pub presaved: bool,
     pub explicit: bool,
+    /// Момент выхода (мс от эпохи) — для уведомления в день выхода.
+    pub release_ms: Option<i64>,
 }
 
 impl From<&api::Upcoming> for UpcomingItem {
@@ -66,11 +70,13 @@ impl From<&api::Upcoming> for UpcomingItem {
             id: u.id.clone(),
             title: u.title.clone(),
             artists: u.artist_names(),
+            artist_id: u.artists.iter().map(|a| a.id.clone()).find(|id| !id.is_empty()),
             kind: u.kind_label().into(),
             due: u.when_label().unwrap_or_default(),
             cover: u.cover_uri.as_deref().map(|c| api::cover_url(c, 400)),
             presaved: u.presaved,
             explicit: u.content_warning.as_deref() == Some("explicit"),
+            release_ms: u.release_ms(),
         }
     }
 }
@@ -208,6 +214,8 @@ pub enum Req {
     Downloaded,
     /// Любимые исполнители.
     LikedArtists,
+    /// Альбомы в коллекции.
+    LikedAlbums,
     /// «Вы недавно слушали».
     History,
 }
@@ -528,6 +536,7 @@ async fn fetch(c: Client, req: Req) -> Result<Loaded, String> {
                 seed: None,
             })
         }
+        Req::LikedAlbums => Ok(Loaded::Albums("Альбомы".into(), c.liked_albums().await.map_err(err_str)?, Vec::new())),
         Req::LikedArtists => Ok(Loaded::Artists("Исполнители".into(), c.liked_artists().await.map_err(err_str)?)),
         Req::Releases => {
             // Пресейвы — дополнение: их ошибка новинки не роняет.

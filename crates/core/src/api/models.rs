@@ -506,6 +506,11 @@ impl Upcoming {
         }
     }
 
+    /// Момент выхода, мс от эпохи.
+    pub fn release_ms(&self) -> Option<i64> {
+        Some(chrono::DateTime::parse_from_rfc3339(self.release_date.as_deref()?).ok()?.timestamp_millis())
+    }
+
     /// День выхода в местном времени.
     fn day(&self) -> Option<chrono::NaiveDate> {
         let d = chrono::DateTime::parse_from_rfc3339(self.release_date.as_deref()?).ok()?;

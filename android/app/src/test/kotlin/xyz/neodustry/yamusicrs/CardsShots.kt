@@ -22,12 +22,13 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import uniffi.yamusic_android.AlbumItem
+import uniffi.yamusic_android.PlaylistItem
 import uniffi.yamusic_android.UpcomingItem
 
 /** Карточки альбомов (подпись всегда в две строки) и анонс будущего релиза с пресейвом. */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [35], application = android.app.Application::class, qualifiers = "w411dp-h891dp-xxhdpi")
+@Config(sdk = [35], application = android.app.Application::class, qualifiers = "w411dp-h1200dp-xxhdpi")
 class CardsShots {
     @get:Rule val rule = createComposeRule()
 
@@ -35,13 +36,13 @@ class CardsShots {
         AlbumItem(id, title, "nyan.mp3", 2026, null, kind, null, null, 1u, false)
 
     private fun upcoming(id: String, title: String, kind: String, on: Boolean) =
-        UpcomingItem(id, title, "nyan.mp3", kind, "Через 4 дня, 20 ноября", null, on, true)
+        UpcomingItem(id, title, "nyan.mp3", null, kind, "Через 4 дня, 20 ноября", null, on, true, null)
 
     @Test
     fun cards() {
         val app = Mockito.mock(YaApp::class.java)
         rule.setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            MaterialTheme(colorScheme = darkColorScheme()) { androidx.compose.material3.Surface {
                 CompositionLocalProvider(LocalNav provides Nav(app)) {
                     Column(
                         Modifier.fillMaxWidth().wrapContentHeight().background(MaterialTheme.colorScheme.background).padding(vertical = 16.dp),
@@ -50,6 +51,11 @@ class CardsShots {
                         Section("Скоро выйдет", 20.dp)
                         UpcomingCard(app, upcoming("1", "если я буду в средневековье у меня будет огромный меч", "Сингл", false), showArtist = false, Modifier.padding(horizontal = 20.dp))
                         UpcomingCard(app, upcoming("2", "Я буду драться", "Сингл", true), showArtist = true, Modifier.padding(horizontal = 20.dp))
+                        Section("Настроили для вас", 20.dp)
+                        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            PlaylistCard(app, PlaylistItem("u", "1", "Премьера", "", 0u, null, null, false), 110.dp) {}
+                            PlaylistCard(app, PlaylistItem("u", "2", "Плейлист с Алисой", "", 0u, null, null, false), 110.dp) {}
+                        }
                         Section("Дискография", 20.dp)
                         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             AlbumCard(app, album("a", "Коротко", "Сингл"), 110.dp) {}
@@ -57,7 +63,7 @@ class CardsShots {
                         }
                     }
                 }
-            }
+            } }
         }
         rule.onRoot().shot("cards")
     }

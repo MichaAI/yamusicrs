@@ -762,6 +762,11 @@ impl Core {
         self.open(Req::History)
     }
 
+    /// Альбомы в коллекции (страница `Page::Albums`).
+    pub fn liked_albums(&self) -> u64 {
+        self.open(Req::LikedAlbums)
+    }
+
     /// Любимые исполнители (страница `Page::Artists`).
     pub fn liked_artists(&self) -> u64 {
         self.open(Req::LikedArtists)
